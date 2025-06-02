@@ -10,8 +10,6 @@ extern "C" {
 #include "esp_system.h"
 }
 
-static const char* TAG = "MAIN";
-
 extern "C" void app_main();
 
 #endif //BT_SPEAKER_MAIN_H

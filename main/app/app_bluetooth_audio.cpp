@@ -52,6 +52,7 @@ public:
         bluetooth_service_start(&bt_cfg);
         ESP_LOGI(TAG, "Bluetooth A2DP Sink started, device name: %s", bt_cfg.device_name);
 
+
         // I2S Stream Writer
         i2s_stream_cfg_t i2s_cfg = {
             .type = AUDIO_STREAM_WRITER,

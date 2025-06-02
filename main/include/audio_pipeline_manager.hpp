@@ -7,13 +7,14 @@ extern "C" {
 #include "esp_err.h"
 #include "audio_element.h"
 #include "audio_event_iface.h"
+#include "board.h"  // Use centralized pin definitions
 }
 
 namespace btspeaker {
 
-constexpr int I2S_BCK_IO = 25;
-constexpr int I2S_WS_IO  = 22;
-constexpr int I2S_DO_IO  = 26;
+// - I2S_BCK_IO (25): Bit Clock → PCM5102A BCK
+// - I2S_WS_IO (22):  Word Select → PCM5102A LCK  
+// - I2S_DO_IO (26):  Data Out → PCM5102A DIN
 
 class AudioPipelineManager {
 public:

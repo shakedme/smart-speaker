@@ -1,11 +1,12 @@
 #pragma once
 
-// I2S pin mapping for ESP32-DevKitC-32E
+// I2S pin mapping for ESP32-DevKitC-32E → PCM5102A DAC → TPA3116D2 Amplifier
+// Audio chain: ESP32 I2S → PCM5102A (Digital to Analog) → 3.5mm → TPA3116D2 → Speakers
 #define I2S_NUM         (0)
-#define I2S_BCK_IO      (25) // GPIO25: Bit Clock
-#define I2S_WS_IO       (22) // GPIO22: Word Select (LCK)
-#define I2S_DO_IO       (26) // GPIO26: Data Out (DIN)
-#define I2S_DI_IO       (-1) // Not used
+#define I2S_BCK_IO      (25) // GPIO25 → PCM5102A BCK (Bit Clock)
+#define I2S_WS_IO       (22) // GPIO22 → PCM5102A LCK (Word Select / L-R Clock)  
+#define I2S_DO_IO       (26) // GPIO26 → PCM5102A DIN (Data Input)
+#define I2S_DI_IO       (-1) // Not used (DAC output only, no audio input)
 
 // SD card pin definitions (set to -1 if not used)
 #define ESP_SD_PIN_CMD   (-1)

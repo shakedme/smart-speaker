@@ -3,6 +3,8 @@
 #include "bluetooth_initializer.hpp"
 #include "avrcp_handler.hpp"
 #include "audio_pipeline_manager.hpp"
+#include "voice_assistant_manager.hpp"
+#include "wifi_manager.hpp"
 #include <memory>
 #include <atomic>
 
@@ -26,7 +28,6 @@ public:
     BluetoothAudioApp();
     ~BluetoothAudioApp();
     
-    // Delete copy operations to prevent multiple instances
     BluetoothAudioApp(const BluetoothAudioApp&) = delete;
     BluetoothAudioApp& operator=(const BluetoothAudioApp&) = delete;
 
@@ -39,16 +40,17 @@ public:
 private:
     static constexpr const char* TAG = "BT_AUDIO_APP";
     
-    // Simple atomic state - no mutex needed
-    std::atomic<State> state_;
+    // Music playback command callback for voice assistant
+    void music_playback_cmd_callback(const char* command);
     
-    // Simple static instance - no mutex needed for single-threaded use
+    std::atomic<State> state_;
     static BluetoothAudioApp* instance_;
     
-    // Component managers (using composition)
+    std::unique_ptr<WiFiManager> wifi_manager_;
     std::unique_ptr<BluetoothInitializer> initializer_;
     std::unique_ptr<AvrcpHandler> avrcp_handler_;
     std::unique_ptr<AudioPipelineManager> pipeline_manager_;
+    std::unique_ptr<VoiceAssistantManager> voice_assistant_;
 };
 
 } // namespace btspeaker 

@@ -1,4 +1,10 @@
 dependencies:
+  esp-sr:
+    dependencies: []
+    source:
+      path: /Users/shakedmelman/Projects/esp-adf/components/esp-sr
+      type: local
+    version: 2.1.1
   espressif/esp-dsp:
     component_hash: 619639efc18cfa361a9e423739b9b0ffc14991effc6c027f955c2f2c3bf1754b
     dependencies:
@@ -55,11 +61,12 @@ dependencies:
     version: 5.4.0
 direct_dependencies:
 - espressif/esp-dsp
+- espressif/esp-sr
 - espressif/esp_websocket_client
 - espressif/jsmn
 - espressif/nghttp
 - espressif/zlib
 - idf
-manifest_hash: 6cf02a0ab10c28bd0acc04ba0c1d2761fbc065906fb2e831a7a321735c7936f9
+manifest_hash: c2e66218259c84f3e9c2e97e8eb6ba748020b7c07bad42073f0d24edf4f1f190
 target: esp32
 version: 2.0.0

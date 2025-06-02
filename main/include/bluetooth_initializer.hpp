@@ -21,11 +21,16 @@ public:
     BluetoothInitializer(BluetoothInitializer&& other) noexcept;
     BluetoothInitializer& operator=(BluetoothInitializer&& other) noexcept;
     
+    // Main initialization/shutdown methods
+    esp_err_t init();
+    void shutdown();
+    
     esp_err_t init_nvs();
     esp_err_t init_avrcp(esp_avrc_tg_cb_t callback);
 
 private:
     bool avrcp_initialized_;
+    bool nvs_initialized_;
 };
 
 } // namespace btspeaker 

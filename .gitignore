@@ -1,3 +1,33 @@
+# Build directories and artifacts
+cmake-build-*/
+build/
+dist/
+*.bin
+*.elf
+*.map
+
+# ESP-IDF specific
+sdkconfig.old
+dependencies.lock
+*.pyc
+__pycache__/
+
+# Build optimization
+precompiled_libs/
+.ccache/
+
+# IDE files
+.vscode/
+.clangd/
+compile_commands.json
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+monitor_output.txt
+
 build
 cmake-build-debug*
 .idea

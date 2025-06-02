@@ -1,6 +1,7 @@
 #include <memory>
 #include <stdexcept>
 #include <iostream>
+#include <cstring>
 
 extern "C" {
 #include "esp_log.h"
@@ -12,9 +13,12 @@ extern "C" {
 #include "audio_event_iface.h"
 #include "i2s_stream.h"
 #include "bluetooth_service.h"
+#include "esp_avrc_api.h"
+#include "esp_bt.h"
 }
 
 namespace btspeaker {
+
 
 constexpr int I2S_BCK_IO = 25;
 constexpr int I2S_WS_IO  = 22;
@@ -34,7 +38,12 @@ public:
         }
         ESP_ERROR_CHECK(ret);
         esp_log_level_set(TAG, ESP_LOG_INFO);
-        ESP_LOGI(TAG, "BluetoothAudioApp initialized");
+        
+        // Initialize AVRCP Target for remote control
+        ESP_ERROR_CHECK(esp_avrc_tg_register_callback(avrcp_tg_callback));
+        ESP_ERROR_CHECK(esp_avrc_tg_init());
+        
+        ESP_LOGI(TAG, "BluetoothAudioApp initialized with AVRCP support");
     }
 
     void run() {
@@ -52,6 +61,8 @@ public:
         bluetooth_service_start(&bt_cfg);
         ESP_LOGI(TAG, "Bluetooth A2DP Sink started, device name: %s", bt_cfg.device_name);
 
+        // Configure AVRCP supported commands
+        configure_avrcp_target();
 
         // I2S Stream Writer
         i2s_stream_cfg_t i2s_cfg = {
@@ -138,6 +149,10 @@ public:
 
     void cleanup() {
         ESP_LOGI(TAG, "Cleaning up BluetoothAudioApp");
+        
+        // Cleanup AVRCP
+        esp_avrc_tg_deinit();
+        
         if (pipeline) {
             audio_pipeline_terminate(pipeline);
             if (i2s_stream_writer) audio_pipeline_unregister(pipeline, i2s_stream_writer);
@@ -167,6 +182,160 @@ private:
     audio_element_handle_t i2s_stream_writer = nullptr;
     audio_element_handle_t bt_stream_reader = nullptr;
     audio_event_iface_handle_t evt = nullptr;
+    static esp_avrc_playback_stat_t current_playback_state;
+    static BluetoothAudioApp* instance;
+
+    // Static AVRCP Target callback
+    static void avrcp_tg_callback(esp_avrc_tg_cb_event_t event, esp_avrc_tg_cb_param_t *param) {
+        if (!instance) return;
+        
+        switch (event) {
+            case ESP_AVRC_TG_CONNECTION_STATE_EVT:
+                if (param->conn_stat.connected) {
+                    ESP_LOGI(TAG, "AVRCP Target connected");
+                } else {
+                    ESP_LOGI(TAG, "AVRCP Target disconnected");
+                }
+                break;
+                
+            case ESP_AVRC_TG_PASSTHROUGH_CMD_EVT:
+                instance->handle_avrcp_passthrough(param->psth_cmd.key_code, param->psth_cmd.key_state);
+                break;
+                
+            case ESP_AVRC_TG_SET_ABSOLUTE_VOLUME_CMD_EVT:
+                ESP_LOGI(TAG, "AVRCP volume command: %d", param->set_abs_vol.volume);
+                // Volume control can be implemented here if needed
+                break;
+                
+            case ESP_AVRC_TG_REGISTER_NOTIFICATION_EVT:
+                instance->handle_avrcp_notification_registration(param->reg_ntf.event_id);
+                break;
+                
+            default:
+                ESP_LOGD(TAG, "AVRCP TG event: %d", event);
+                break;
+        }
+    }
+
+    void configure_avrcp_target() {
+        // Set static instance pointer for callback access
+        instance = this;
+        
+        // Configure supported passthrough commands
+        esp_avrc_psth_bit_mask_t cmd_set;
+        memset(&cmd_set, 0, sizeof(cmd_set));
+        
+        // Enable support for essential playback controls
+        esp_avrc_psth_bit_mask_operation(ESP_AVRC_BIT_MASK_OP_SET, &cmd_set, ESP_AVRC_PT_CMD_PLAY);
+        esp_avrc_psth_bit_mask_operation(ESP_AVRC_BIT_MASK_OP_SET, &cmd_set, ESP_AVRC_PT_CMD_PAUSE);
+        esp_avrc_psth_bit_mask_operation(ESP_AVRC_BIT_MASK_OP_SET, &cmd_set, ESP_AVRC_PT_CMD_STOP);
+        esp_avrc_psth_bit_mask_operation(ESP_AVRC_BIT_MASK_OP_SET, &cmd_set, ESP_AVRC_PT_CMD_FORWARD);
+        esp_avrc_psth_bit_mask_operation(ESP_AVRC_BIT_MASK_OP_SET, &cmd_set, ESP_AVRC_PT_CMD_BACKWARD);
+        esp_avrc_psth_bit_mask_operation(ESP_AVRC_BIT_MASK_OP_SET, &cmd_set, ESP_AVRC_PT_CMD_FAST_FORWARD);
+        esp_avrc_psth_bit_mask_operation(ESP_AVRC_BIT_MASK_OP_SET, &cmd_set, ESP_AVRC_PT_CMD_REWIND);
+        
+        esp_avrc_tg_set_psth_cmd_filter(ESP_AVRC_PSTH_FILTER_SUPPORTED_CMD, &cmd_set);
+        
+        // Configure notification capabilities
+        esp_avrc_rn_evt_cap_mask_t evt_set;
+        memset(&evt_set, 0, sizeof(evt_set));
+        esp_avrc_rn_evt_bit_mask_operation(ESP_AVRC_BIT_MASK_OP_SET, &evt_set, ESP_AVRC_RN_PLAY_STATUS_CHANGE);
+        esp_avrc_tg_set_rn_evt_cap(&evt_set);
+        
+        current_playback_state = ESP_AVRC_PLAYBACK_STOPPED;
+        ESP_LOGI(TAG, "AVRCP Target configured with playback controls");
+    }
+
+    void handle_avrcp_passthrough(uint8_t key_code, uint8_t key_state) {
+        if (key_state != ESP_AVRC_PT_CMD_STATE_PRESSED) {
+            return; // Only handle key press events
+        }
+        
+        ESP_LOGI(TAG, "AVRCP passthrough command: %s", get_passthrough_cmd_name(key_code));
+        
+        switch (key_code) {
+            case ESP_AVRC_PT_CMD_PLAY:
+                audio_pipeline_resume(pipeline);
+                set_playback_state(ESP_AVRC_PLAYBACK_PLAYING);
+                break;
+                
+            case ESP_AVRC_PT_CMD_PAUSE:
+                audio_pipeline_pause(pipeline);
+                set_playback_state(ESP_AVRC_PLAYBACK_PAUSED);
+                break;
+                
+            case ESP_AVRC_PT_CMD_STOP:
+                audio_pipeline_stop(pipeline);
+                set_playback_state(ESP_AVRC_PLAYBACK_STOPPED);
+                break;
+                
+            case ESP_AVRC_PT_CMD_FORWARD:
+            case ESP_AVRC_PT_CMD_BACKWARD:
+                ESP_LOGI(TAG, "Track navigation not implemented for this media source");
+                break;
+                
+            case ESP_AVRC_PT_CMD_FAST_FORWARD:
+            case ESP_AVRC_PT_CMD_REWIND:
+                ESP_LOGI(TAG, "Seek operations not implemented for this media source");
+                break;
+                
+            default:
+                ESP_LOGW(TAG, "Unhandled AVRCP command: 0x%02x", key_code);
+                break;
+        }
+    }
+
+    void handle_avrcp_notification_registration(uint8_t event_id) {
+        ESP_LOGI(TAG, "AVRCP notification registration for event: %d", event_id);
+        
+        if (event_id == ESP_AVRC_RN_PLAY_STATUS_CHANGE) {
+            // Send current playback status
+            esp_avrc_rn_param_t rn_param;
+            rn_param.playback = current_playback_state;
+            esp_avrc_tg_send_rn_rsp(ESP_AVRC_RN_PLAY_STATUS_CHANGE, ESP_AVRC_RN_RSP_INTERIM, &rn_param);
+        }
+    }
+
+    void set_playback_state(esp_avrc_playback_stat_t new_state) {
+        if (current_playback_state != new_state) {
+            current_playback_state = new_state;
+            
+            // Notify AVRCP controller about state change
+            esp_avrc_rn_param_t rn_param;
+            rn_param.playback = current_playback_state;
+            esp_avrc_tg_send_rn_rsp(ESP_AVRC_RN_PLAY_STATUS_CHANGE, ESP_AVRC_RN_RSP_CHANGED, &rn_param);
+            
+            ESP_LOGI(TAG, "Playback state changed to: %s", get_playback_state_name(current_playback_state));
+        }
+    }
+
+    static const char* get_passthrough_cmd_name(uint8_t cmd) {
+        switch (cmd) {
+            case ESP_AVRC_PT_CMD_PLAY: return "PLAY";
+            case ESP_AVRC_PT_CMD_PAUSE: return "PAUSE";
+            case ESP_AVRC_PT_CMD_STOP: return "STOP";
+            case ESP_AVRC_PT_CMD_FORWARD: return "FORWARD";
+            case ESP_AVRC_PT_CMD_BACKWARD: return "BACKWARD";
+            case ESP_AVRC_PT_CMD_FAST_FORWARD: return "FAST_FORWARD";
+            case ESP_AVRC_PT_CMD_REWIND: return "REWIND";
+            default: return "UNKNOWN";
+        }
+    }
+
+    static const char* get_playback_state_name(esp_avrc_playback_stat_t state) {
+        switch (state) {
+            case ESP_AVRC_PLAYBACK_STOPPED: return "STOPPED";
+            case ESP_AVRC_PLAYBACK_PLAYING: return "PLAYING";
+            case ESP_AVRC_PLAYBACK_PAUSED: return "PAUSED";
+            case ESP_AVRC_PLAYBACK_FWD_SEEK: return "FORWARD_SEEK";
+            case ESP_AVRC_PLAYBACK_REV_SEEK: return "REVERSE_SEEK";
+            case ESP_AVRC_PLAYBACK_ERROR: return "ERROR";
+            default: return "UNKNOWN";
+        }
+    }
 };
 
-} // namespace btspeaker
+// Static member definitions
+esp_avrc_playback_stat_t BluetoothAudioApp::current_playback_state = ESP_AVRC_PLAYBACK_STOPPED;
+BluetoothAudioApp* BluetoothAudioApp::instance = nullptr;
+

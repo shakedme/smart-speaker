@@ -3,11 +3,15 @@
 //
 
 #include "main.hpp"
-#include "app/app_bluetooth_audio.cpp"
-
+#include "src/bluetooth_audio_c_api.cpp"
 
 extern "C" void app_main() {
-    static btspeaker::BluetoothAudioApp app;
-    app.init();
-    app.run();
+    // Initialize the Bluetooth Audio Application
+    app_bluetooth_audio_init();
+    
+    // Run the main application (this will block)
+    app_bluetooth_audio_run();
+    
+    // Clean shutdown (this line may never be reached in normal operation)
+    app_bluetooth_audio_shutdown();
 } 

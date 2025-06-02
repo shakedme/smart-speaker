@@ -1,8 +1,14 @@
 idf_component_register(
         SRCS
-        # Main application
+
         main.cpp
-        app/app_bluetooth_audio.cpp
+
+        src/esp_handle.cpp
+        src/avrcp_handler.cpp
+        src/audio_pipeline_manager.cpp
+        src/bluetooth_initializer.cpp
+        src/bluetooth_audio.cpp
+        src/bluetooth_audio_c_api.cpp
 
         INCLUDE_DIRS
         # Make headers available to other components
@@ -22,9 +28,6 @@ idf_component_register(
         "audio_pipeline"  # Audio pipeline management
         "audio_stream"    # I2S stream functionality  
         "bluetooth_service" # Bluetooth A2DP service
-
-        # Testing framework
-        "unity"           # Unit testing framework
 
         # Optional components (uncomment as needed when implementing features)
         # "esp_timer"       # High-resolution timers

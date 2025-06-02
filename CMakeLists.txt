@@ -9,7 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)        # Enable compile_commands.json for IDEs
 
 # ESP32 optimized C++ flags (only for C++ files)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions -fno-rtti -Wno-error=unused-function")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti -Wno-error=unused-function")
 
 # Strategic ESP-ADF component inclusion
 # Include all ESP-ADF components due to complex interdependencies

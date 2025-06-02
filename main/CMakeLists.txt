@@ -2,36 +2,10 @@ idf_component_register(
         SRCS
         # Main application
         main.cpp
-        app/smart_speaker.cpp
-
-        # Audio processing
-        audio/audio_mixer.cpp
-        audio/i2s_driver.cpp
-
-        # Bluetooth
-        bluetooth/bt_sink.cpp
-
-        # Network modules
-        network/llm_client.cpp
-        network/spotify_client.cpp
-        network/wifi_manager.cpp
-
-        # Voice processing
-        voice/speech_client.cpp
-        voice/voice_detector.cpp
-
-        # Shared
-        shared/event_bus.cpp
 
         INCLUDE_DIRS
         # Make headers available to other components
         "."
-        "app"
-        "audio"
-        "bluetooth"
-        "network"
-        "shared"
-        "voice"
 
         REQUIRES
         # Core ESP-IDF components
@@ -46,6 +20,7 @@ idf_component_register(
         "newlib"          # C++ standard library support
         "pthread"         # POSIX threads (for C++ threading)
         "spi_flash"       # Flash memory access
+        "json"
 
         # Bluetooth components (all profiles included in 'bt')
         "bt"              # Complete Bluetooth stack with A2DP, AVRCP, etc.

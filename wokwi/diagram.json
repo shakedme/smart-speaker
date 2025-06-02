@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "author": "ESP32 Bluetooth Speaker Project",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "wokwi-esp32-devkit-v1",
+      "id": "esp",
+      "top": 0,
+      "left": 0,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led1",
+      "top": 20,
+      "left": 300,
+      "attrs": { "color": "blue" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led2", 
+      "top": 60,
+      "left": 300,
+      "attrs": { "color": "green" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led3",
+      "top": 100,
+      "left": 300,
+      "attrs": { "color": "red" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r1",
+      "top": 30,
+      "left": 250,
+      "attrs": { "value": "220" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r2",
+      "top": 70,
+      "left": 250,
+      "attrs": { "value": "220" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r3",
+      "top": 110,
+      "left": 250,
+      "attrs": { "value": "220" }
+    }
+  ],
+  "connections": [
+    [ "esp:TX0", "led1:C", "blue", [ "h0" ] ],
+    [ "led1:A", "r1:1", "blue", [ "h0" ] ],
+    [ "r1:2", "esp:3V3", "red", [ "h0" ] ],
+    
+    [ "esp:D22", "led2:C", "green", [ "h0" ] ],
+    [ "led2:A", "r2:1", "green", [ "h0" ] ],
+    [ "r2:2", "esp:3V3", "red", [ "h0" ] ],
+    
+    [ "esp:D25", "led3:C", "red", [ "h0" ] ],
+    [ "led3:A", "r3:1", "red", [ "h0" ] ],
+    [ "r3:2", "esp:3V3", "red", [ "h0" ] ]
+  ]
+} 

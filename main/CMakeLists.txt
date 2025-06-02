@@ -23,6 +23,9 @@ idf_component_register(
         "audio_stream"    # I2S stream functionality  
         "bluetooth_service" # Bluetooth A2DP service
 
+        # Testing framework
+        "unity"           # Unit testing framework
+
         # Optional components (uncomment as needed when implementing features)
         # "esp_timer"       # High-resolution timers
         # "esp_common"      # Common ESP-IDF utilities

@@ -339,3 +339,20 @@ private:
 esp_avrc_playback_stat_t BluetoothAudioApp::current_playback_state = ESP_AVRC_PLAYBACK_STOPPED;
 BluetoothAudioApp* BluetoothAudioApp::instance = nullptr;
 
+} // namespace btspeaker
+
+// C interface functions for global access
+extern "C" {
+
+void app_bluetooth_audio_init() {
+    static btspeaker::BluetoothAudioApp app;
+    app.init();
+}
+
+void app_bluetooth_audio_run() {
+    static btspeaker::BluetoothAudioApp app;
+    app.run();
+}
+
+}
+

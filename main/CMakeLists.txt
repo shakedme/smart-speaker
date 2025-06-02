@@ -2,6 +2,7 @@ idf_component_register(
         SRCS
         # Main application
         main.cpp
+        app/app_bluetooth_audio.cpp
 
         INCLUDE_DIRS
         # Make headers available to other components
@@ -21,6 +22,7 @@ idf_component_register(
         "pthread"         # POSIX threads (for C++ threading)
         "spi_flash"       # Flash memory access
         "json"
+        "audio_board"
 
         # Bluetooth components (all profiles included in 'bt')
         "bt"              # Complete Bluetooth stack with A2DP, AVRCP, etc.
@@ -31,6 +33,12 @@ idf_component_register(
         "esp_event"       # Event handling
         "esp_http_client" # HTTP client for APIs
         "lwip"            # TCP/IP stack
+
+        # ESP-ADF components
+        "audio_pipeline"
+        "audio_stream"
+        "bluetooth_service"
+        "esp_peripherals"
 
         # Optional components (uncomment as needed)
         # "esp_https_ota"   # OTA updates

@@ -3,7 +3,7 @@ idf_component_register(
 
         main.cpp
 
-        src/esp_handle.cpp
+        src/esp_raii_wrapper.cpp
         src/avrcp_handler.cpp
         src/audio_pipeline_manager.cpp
         src/bluetooth_initializer.cpp

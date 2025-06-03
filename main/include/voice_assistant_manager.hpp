@@ -1,6 +1,6 @@
 #pragma once
 
-#include "esp_handle.hpp"
+#include "esp_raii_wrapper.hpp"
 #include "audio_pipeline_manager.hpp"
 #include <memory>
 #include <atomic>

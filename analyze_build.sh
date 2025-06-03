@@ -14,6 +14,18 @@ fi
 echo "✅ ESP-IDF found at: $IDF_PATH"
 echo
 
+# Check if idf.py is available
+if ! command -v idf.py &> /dev/null; then
+    echo "idf.py not executable. Sourcing ESP-IDF environment..."
+    source "$IDF_PATH/export.sh"
+    if ! command -v idf.py &> /dev/null; then
+        echo "❌ idf.py still not found. Please check your ESP-IDF installation."
+        exit 1
+    else
+        echo "✅ idf.py is now available."
+    fi
+fi
+
 # Build main project
 echo "🔨 Building main project..."
 if idf.py build > /dev/null 2>&1; then

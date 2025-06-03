@@ -15,7 +15,7 @@ extern "C" {
 
 namespace btspeaker {
 
-class BluetoothAudioApp {
+class AppManager {
 public:
     enum class State {
         UNINITIALIZED,
@@ -25,11 +25,11 @@ public:
         ERROR
     };
 
-    BluetoothAudioApp();
-    ~BluetoothAudioApp();
+    AppManager();
+    ~AppManager();
     
-    BluetoothAudioApp(const BluetoothAudioApp&) = delete;
-    BluetoothAudioApp& operator=(const BluetoothAudioApp&) = delete;
+    AppManager(const AppManager&) = delete;
+    AppManager& operator=(const AppManager&) = delete;
 
     esp_err_t init();
     esp_err_t run();
@@ -44,7 +44,7 @@ private:
     void music_playback_cmd_callback(const char* command);
     
     std::atomic<State> state_;
-    static BluetoothAudioApp* instance_;
+    static AppManager* instance_;
     
     std::unique_ptr<WiFiManager> wifi_manager_;
     std::unique_ptr<BluetoothInitializer> initializer_;

@@ -33,11 +33,11 @@
 
 // WiFi Configuration (required for Gemini API)
 #ifndef CONFIG_WIFI_SSID
-#define CONFIG_WIFI_SSID "your_wifi_ssid"
+#define CONFIG_WIFI_SSID "Shaked"
 #endif
 
 #ifndef CONFIG_WIFI_PASSWORD  
-#define CONFIG_WIFI_PASSWORD "your_wifi_password"
+#define CONFIG_WIFI_PASSWORD "0543512375"
 #endif
 
 // Hardware Pin Configuration (from hardware spec)

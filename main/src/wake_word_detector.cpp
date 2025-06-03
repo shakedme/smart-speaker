@@ -49,7 +49,7 @@ void WakeWordDetector::shutdown() {
     cleanup_esp_sr();
 }
 
-bool WakeWordDetector::process_audio(const int16_t* audio_data, size_t sample_count) {
+bool WakeWordDetector::is_wake_word_in_audio(const int16_t* audio_data, size_t sample_count) {
     if (!enabled_ || !audio_data || sample_count == 0) {
         return false;
     }

@@ -206,7 +206,7 @@ void VoiceAssistantManager::on_audio_data(const uint8_t* data, size_t length) {
                 const int16_t* samples = reinterpret_cast<const int16_t*>(data);
                 size_t sample_count = length / sizeof(int16_t);
                 
-                bool wake_word_detected = wake_word_detector_->process_audio(samples, sample_count);
+                bool wake_word_detected = wake_word_detector_->is_wake_word_in_audio(samples, sample_count);
                 if (wake_word_detected) {
                     ESP_LOGI(TAG, "Wake word detected via audio processing!");
                     on_wake_word_detected();

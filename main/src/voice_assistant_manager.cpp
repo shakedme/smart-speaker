@@ -2,7 +2,7 @@
 #include "../include/microphone_manager.hpp"
 #include "../include/wake_word_detector.hpp"
 #include "../include/voice_command_processor.hpp"
-#include "../include/gemini_api_client.hpp"
+#include "../include/websocket_voice_client.hpp"
 #include "../include/audio_response_player.hpp"
 #include "../include/voice_config.hpp"
 
@@ -39,14 +39,27 @@ esp_err_t VoiceAssistantManager::init(AudioPipelineManager* main_pipeline_manage
         return ESP_ERR_NO_MEM;
     }
     
-    // Initialize Gemini API client
-    GeminiApiClient::Config gemini_config;
-    gemini_config.api_key = CONFIG_GEMINI_API_KEY;
-    gemini_client_ = std::make_unique<GeminiApiClient>(gemini_config);
-    esp_err_t ret = gemini_client_->init();
+    // Initialize WebSocket voice client
+    WebSocketVoiceClient::Config websocket_config;
+    websocket_config.server_url = CONFIG_WEBSOCKET_SERVER_URL;
+    websocket_config.keepalive_interval_s = CONFIG_WS_KEEPALIVE_INTERVAL_S;
+    websocket_config.ping_interval_s = CONFIG_WS_PING_INTERVAL_S;
+    websocket_config.chunk_size = CONFIG_WS_CHUNK_SIZE;
+    websocket_config.reconnect_timeout_ms = CONFIG_WS_RECONNECT_TIMEOUT_MS;
+    websocket_config.max_reconnect_attempts = CONFIG_WS_MAX_RECONNECT_ATTEMPTS;
+    
+    websocket_client_ = std::make_unique<WebSocketVoiceClient>(websocket_config);
+    esp_err_t ret = websocket_client_->init();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize Gemini client: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to initialize WebSocket client: %s", esp_err_to_name(ret));
         return ret;
+    }
+    
+    // Attempt to connect to WebSocket server
+    ret = websocket_client_->connect();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to connect to WebSocket server: %s", esp_err_to_name(ret));
+        ESP_LOGW(TAG, "Will operate in offline mode until connection is established");
     }
     
     // Initialize audio response player
@@ -59,7 +72,7 @@ esp_err_t VoiceAssistantManager::init(AudioPipelineManager* main_pipeline_manage
     
     // Initialize voice command processor
     command_processor_ = std::make_unique<VoiceCommandProcessor>();
-    ret = command_processor_->init(gemini_client_.get(), response_player_.get());
+    ret = command_processor_->init(websocket_client_.get(), response_player_.get());
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize command processor: %s", esp_err_to_name(ret));
         return ret;
@@ -160,9 +173,9 @@ void VoiceAssistantManager::shutdown() {
         response_player_.reset();
     }
     
-    if (gemini_client_) {
-        gemini_client_->shutdown();
-        gemini_client_.reset();
+    if (websocket_client_) {
+        websocket_client_->shutdown();
+        websocket_client_.reset();
     }
     
     if (state_mutex_) {
@@ -201,8 +214,9 @@ void VoiceAssistantManager::on_audio_data(const uint8_t* data, size_t length) {
     
     switch (current_state) {
         case State::LISTENING:
-            // Process audio for wake word detection
+            // Feed audio to wake word detector
             if (wake_word_detector_ && wake_word_detector_->is_enabled()) {
+                // Convert uint8_t audio data to int16_t samples for wake word detector
                 const int16_t* samples = reinterpret_cast<const int16_t*>(data);
                 size_t sample_count = length / sizeof(int16_t);
                 
@@ -215,20 +229,16 @@ void VoiceAssistantManager::on_audio_data(const uint8_t* data, size_t length) {
             break;
             
         case State::RECORDING_COMMAND:
-            // Forward audio to command processor
-            if (command_processor_ && command_processor_->is_recording()) {
+            // Feed audio to command processor
+            if (command_processor_) {
                 esp_err_t ret = command_processor_->process_audio_data(data, length);
                 if (ret != ESP_OK) {
-                    ESP_LOGW(TAG, "Failed to process audio data: %s", esp_err_to_name(ret));
+                    ESP_LOGE(TAG, "Failed to process command audio: %s", esp_err_to_name(ret));
+                    set_state(State::ERROR);
                 }
             }
             break;
             
-        case State::WAKE_WORD_DETECTED:
-        case State::PROCESSING_GEMINI:
-        case State::PLAYING_RESPONSE:
-        case State::ERROR:
-        case State::UNINITIALIZED:
         default:
             // Ignore audio in other states
             break;
@@ -236,16 +246,17 @@ void VoiceAssistantManager::on_audio_data(const uint8_t* data, size_t length) {
 }
 
 void VoiceAssistantManager::on_wake_word_detected() {
-    ESP_LOGI(TAG, "Wake word detected! Starting command recording");
+    ESP_LOGI(TAG, "Wake word detected, starting command recording");
     
-    if (state_.load() != State::LISTENING) {
-        ESP_LOGW(TAG, "Wake word detected but not in listening state");
+    State current_state = state_.load();
+    if (current_state != State::LISTENING) {
+        ESP_LOGW(TAG, "Wake word detected in invalid state: %d", static_cast<int>(current_state));
         return;
     }
     
     set_state(State::WAKE_WORD_DETECTED);
     
-    // Start recording voice command
+    // Start command recording
     if (command_processor_) {
         esp_err_t ret = command_processor_->start_recording();
         if (ret == ESP_OK) {
@@ -263,31 +274,21 @@ void VoiceAssistantManager::set_state(State new_state) {
         if (old_state != new_state) {
             ESP_LOGI(TAG, "State changed: %d -> %d", static_cast<int>(old_state), static_cast<int>(new_state));
             
-            // Handle state transitions
+            // Handle state-specific actions
             switch (new_state) {
-                case State::LISTENING:
-                    // Back to listening - ready for wake word
-                    break;
-                    
-                case State::RECORDING_COMMAND:
-                    // Started recording - set timeout to auto-finish
-                    // TODO: Add timeout mechanism
-                    break;
-                    
-                case State::PROCESSING_GEMINI:
-                    // Command sent to Gemini - wait for response
+                case State::PROCESSING_COMMAND:
+                    ESP_LOGI(TAG, "Processing voice command via WebSocket");
                     break;
                     
                 case State::PLAYING_RESPONSE:
-                    // Playing Gemini response
+                    ESP_LOGI(TAG, "Playing audio response");
                     break;
                     
                 case State::ERROR:
-                    // Error state - return to listening after delay
-                    ESP_LOGW(TAG, "Entering error state, will return to listening");
-                    // Don't recursively call set_state - just schedule return to listening
-                    old_state = state_.exchange(State::LISTENING);
-                    ESP_LOGI(TAG, "Recovered from error state: %d -> %d", static_cast<int>(old_state), static_cast<int>(State::LISTENING));
+                    ESP_LOGE(TAG, "Voice assistant entered error state");
+                    // Attempt to recover by returning to listening state
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    set_state(State::LISTENING);
                     break;
                     
                 default:

@@ -14,7 +14,7 @@ extern "C" {
 namespace btspeaker {
 
 // Forward declarations
-class GeminiApiClient;
+class WebSocketVoiceClient;
 class AudioResponsePlayer;
 
 // Callback type for music playback commands
@@ -24,9 +24,9 @@ using MusicPlaybackCallback = std::function<void(const char* command)>;
  * @brief Processes voice commands and handles business logic
  * 
  * Responsible for:
- * - Audio recording and buffering
- * - Music command detection and routing
- * - Gemini API integration for general queries
+ * - Audio streaming in real-time chunks
+ * - Music command detection and routing (when server unavailable)
+ * - WebSocket integration for streaming STT→LLM→TTS pipeline
  * - Audio response playback coordination
  */
 class VoiceCommandProcessor {
@@ -49,7 +49,7 @@ public:
     /**
      * @brief Initialize voice command processor
      */
-    esp_err_t init(GeminiApiClient* gemini_client, AudioResponsePlayer* response_player);
+    esp_err_t init(WebSocketVoiceClient* websocket_client, AudioResponsePlayer* response_player);
     
     /**
      * @brief Shutdown voice command processor
@@ -62,7 +62,7 @@ public:
     esp_err_t start_recording();
     
     /**
-     * @brief Process audio data during recording
+     * @brief Process audio data during recording (streams to server)
      */
     esp_err_t process_audio_data(const uint8_t* data, size_t length);
     
@@ -96,32 +96,39 @@ private:
     static constexpr int MAX_RECORDING_DURATION_MS = 10000; // 10 seconds
     static constexpr int SAMPLE_RATE = 16000;
     static constexpr int BITS_PER_SAMPLE = 16;
+    static constexpr size_t STREAM_CHUNK_SIZE = 4096; // Small chunks for streaming
     
     // Command processing
     bool check_music_command(const char* text);
-    esp_err_t send_to_gemini(const uint8_t* audio_data, size_t length);
+    esp_err_t send_to_websocket(const uint8_t* audio_data, size_t length);
     
     // Audio response handling
-    void handle_gemini_response(const uint8_t* audio_data, size_t length, bool is_final);
+    void handle_websocket_response(const uint8_t* audio_data, size_t length, bool is_final);
+    void handle_connection_state_change(int connection_state);
     
     // State management
     void set_state(State new_state);
+    
+    // Fallback music command processing (when server unavailable)
+    esp_err_t handle_offline_command(const uint8_t* audio_data, size_t length);
     
     // Member variables
     std::atomic<State> state_;
     SemaphoreHandle_t state_mutex_;
     
-    // Recording buffer
-    std::unique_ptr<uint8_t[]> recording_buffer_;
-    size_t recording_buffer_pos_;
-    size_t max_buffer_size_;
+    // Streaming buffer (much smaller than previous implementation)
+    std::unique_ptr<uint8_t[]> stream_buffer_;
+    size_t stream_buffer_pos_;
     
     // External components
-    GeminiApiClient* gemini_client_;
+    WebSocketVoiceClient* websocket_client_;
     AudioResponsePlayer* response_player_;
     MusicPlaybackCallback music_callback_;
     
-    // Music command keywords
+    // Connection state tracking
+    bool server_available_;
+    
+    // Music command keywords for offline processing
     static const char* MUSIC_COMMANDS[];
     static const size_t MUSIC_COMMANDS_COUNT;
 };

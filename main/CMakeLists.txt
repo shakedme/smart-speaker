@@ -9,7 +9,7 @@ idf_component_register(
         src/bluetooth_initializer.cpp
         src/app_manager.cpp
         src/audio_response_player.cpp
-        src/gemini_api_client.cpp
+        src/websocket_voice_client.cpp
         src/voice_assistant_manager.cpp
         src/microphone_manager.cpp
         src/wake_word_detector.cpp
@@ -35,12 +35,12 @@ idf_component_register(
         "audio_stream"    # I2S stream functionality  
         "bluetooth_service" # Bluetooth A2DP service
         "esp_wifi"        # WiFi stack
-        "esp_http_client" # HTTP client for APIs
+        "esp_websocket_client" # WebSocket client for voice streaming
         "esp_adc"         # ADC support (if using ADC for audio input)
         "esp-sr"          # ESP Speech Recognition for wake word detection
+        "json"            # JSON parsing for WebSocket messages
 
         # Optional components (uncomment as needed when implementing features)
-        # "mbedtls"         # Cryptography
         # "esp_timer"       # High-resolution timers
         # "esp_common"      # Common ESP-IDF utilities
         # "freertos"        # FreeRTOS kernel
@@ -48,7 +48,6 @@ idf_component_register(
         # "newlib"          # C++ standard library support
         # "pthread"         # POSIX threads (for C++ threading)
         # "spi_flash"       # Flash memory access
-        # "json"            # JSON parsing
         # "esp_netif"       # Network interface
         # "lwip"            # TCP/IP stack
         # "esp_peripherals" # ESP-ADF peripheral management

@@ -18,7 +18,7 @@ namespace btspeaker {
 class MicrophoneManager;
 class WakeWordDetector;
 class VoiceCommandProcessor;
-class GeminiApiClient;
+class WebSocketVoiceClient;
 class AudioResponsePlayer;
 
 // Callback type for music playback commands
@@ -32,6 +32,7 @@ using MusicPlaybackCallback = std::function<void(const char* command)>;
  * - Handle overall state management and flow
  * - Provide high-level API for voice assistant functionality
  * - Route audio data between components
+ * - Manage WebSocket connection for streaming voice processing
  */
 class VoiceAssistantManager {
 public:
@@ -40,7 +41,7 @@ public:
         LISTENING,
         WAKE_WORD_DETECTED,
         RECORDING_COMMAND,
-        PROCESSING_GEMINI,
+        PROCESSING_COMMAND,
         PLAYING_RESPONSE,
         ERROR
     };
@@ -105,7 +106,7 @@ private:
     std::unique_ptr<MicrophoneManager> microphone_manager_;
     std::unique_ptr<WakeWordDetector> wake_word_detector_;
     std::unique_ptr<VoiceCommandProcessor> command_processor_;
-    std::unique_ptr<GeminiApiClient> gemini_client_;
+    std::unique_ptr<WebSocketVoiceClient> websocket_client_;
     std::unique_ptr<AudioResponsePlayer> response_player_;
     
     // External references

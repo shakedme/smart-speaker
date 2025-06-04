@@ -2,11 +2,17 @@
 
 // Voice Assistant Configuration
 
-// Gemini API Configuration
-// You need to set your actual API key here or via environment variable
-#ifndef CONFIG_GEMINI_API_KEY
-#define CONFIG_GEMINI_API_KEY "your_gemini_api_key_here"
+// WebSocket Server Configuration
+#ifndef CONFIG_WEBSOCKET_SERVER_URL
+#define CONFIG_WEBSOCKET_SERVER_URL "ws://localhost:8080/voice"
 #endif
+
+// WebSocket Connection Settings
+#define CONFIG_WS_KEEPALIVE_INTERVAL_S  30
+#define CONFIG_WS_PING_INTERVAL_S       10
+#define CONFIG_WS_CHUNK_SIZE            4096
+#define CONFIG_WS_RECONNECT_TIMEOUT_MS  5000
+#define CONFIG_WS_MAX_RECONNECT_ATTEMPTS 5
 
 // Audio Configuration
 #define CONFIG_MIC_SAMPLE_RATE      16000
@@ -23,15 +29,15 @@
 #define CONFIG_WAKE_WORD_ENABLED    true
 #define CONFIG_WAKE_WORD_THRESHOLD  0.8f
 
-// Recording Configuration
-#define CONFIG_MAX_RECORDING_MS     10000  // 10 seconds
-#define CONFIG_AUDIO_BUFFER_SIZE    1024
+// Recording Configuration (for streaming chunks)
+#define CONFIG_MAX_RECORDING_MS     10000  // 10 seconds max session
+#define CONFIG_AUDIO_BUFFER_SIZE    CONFIG_WS_CHUNK_SIZE  // Use WebSocket chunk size
 
 // Network Configuration
-#define CONFIG_GEMINI_TIMEOUT_MS    30000  // 30 seconds
-#define CONFIG_MAX_RESPONSE_SIZE    (512 * 1024)  // 512KB
+#define CONFIG_CONNECTION_TIMEOUT_MS 10000  // 10 seconds
+#define CONFIG_STREAM_TIMEOUT_MS     30000  // 30 seconds for streaming
 
-// WiFi Configuration (required for Gemini API)
+// WiFi Configuration (required for WebSocket connection)
 #ifndef CONFIG_WIFI_SSID
 #define CONFIG_WIFI_SSID "Shaked"
 #endif

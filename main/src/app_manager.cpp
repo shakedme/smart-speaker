@@ -10,7 +10,6 @@ extern "C" {
 
 namespace btspeaker {
 
-// Static member definition - simple and clean
     AppManager *AppManager::instance_ = nullptr;
 
     AppManager::AppManager() : state_(State::UNINITIALIZED) {
@@ -110,7 +109,7 @@ namespace btspeaker {
             return ESP_ERR_INVALID_STATE;
         }
 
-        ESP_LOGI(TAG, "Starting Bluetooth Audio Application");
+        ESP_LOGI(TAG, "Starting application");
         state_ = State::RUNNING;
 
         // Start audio pipeline
@@ -133,7 +132,7 @@ namespace btspeaker {
             }
         }
 
-        ESP_LOGI(TAG, "Bluetooth Audio Application running. Starting event loop...");
+        ESP_LOGI(TAG, "Application running. Starting event loop...");
 
         // Run the main event loop
         ret = pipeline_manager_->run_event_loop();
@@ -219,10 +218,10 @@ namespace btspeaker {
         } else {
             ESP_LOGI(TAG, "Successfully executed music command: %s", command);
         }
+
     }
 
     AppManager::State AppManager::get_state() const {
-        // Simple atomic read - no mutex needed
         return state_.load();
     }
 

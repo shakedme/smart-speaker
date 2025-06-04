@@ -46,7 +46,7 @@ void shutdown() {
 }
 
 void app_main() {
-    // Initialize the Bluetooth Audio Application
+    // Initialize the application
     init();
 
     // Run the main application (this will block)

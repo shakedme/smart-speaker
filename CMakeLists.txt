@@ -5,15 +5,13 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Build optimizations for faster compilation (excluding unity builds due to ESP-IDF conflicts)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)        # Enable compile_commands.json for IDEs
+# Enable compile_commands.json for IDEs
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ESP32 optimized C++ flags (only for C++ files)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti -Wno-error=unused-function")
 
-# Strategic ESP-ADF component inclusion
-# Include all ESP-ADF components due to complex interdependencies
-# But monitor managed dependencies to ensure minimal footprint
+# ESP-ADF component inclusion
 set(EXTRA_COMPONENT_DIRS $ENV{ADF_PATH}/components ${CMAKE_SOURCE_DIR}/components)
 
 # Set custom audio board include path so ESP-ADF components find our board.h

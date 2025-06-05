@@ -1,0 +1,45 @@
+{
+  "name": "bt-speaker-backend",
+  "version": "1.0.0",
+  "description": "WebSocket voice streaming backend for ESP32 BT Speaker",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "start:live": "npm run build && node dist/live-server.js",
+    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "dev:live": "ts-node-dev --respawn --transpile-only src/live-server.ts",
+    "watch": "tsc --watch"
+  },
+  "dependencies": {
+    "@google-cloud/speech": "^6.0.1",
+    "@google-cloud/text-to-speech": "^4.2.1",
+    "@google/genai": "^1.4.0",
+    "@google/generative-ai": "^0.21.0",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "uuid": "^9.0.1",
+    "ws": "^8.14.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.10.0",
+    "@types/uuid": "^9.0.7",
+    "@types/ws": "^8.5.10",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.3.2"
+  },
+  "keywords": [
+    "websocket",
+    "voice",
+    "esp32",
+    "speech-to-text",
+    "text-to-speech",
+    "gemini",
+    "google-cloud-tts",
+    "google-ai",
+    "typescript"
+  ],
+  "author": "",
+  "license": "MIT"
+}

@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BT Speaker Voice Test</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: white;
+        }
+
+        .container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 16px;
+            padding: 30px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        .status-panel {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .status-item:last-child {
+            margin-bottom: 0;
+        }
+
+        .status-label {
+            font-weight: 600;
+        }
+
+        .status-value {
+            font-family: 'Monaco', 'Menlo', monospace;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 4px 8px;
+            border-radius: 6px;
+            font-size: 0.9em;
+        }
+
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        button {
+            flex: 1;
+            min-width: 120px;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(45deg, #4CAF50, #45a049);
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(76, 175, 80, 0.4);
+        }
+
+        .btn-danger {
+            background: linear-gradient(45deg, #f44336, #d32f2f);
+            color: white;
+        }
+
+        .btn-danger:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(244, 67, 54, 0.4);
+        }
+
+        .btn-secondary {
+            background: linear-gradient(45deg, #607D8B, #455A64);
+            color: white;
+        }
+
+        .btn-secondary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(96, 125, 139, 0.4);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
+        .log-panel {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 12px;
+            padding: 20px;
+            height: 300px;
+            overflow-y: auto;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 13px;
+            line-height: 1.4;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 2px 0;
+        }
+
+        .log-timestamp {
+            color: #888;
+            margin-right: 10px;
+        }
+
+        .log-info { color: #4CAF50; }
+        .log-warn { color: #FF9800; }
+        .log-error { color: #f44336; }
+        .log-debug { color: #2196F3; }
+
+        .audio-controls {
+            margin-top: 20px;
+            text-align: center;
+        }
+
+        audio {
+            width: 100%;
+            margin-top: 10px;
+        }
+
+        .recording-indicator {
+            display: none;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin: 20px 0;
+            padding: 15px;
+            background: rgba(244, 67, 54, 0.2);
+            border-radius: 8px;
+            border: 2px solid #f44336;
+        }
+
+        .recording-indicator.active {
+            display: flex;
+        }
+
+        .pulse {
+            width: 12px;
+            height: 12px;
+            background: #f44336;
+            border-radius: 50%;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.2); opacity: 0.7; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+
+        .server-url {
+            margin-bottom: 20px;
+        }
+
+        .server-url input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            font-size: 14px;
+        }
+
+        .server-url input::placeholder {
+            color: rgba(255, 255, 255, 0.7);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 BT Speaker Voice Test</h1>
+        
+        <div class="server-url">
+            <label for="serverUrl" class="status-label">WebSocket Server URL:</label>
+            <input type="text" id="serverUrl" placeholder="ws://localhost:8080/voice" value="ws://localhost:8080/voice">
+        </div>
+
+        <div class="status-panel">
+            <div class="status-item">
+                <span class="status-label">Connection Status:</span>
+                <span class="status-value" id="connectionStatus">DISCONNECTED</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Recording Status:</span>
+                <span class="status-value" id="recordingStatus">STOPPED</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Audio Chunks Sent:</span>
+                <span class="status-value" id="chunksSent">0</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Audio Response Size:</span>
+                <span class="status-value" id="responseSize">0 bytes</span>
+            </div>
+        </div>
+
+        <div class="controls">
+            <button id="connectBtn" class="btn-primary">Connect</button>
+                            <button id="startRecordingBtn" class="btn-primary" disabled>Start Live Session</button>
+            <button id="stopRecordingBtn" class="btn-danger" disabled>End Session</button>
+            <button id="cancelBtn" class="btn-secondary" disabled>Cancel</button>
+        </div>
+
+        <div class="recording-indicator" id="recordingIndicator">
+            <div class="pulse"></div>
+            <span>Recording in progress... Speak now!</span>
+        </div>
+
+        <!-- Audio will play automatically via Web Audio API - no UI needed -->
+
+        <div class="log-panel" id="logPanel">
+            <div class="log-entry log-info">
+                <span class="log-timestamp">[Ready]</span>
+                Voice testing interface ready. Click Connect to start.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class VoiceTestClient {
+            constructor() {
+                this.ws = null;
+                this.isConnected = false;
+                this.isRecording = false;
+                this.mediaRecorder = null;
+                this.audioStream = null;
+                this.audioChunks = [];
+                this.chunksSent = 0;
+                this.inputAudioContext = null;
+                this.outputAudioContext = null;
+                this.audioBuffer = [];
+                this.isPlaying = false;
+                this.playbackQueue = [];
+                this.nextPlayTime = 0;
+
+                this.initializeElements();
+                this.bindEvents();
+                this.log('info', 'Voice test client initialized');
+            }
+
+            initializeElements() {
+                this.elements = {
+                    serverUrl: document.getElementById('serverUrl'),
+                    connectionStatus: document.getElementById('connectionStatus'),
+                    recordingStatus: document.getElementById('recordingStatus'),
+                    chunksSent: document.getElementById('chunksSent'),
+                    responseSize: document.getElementById('responseSize'),
+                    connectBtn: document.getElementById('connectBtn'),
+                    startRecordingBtn: document.getElementById('startRecordingBtn'),
+                    stopRecordingBtn: document.getElementById('stopRecordingBtn'),
+                    cancelBtn: document.getElementById('cancelBtn'),
+                    recordingIndicator: document.getElementById('recordingIndicator'),
+                    logPanel: document.getElementById('logPanel')
+                };
+            }
+
+            bindEvents() {
+                this.elements.connectBtn.addEventListener('click', () => {
+                    if (this.isConnected) {
+                        this.disconnect();
+                    } else {
+                        this.connect();
+                    }
+                });
+
+                this.elements.startRecordingBtn.addEventListener('click', () => {
+                    this.startRecording();
+                });
+
+                this.elements.stopRecordingBtn.addEventListener('click', () => {
+                    this.stopRecording();
+                });
+
+                this.elements.cancelBtn.addEventListener('click', () => {
+                    this.cancel();
+                });
+            }
+
+            async connect() {
+                const url = this.elements.serverUrl.value.trim();
+                if (!url) {
+                    this.log('error', 'Please enter a valid WebSocket URL');
+                    return;
+                }
+
+                try {
+                    this.log('info', `Connecting to ${url}...`);
+                    this.ws = new WebSocket(url);
+
+                    this.ws.onopen = () => {
+                        this.isConnected = true;
+                        this.updateConnectionStatus('CONNECTED');
+                        this.elements.connectBtn.textContent = 'Disconnect';
+                        this.elements.connectBtn.className = 'btn-danger';
+                        this.elements.startRecordingBtn.disabled = false;
+                        this.log('info', 'WebSocket connected successfully');
+                    };
+
+                    this.ws.onclose = (event) => {
+                        this.isConnected = false;
+                        this.updateConnectionStatus('DISCONNECTED');
+                        this.elements.connectBtn.textContent = 'Connect';
+                        this.elements.connectBtn.className = 'btn-primary';
+                        this.elements.startRecordingBtn.disabled = true;
+                        this.elements.stopRecordingBtn.disabled = true;
+                        this.elements.cancelBtn.disabled = true;
+                        this.log('warn', `WebSocket disconnected: ${event.code} ${event.reason}`);
+                    };
+
+                    this.ws.onerror = (error) => {
+                        this.log('error', `WebSocket error: ${error}`);
+                    };
+
+                    this.ws.onmessage = (event) => {
+                        this.handleMessage(event);
+                    };
+
+                } catch (error) {
+                    this.log('error', `Connection failed: ${error.message}`);
+                }
+            }
+
+            disconnect() {
+                if (this.ws) {
+                    this.ws.close();
+                    this.ws = null;
+                }
+                if (this.audioStream) {
+                    this.audioStream.getTracks().forEach(track => track.stop());
+                    this.audioStream = null;
+                }
+            }
+
+            async startRecording() {
+                if (!this.isConnected) {
+                    this.log('error', 'Not connected to server');
+                    return;
+                }
+
+                try {
+                    // Ensure output audio context is enabled with user interaction
+                    if (!this.outputAudioContext) {
+                        this.outputAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    }
+                    
+                    if (this.outputAudioContext.state === 'suspended') {
+                        await this.outputAudioContext.resume();
+                        this.log('info', 'Audio context resumed - audio playback enabled');
+                    }
+                    // Get microphone access
+                    this.audioStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            sampleRate: 16000,
+                            channelCount: 1,
+                            echoCancellation: true,
+                            noiseSuppression: true
+                        }
+                    });
+
+                    // Setup input audio context for microphone processing
+                    this.inputAudioContext = new (window.AudioContext || window.webkitAudioContext)({
+                        sampleRate: 16000
+                    });
+
+                    // Output audio context already initialized above
+
+                    // Create inline AudioWorklet processor
+                    const workletCode = `
+                        class AudioProcessor extends AudioWorkletProcessor {
+                            process(inputs, outputs, parameters) {
+                                const input = inputs[0];
+                                if (input.length > 0) {
+                                    const inputData = input[0]; // First channel
+                                    
+                                    // Convert float32 to int16 PCM
+                                    const pcmData = new Int16Array(inputData.length);
+                                    for (let i = 0; i < inputData.length; i++) {
+                                        pcmData[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+                                    }
+                                    
+                                    // Send to main thread
+                                    this.port.postMessage(pcmData.buffer);
+                                }
+                                return true;
+                            }
+                        }
+                        registerProcessor('audio-processor', AudioProcessor);
+                    `;
+
+                    // Create blob URL for the worklet
+                    const blob = new Blob([workletCode], { type: 'application/javascript' });
+                    const workletUrl = URL.createObjectURL(blob);
+
+                    // Add the worklet module
+                    await this.inputAudioContext.audioWorklet.addModule(workletUrl);
+                    URL.revokeObjectURL(workletUrl);
+
+                    // Create source and worklet node
+                    const source = this.inputAudioContext.createMediaStreamSource(this.audioStream);
+                    const workletNode = new AudioWorkletNode(this.inputAudioContext, 'audio-processor');
+
+                    // Handle messages from worklet
+                    workletNode.port.onmessage = (event) => {
+                        if (this.isRecording && this.ws && this.ws.readyState === WebSocket.OPEN) {
+                            this.ws.send(event.data);
+                            this.chunksSent++;
+                            this.elements.chunksSent.textContent = this.chunksSent;
+                        }
+                    };
+
+                    // Connect the audio graph
+                    source.connect(workletNode);
+
+                    this.log('debug', `Input AudioContext sample rate: ${this.inputAudioContext.sampleRate}`);
+
+                    // Send start session control message for Live API
+                    this.sendControlMessage({ type: 'start_session' });
+                    
+                    this.isRecording = true;
+                    this.chunksSent = 0;
+                    this.audioBuffer = [];
+                    this.isPlaying = false;
+                    this.nextPlayTime = 0;
+                    this.updateRecordingStatus('LIVE SESSION');
+                    this.elements.recordingIndicator.classList.add('active');
+                    this.elements.startRecordingBtn.disabled = true;
+                    this.elements.stopRecordingBtn.disabled = false;
+                    this.elements.cancelBtn.disabled = false;
+
+                    
+                    this.log('info', 'Started live voice session');
+
+                } catch (error) {
+                    this.log('error', `Failed to start recording: ${error.message}`);
+                }
+            }
+
+            stopRecording() {
+                if (!this.isRecording) {
+                    this.log('warn', 'Not currently recording');
+                    return;
+                }
+
+                // Send end session control message for Live API
+                this.sendControlMessage({ type: 'end_session' });
+                
+                this.isRecording = false;
+                this.updateRecordingStatus('PROCESSING');
+                this.elements.recordingIndicator.classList.remove('active');
+                this.elements.startRecordingBtn.disabled = false;
+                this.elements.stopRecordingBtn.disabled = true;
+                this.elements.cancelBtn.disabled = true;
+
+                // Stop audio stream
+                if (this.audioStream) {
+                    this.audioStream.getTracks().forEach(track => track.stop());
+                }
+                if (this.inputAudioContext) {
+                    this.inputAudioContext.close();
+                }
+                if (this.outputAudioContext) {
+                    this.outputAudioContext.close();
+                }
+
+                this.log('info', `Ended live session. Sent ${this.chunksSent} audio chunks`);
+            }
+
+            cancel() {
+                this.sendControlMessage({ type: 'cancel' });
+                
+                this.isRecording = false;
+                this.updateRecordingStatus('CANCELLED');
+                this.elements.recordingIndicator.classList.remove('active');
+                this.elements.startRecordingBtn.disabled = false;
+                this.elements.stopRecordingBtn.disabled = true;
+                this.elements.cancelBtn.disabled = true;
+
+                if (this.audioStream) {
+                    this.audioStream.getTracks().forEach(track => track.stop());
+                }
+                if (this.inputAudioContext) {
+                    this.inputAudioContext.close();
+                }
+                if (this.outputAudioContext) {
+                    this.outputAudioContext.close();
+                }
+
+                this.log('info', 'Cancelled live session');
+            }
+
+            sendControlMessage(message) {
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                    this.ws.send(JSON.stringify(message));
+                    this.log('debug', `Sent control message: ${message.type}`);
+                }
+            }
+
+            handleMessage(event) {
+                if (typeof event.data === 'string') {
+                    // Text message (control)
+                    try {
+                        const message = JSON.parse(event.data);
+                        this.handleControlMessage(message);
+                    } catch (error) {
+                        this.log('error', `Failed to parse control message: ${error.message}`);
+                    }
+                } else {
+                    // Binary message (audio data)
+                    this.handleAudioData(event.data);
+                }
+            }
+
+            handleControlMessage(message) {
+                this.log('info', `Received control message: ${message.type}`);
+                
+                switch (message.type) {
+                    case 'audio_start':
+                        this.updateRecordingStatus('RECEIVING AUDIO');
+                        this.log('info', 'Server started sending audio response');
+                        break;
+                        
+                    case 'audio_end':
+                        this.updateRecordingStatus('STOPPED');
+                        this.log('info', 'Server finished sending audio response');
+                        // Audio should already be playing from handleAudioData
+                        break;
+                        
+                    case 'error':
+                        this.updateRecordingStatus('ERROR');
+                        this.log('error', `Server error: ${message.message || 'Unknown error'}`);
+                        break;
+                }
+            }
+
+            handleAudioData(data) {
+                const totalSize = data.size || data.byteLength || data.length || 0;
+                this.elements.responseSize.textContent = `${totalSize} bytes`;
+                this.log('debug', `Received audio chunk: ${totalSize} bytes`);
+                
+                // Add to buffer instead of playing immediately
+                this.audioBuffer.push(data);
+                
+                // Start buffered playback if we have enough chunks and aren't already playing
+                if (this.audioBuffer.length >= 3 && !this.isPlaying) {
+                    this.log('info', `Starting buffered playback with ${this.audioBuffer.length} chunks`);
+                    this.startBufferedPlayback();
+                }
+            }
+
+            async playAudioChunk(audioData) {
+                try {
+                    // Check if audio context exists and is running
+                    if (!this.outputAudioContext) {
+                        this.log('warn', 'Audio context not initialized - start recording first');
+                        return;
+                    }
+
+                    // Ensure output audio context is running
+                    if (this.outputAudioContext.state === 'suspended') {
+                        this.log('warn', 'Audio context suspended - audio enabled after starting session');
+                        return;
+                    }
+
+                    // Convert to ArrayBuffer with detailed logging
+                    let arrayBuffer;
+                    this.log('debug', `Audio data type for conversion: ${audioData.constructor.name}`);
+                    
+                    if (audioData instanceof Blob) {
+                        this.log('debug', 'Converting Blob to ArrayBuffer');
+                        arrayBuffer = await audioData.arrayBuffer();
+                    } else if (audioData instanceof ArrayBuffer) {
+                        this.log('debug', 'Already ArrayBuffer');
+                        arrayBuffer = audioData;
+                    } else if (audioData.buffer instanceof ArrayBuffer) {
+                        this.log('debug', 'Using .buffer property');
+                        arrayBuffer = audioData.buffer;
+                    } else {
+                        this.log('debug', 'Treating as raw data');
+                        arrayBuffer = audioData;
+                    }
+                    
+                    this.log('debug', `Final ArrayBuffer size: ${arrayBuffer.byteLength} bytes`);
+
+                    this.log('debug', `Decoding audio data: ${arrayBuffer.byteLength} bytes`);
+
+                    // Try to decode as MP3/encoded audio first
+                    let audioBuffer;
+                    try {
+                        // IMPORTANT: decodeAudioData consumes/transfers the ArrayBuffer!
+                        // Make a copy first to preserve original data
+                        const arrayBufferCopy = arrayBuffer.slice();
+                        audioBuffer = await this.outputAudioContext.decodeAudioData(arrayBufferCopy);
+                    } catch (decodeError) {
+                        this.log('debug', `MP3 decode failed, trying raw PCM: ${decodeError.message}`);
+                        this.log('debug', `ArrayBuffer after failed decode: ${arrayBuffer.byteLength} bytes`);
+                        
+                        // If that fails, try to interpret as raw PCM data (24kHz, 16-bit, mono)
+                        audioBuffer = await this.createPCMAudioBuffer(arrayBuffer);
+                    }
+                    
+                    // Create buffer source and play immediately
+                    const source = this.outputAudioContext.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(this.outputAudioContext.destination);
+                    source.start(0);
+                    
+                    this.log('info', `🔊 Playing audio: ${audioBuffer.duration.toFixed(2)}s, ${audioBuffer.sampleRate}Hz`);
+
+                } catch (error) {
+                    this.log('error', `Web Audio API failed: ${error.message}`);
+                    
+                    // Fallback: try to play via Audio API (requires user interaction)
+                    try {
+                        const blob = audioData instanceof Blob ? audioData : new Blob([audioData], { type: 'audio/mp3' });
+                        const audio = new Audio(URL.createObjectURL(blob));
+                        
+                        audio.play().then(() => {
+                            this.log('info', '🔊 Playing via fallback Audio API');
+                        }).catch(e => {
+                            this.log('warn', 'Audio playback requires user interaction - click to enable');
+                        });
+                    } catch (fallbackError) {
+                        this.log('error', `Fallback audio playback failed: ${fallbackError.message}`);
+                    }
+                }
+            }
+
+            async startBufferedPlayback() {
+                if (this.isPlaying) return;
+                
+                this.isPlaying = true;
+                this.nextPlayTime = this.outputAudioContext.currentTime;
+                
+                // Process initial buffer
+                await this.processAudioQueue();
+                
+                // Continue processing as more chunks arrive
+                this.scheduleNextChunk();
+            }
+
+            async processAudioQueue() {
+                while (this.audioBuffer.length > 0) {
+                    const audioData = this.audioBuffer.shift();
+                    await this.scheduleAudioChunk(audioData);
+                }
+            }
+
+            async scheduleAudioChunk(audioData) {
+                try {
+                    if (!this.outputAudioContext) return;
+
+                    // Convert to ArrayBuffer
+                    let arrayBuffer;
+                    if (audioData instanceof Blob) {
+                        arrayBuffer = await audioData.arrayBuffer();
+                    } else if (audioData instanceof ArrayBuffer) {
+                        arrayBuffer = audioData;
+                    } else if (audioData.buffer instanceof ArrayBuffer) {
+                        arrayBuffer = audioData.buffer;
+                    } else {
+                        arrayBuffer = audioData;
+                    }
+
+                    // Create audio buffer
+                    let audioBuffer;
+                    try {
+                        const arrayBufferCopy = arrayBuffer.slice();
+                        audioBuffer = await this.outputAudioContext.decodeAudioData(arrayBufferCopy);
+                    } catch (decodeError) {
+                        audioBuffer = await this.createPCMAudioBuffer(arrayBuffer);
+                    }
+
+                    // Schedule for seamless playback
+                    const source = this.outputAudioContext.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(this.outputAudioContext.destination);
+                    
+                    // Schedule to start right after previous chunk ends
+                    source.start(this.nextPlayTime);
+                    this.nextPlayTime += audioBuffer.duration;
+                    
+                    this.log('debug', `Scheduled audio: ${audioBuffer.duration.toFixed(3)}s at ${this.nextPlayTime.toFixed(3)}s`);
+
+                } catch (error) {
+                    this.log('error', `Failed to schedule audio chunk: ${error.message}`);
+                }
+            }
+
+            scheduleNextChunk() {
+                // Continue processing buffer every 100ms
+                setTimeout(() => {
+                    if (this.audioBuffer.length > 0) {
+                        this.processAudioQueue();
+                        this.scheduleNextChunk();
+                    } else if (this.nextPlayTime <= this.outputAudioContext.currentTime + 1) {
+                        // Playback finished, stop
+                        this.isPlaying = false;
+                        this.log('info', 'Buffered playback finished');
+                    } else {
+                        this.scheduleNextChunk();
+                    }
+                }, 100);
+            }
+
+            async createPCMAudioBuffer(arrayBuffer) {
+                // Debug the ArrayBuffer state
+                this.log('debug', `createPCMAudioBuffer received: ${arrayBuffer.constructor.name}`);
+                this.log('debug', `ArrayBuffer byteLength: ${arrayBuffer.byteLength}`);
+                
+                // Use the actual sample rate from Gemini: audio/pcm;rate=24000
+                // The original speed issue was likely due to ArrayBuffer consumption, not sample rate
+                let sampleRate = 24000;
+                const numChannels = 1;
+                const bytesPerSample = 2; // 16-bit
+                
+                const numSamples = Math.floor(arrayBuffer.byteLength / bytesPerSample);
+                
+                if (numSamples <= 0) {
+                    throw new Error(`Invalid PCM data: ${arrayBuffer.byteLength} bytes = ${numSamples} samples`);
+                }
+                
+                this.log('debug', `Creating PCM buffer: ${numSamples} samples, ${arrayBuffer.byteLength} bytes`);
+                
+                const audioBuffer = this.outputAudioContext.createBuffer(numChannels, numSamples, sampleRate);
+                
+                // Convert Int16 little-endian PCM to Float32 for Web Audio API
+                const dataView = new DataView(arrayBuffer);
+                const channelData = audioBuffer.getChannelData(0);
+                
+                for (let i = 0; i < numSamples; i++) {
+                    // Read 16-bit little-endian signed integer
+                    const sample = dataView.getInt16(i * 2, true); // true = little-endian
+                    // Convert from Int16 range (-32768 to 32767) to Float32 range (-1.0 to 1.0)
+                    channelData[i] = sample / 32768.0;
+                }
+                
+                this.log('debug', `Created PCM buffer: ${numSamples} samples, ${sampleRate}Hz, duration: ${(numSamples/sampleRate).toFixed(3)}s`);
+                return audioBuffer;
+            }
+
+            updateConnectionStatus(status) {
+                this.elements.connectionStatus.textContent = status;
+                this.elements.connectionStatus.className = 'status-value';
+                if (status === 'CONNECTED') {
+                    this.elements.connectionStatus.style.color = '#4CAF50';
+                } else if (status === 'DISCONNECTED') {
+                    this.elements.connectionStatus.style.color = '#f44336';
+                } else {
+                    this.elements.connectionStatus.style.color = '#FF9800';
+                }
+            }
+
+            updateRecordingStatus(status) {
+                this.elements.recordingStatus.textContent = status;
+                this.elements.recordingStatus.className = 'status-value';
+                if (status === 'RECORDING') {
+                    this.elements.recordingStatus.style.color = '#f44336';
+                } else if (status === 'STOPPED') {
+                    this.elements.recordingStatus.style.color = '#4CAF50';
+                } else {
+                    this.elements.recordingStatus.style.color = '#FF9800';
+                }
+            }
+
+            log(level, message) {
+                const timestamp = new Date().toLocaleTimeString();
+                const logEntry = document.createElement('div');
+                logEntry.className = `log-entry log-${level}`;
+                logEntry.innerHTML = `<span class="log-timestamp">[${timestamp}]</span>${message}`;
+                
+                this.elements.logPanel.appendChild(logEntry);
+                this.elements.logPanel.scrollTop = this.elements.logPanel.scrollHeight;
+
+                // Keep only last 100 log entries
+                while (this.elements.logPanel.children.length > 100) {
+                    this.elements.logPanel.removeChild(this.elements.logPanel.firstChild);
+                }
+            }
+        }
+
+        // Initialize the client when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            new VoiceTestClient();
+        });
+    </script>
+</body>
+</html> 

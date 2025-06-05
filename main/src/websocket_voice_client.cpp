@@ -118,11 +118,11 @@ esp_err_t WebSocketVoiceClient::start_recording_session() {
         return ESP_OK;
     }
     
-    ESP_LOGI(TAG, "Starting recording session");
+    ESP_LOGI(TAG, "Starting live session");
     
-    esp_err_t ret = send_control_message("{\"type\":\"start_recording\"}");
+    esp_err_t ret = send_control_message("{\"type\":\"start_session\"}");
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send start recording message");
+        ESP_LOGE(TAG, "Failed to send start session message");
         return ret;
     }
     
@@ -137,7 +137,7 @@ esp_err_t WebSocketVoiceClient::send_audio_chunk(const uint8_t* audio_data, size
     }
     
     if (!recording_session_active_) {
-        ESP_LOGE(TAG, "No active recording session");
+        ESP_LOGE(TAG, "No active live session");
         return ESP_ERR_INVALID_STATE;
     }
     
@@ -161,15 +161,15 @@ esp_err_t WebSocketVoiceClient::send_audio_chunk(const uint8_t* audio_data, size
 
 esp_err_t WebSocketVoiceClient::stop_recording_session() {
     if (!recording_session_active_) {
-        ESP_LOGW(TAG, "No active recording session");
+        ESP_LOGW(TAG, "No active live session");
         return ESP_OK;
     }
     
-    ESP_LOGI(TAG, "Stopping recording session");
+    ESP_LOGI(TAG, "Ending live session");
     
-    esp_err_t ret = send_control_message("{\"type\":\"stop_recording\"}");
+    esp_err_t ret = send_control_message("{\"type\":\"end_session\"}");
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send stop recording message");
+        ESP_LOGE(TAG, "Failed to send end session message");
         return ret;
     }
     
@@ -189,7 +189,7 @@ void WebSocketVoiceClient::cancel_operations() {
     recording_session_active_ = false;
     
     if (is_connected()) {
-        send_control_message("{\"type\":\"cancel\"}");
+        send_control_message("{\"type\":\"end_session\"}");
     }
 }
 

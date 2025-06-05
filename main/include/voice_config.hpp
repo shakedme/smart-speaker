@@ -29,8 +29,8 @@
 #define CONFIG_WAKE_WORD_ENABLED    true
 #define CONFIG_WAKE_WORD_THRESHOLD  0.8f
 
-// Recording Configuration (for streaming chunks)
-#define CONFIG_MAX_RECORDING_MS     10000  // 10 seconds max session
+// Live Session Configuration (for streaming chunks)
+#define CONFIG_MAX_RECORDING_MS     10000  // 10 seconds max live session
 #define CONFIG_AUDIO_BUFFER_SIZE    CONFIG_WS_CHUNK_SIZE  // Use WebSocket chunk size
 
 // Network Configuration

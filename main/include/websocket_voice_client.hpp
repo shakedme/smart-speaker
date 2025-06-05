@@ -53,10 +53,10 @@ public:
     bool is_connected() const { return state_.load() == ConnectionState::CONNECTED; }
     ConnectionState get_state() const { return state_.load(); }
     
-    // Audio streaming
-    esp_err_t start_recording_session();
+    // Live audio streaming
+    esp_err_t start_recording_session();  // Now starts a live session
     esp_err_t send_audio_chunk(const uint8_t* audio_data, size_t length);
-    esp_err_t stop_recording_session();
+    esp_err_t stop_recording_session();   // Now ends a live session
     
     // Callback registration
     void set_audio_response_callback(AudioResponseCallback callback);
@@ -100,7 +100,7 @@ private:
     
     // State tracking
     bool initialized_;
-    bool recording_session_active_;
+    bool recording_session_active_;  // Now tracks live session state
     int reconnect_attempts_;
     
     // Audio format constants

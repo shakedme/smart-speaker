@@ -5,7 +5,7 @@
  * - ESP32-DevKitC-32E (ESP32-WROOM-32E module)
  * - PCM5102A I2S DAC Module
  * - MAX9814 Microphone Module
- * - TPA3116D2 Amplifier (Sure Electronics AA-JA32172)
+ * - TPA3116D2 Amplifier module
  */
 
 #ifndef _BOARD_PINS_CONFIG_H_

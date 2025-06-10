@@ -96,7 +96,7 @@ private:
     static constexpr int MAX_RECORDING_DURATION_MS = 10000; // 10 seconds
     static constexpr int SAMPLE_RATE = 16000;
     static constexpr int BITS_PER_SAMPLE = 16;
-    static constexpr size_t STREAM_CHUNK_SIZE = 4096; // Small chunks for streaming
+    static constexpr size_t STREAM_CHUNK_SIZE = 2048; // Reduced from 4096 to save memory (~2KB saved)
     
     // Command processing
     bool check_music_command(const char* text);

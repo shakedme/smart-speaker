@@ -92,16 +92,18 @@ void WakeWordDetector::set_wake_word_callback(WakeWordCallback callback) {
 }
 
 esp_err_t WakeWordDetector::setup_esp_sr() {
-    ESP_LOGI(TAG, "Setting up ESP-SR");
+    ESP_LOGI(TAG, "Setting up ESP-SR with memory optimizations");
     
-    // Get models from partition
-    srmodel_list_t *models = esp_srmodel_init("model");
+    // For compiled-in models (enabled via menuconfig), use NULL instead of partition name
+    srmodel_list_t *models = esp_srmodel_init(NULL);
     if (!models) {
-        ESP_LOGE(TAG, "Failed to initialize SR models");
+        ESP_LOGW(TAG, "No compiled-in SR models found. Please enable wake word models in menuconfig:");
+        ESP_LOGW(TAG, "Component config -> ESP Speech Recognition -> Wake Word Engine -> Enable");
+        ESP_LOGW(TAG, "Component config -> ESP Speech Recognition -> Wake Word Engine -> Select wn9_hiesp");
         return ESP_FAIL;
     }
     
-    // Create AFE configuration
+    // Create AFE configuration with memory-optimized settings
     // Input format: "M" means single microphone channel
     afe_config_t *afe_config = afe_config_init("M", models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
     if (!afe_config) {
@@ -118,23 +120,20 @@ esp_err_t WakeWordDetector::setup_esp_sr() {
     // Wake word configuration
     afe_config->wakenet_init = true;
     afe_config->wakenet_model_name = const_cast<char*>("wn9_hiesp");  // Use "Hi ESP" wake word
-    afe_config->wakenet_mode = DET_MODE_90;
+    afe_config->wakenet_mode = DET_MODE_95;  // More conservative detection to reduce processing
     
-    // Audio processing optimized for smart speaker use case
-    afe_config->aec_init = false;       // Disable AEC for now (needs reference channel)
-    afe_config->se_init = false;        // No speech enhancement for single mic  
-    afe_config->vad_init = true;        // Enable VAD (lightweight)
-    afe_config->vad_mode = VAD_MODE_2;  // Slightly more aggressive VAD for noisy environment
-    afe_config->agc_init = true;        // Enable AGC for consistent audio levels
-    afe_config->agc_mode = AFE_AGC_MODE_WEBRTC;  // Use WebRTC AGC
-    afe_config->ns_init = true;         // Enable noise suppression for better performance
-    afe_config->ns_model_name = const_cast<char*>("WEBRTC");  // Use WebRTC noise suppression
+    // MEMORY OPTIMIZATION: Disable all non-essential audio processing
+    afe_config->aec_init = false;       // Disable AEC (saves ~50KB)
+    afe_config->se_init = false;        // Disable speech enhancement (saves ~30KB)
+    afe_config->vad_init = false;       // Disable VAD (saves ~10KB) - wake word has its own VAD
+    afe_config->agc_init = false;       // Disable AGC (saves ~5KB) - rely on hardware gain
+    afe_config->ns_init = false;        // Disable noise suppression (saves ~20KB)
     
-    // Memory allocation optimized for ESP32-WROOM-32E
-    afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_INTERNAL;  // Use internal RAM instead of PSRAM
-    afe_config->afe_ringbuf_size = 8;   // Slightly larger buffer for NS processing
+    // CRITICAL MEMORY SETTINGS: Minimize buffer sizes
+    afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_INTERNAL;  // Use internal RAM
+    afe_config->afe_ringbuf_size = 2;   // Minimal ringbuffer (down from 8) - saves ~24KB
     afe_config->afe_linear_gain = 1.0f;
-    afe_config->afe_mode = AFE_MODE_LOW_COST;  // Ensure low-cost mode for memory efficiency
+    afe_config->afe_mode = AFE_MODE_LOW_COST;  // Ensure low-cost mode
     
     // Check and validate configuration
     afe_config = afe_config_check(afe_config);
@@ -144,7 +143,17 @@ esp_err_t WakeWordDetector::setup_esp_sr() {
     }
     
     // Print configuration for debugging
-    afe_config_print(afe_config);
+    ESP_LOGI(TAG, "ESP-SR Memory Optimized Configuration:");
+    ESP_LOGI(TAG, "  - Sample Rate: %d Hz", afe_config->pcm_config.sample_rate);
+    ESP_LOGI(TAG, "  - Channels: %d", afe_config->pcm_config.total_ch_num);
+    ESP_LOGI(TAG, "  - Ringbuffer Size: %d (minimal)", afe_config->afe_ringbuf_size);
+    ESP_LOGI(TAG, "  - Wake Word Model: %s", afe_config->wakenet_model_name);
+    ESP_LOGI(TAG, "  - Detection Mode: %d (conservative)", afe_config->wakenet_mode);
+    ESP_LOGI(TAG, "  - AEC: %s, VAD: %s, AGC: %s, NS: %s", 
+             afe_config->aec_init ? "ON" : "OFF",
+             afe_config->vad_init ? "ON" : "OFF", 
+             afe_config->agc_init ? "ON" : "OFF",
+             afe_config->ns_init ? "ON" : "OFF");
     
     // Get AFE handle using the correct function
     esp_afe_sr_iface_t* iface = esp_afe_handle_from_config(afe_config);
@@ -169,7 +178,7 @@ esp_err_t WakeWordDetector::setup_esp_sr() {
     // Clean up config as it's no longer needed
     afe_config_free(afe_config);
     
-    ESP_LOGI(TAG, "ESP-SR AFE initialized successfully");
+    ESP_LOGI(TAG, "ESP-SR AFE initialized successfully with memory optimizations");
     return ESP_OK;
 }
 

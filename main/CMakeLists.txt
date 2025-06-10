@@ -4,9 +4,7 @@ idf_component_register(
         main.cpp
 
         src/esp_raii_wrapper.cpp
-        src/avrcp_handler.cpp
         src/audio_pipeline_manager.cpp
-        src/bluetooth_initializer.cpp
         src/app_manager.cpp
         src/audio_response_player.cpp
         src/websocket_voice_client.cpp
@@ -32,7 +30,7 @@ idf_component_register(
 
         # ESP-ADF components actually used
         "audio_pipeline"  # Audio pipeline management
-        "audio_stream"    # I2S stream functionality  
+        "audio_stream"    # I2S stream functionality
         "bluetooth_service" # Bluetooth A2DP service
         "esp_wifi"        # WiFi stack
         "esp_websocket_client" # WebSocket client for voice streaming

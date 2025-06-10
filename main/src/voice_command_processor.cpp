@@ -77,11 +77,17 @@ esp_err_t VoiceCommandProcessor::init(WebSocketVoiceClient* websocket_client, Au
 void VoiceCommandProcessor::shutdown() {
     ESP_LOGI(TAG, "Shutting down voice command processor");
     
-    set_state(State::IDLE);
-    
+    // Set state to IDLE before deleting mutex to avoid accessing deleted mutex
     if (state_mutex_) {
+        if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+            state_.store(State::IDLE);
+            xSemaphoreGive(state_mutex_);
+        }
         vSemaphoreDelete(state_mutex_);
         state_mutex_ = nullptr;
+    } else {
+        // If mutex is already gone, just set state directly
+        state_.store(State::IDLE);
     }
     
     stream_buffer_.reset();
@@ -285,6 +291,12 @@ esp_err_t VoiceCommandProcessor::handle_offline_command(const uint8_t* audio_dat
 }
 
 void VoiceCommandProcessor::set_state(State new_state) {
+    if (!state_mutex_) {
+        // Mutex not available (probably during shutdown), just set the state directly
+        state_.store(new_state);
+        return;
+    }
+    
     if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
         State old_state = state_.load();
         state_.store(new_state);
@@ -294,6 +306,9 @@ void VoiceCommandProcessor::set_state(State new_state) {
         }
         
         xSemaphoreGive(state_mutex_);
+    } else {
+        ESP_LOGW(TAG, "Failed to acquire state mutex, setting state directly");
+        state_.store(new_state);
     }
 }
 

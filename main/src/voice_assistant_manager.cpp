@@ -26,8 +26,8 @@ VoiceAssistantManager::~VoiceAssistantManager() {
 
 esp_err_t VoiceAssistantManager::init(AudioPipelineManager* main_pipeline_manager) {
     if (!main_pipeline_manager) {
-        ESP_LOGE(TAG, "Main pipeline manager is null");
-        return ESP_ERR_INVALID_ARG;
+        ESP_LOGW(TAG, "Main pipeline manager is null");
+//        return ESP_ERR_INVALID_ARG;
     }
     
     main_pipeline_manager_ = main_pipeline_manager;

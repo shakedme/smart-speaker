@@ -4,13 +4,13 @@
 
 // WebSocket Server Configuration
 #ifndef CONFIG_WEBSOCKET_SERVER_URL
-#define CONFIG_WEBSOCKET_SERVER_URL "ws://localhost:8080/voice"
+#define CONFIG_WEBSOCKET_SERVER_URL "ws://a8ca-2a00-a041-e530-c500-5dfb-2883-2eeb-557b.ngrok-free.app/voice"
 #endif
 
 // WebSocket Connection Settings
 #define CONFIG_WS_KEEPALIVE_INTERVAL_S  30
 #define CONFIG_WS_PING_INTERVAL_S       10
-#define CONFIG_WS_CHUNK_SIZE            4096
+#define CONFIG_WS_CHUNK_SIZE            2048  // Reduced from 4096 to save memory
 #define CONFIG_WS_RECONNECT_TIMEOUT_MS  5000
 #define CONFIG_WS_MAX_RECONNECT_ATTEMPTS 5
 

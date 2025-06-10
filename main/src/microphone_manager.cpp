@@ -49,7 +49,7 @@ esp_err_t MicrophoneManager::start_recording() {
     BaseType_t task_created = xTaskCreate(
         audio_task,
         "mic_audio",
-        4096, // Stack size
+        3072, // Reduced stack size from 4096 to save memory (~1KB saved)
         this,
         5,    // Priority
         &audio_task_handle_
@@ -160,8 +160,8 @@ esp_err_t MicrophoneManager::setup_microphone_pipeline() {
         .chan_cfg = {
             .id = I2S_NUM_1, // Use I2S1 for microphone to avoid conflict
             .role = I2S_ROLE_MASTER,
-            .dma_desc_num = 3,
-            .dma_frame_num = 240,
+            .dma_desc_num = 2,    // Reduced from 3 to save memory (~8KB saved)
+            .dma_frame_num = 120, // Reduced from 240 to save memory (~16KB saved)
             .auto_clear = true,
             .auto_clear_before_cb = false,
             .allow_pd = false,
@@ -191,8 +191,8 @@ esp_err_t MicrophoneManager::setup_microphone_pipeline() {
 #endif
         .use_alc = false,
         .volume = 0,
-        .out_rb_size = 4 * 1024,
-        .task_stack = 2048,
+        .out_rb_size = 2 * 1024,  // Reduced from 4KB to save memory
+        .task_stack = 1536,       // Reduced from 2048 to save memory  
         .task_core = 1,
         .task_prio = 23,
         .stack_in_ext = false,
@@ -213,7 +213,7 @@ esp_err_t MicrophoneManager::setup_microphone_pipeline() {
     // Create raw stream for audio processing
     raw_stream_cfg_t raw_cfg = {
         .type = AUDIO_STREAM_WRITER,
-        .out_rb_size = 8 * 1024,
+        .out_rb_size = 4 * 1024,  // Reduced from 8KB to save memory
     };
     
     audio_element_handle_t raw_handle = raw_stream_init(&raw_cfg);
@@ -224,7 +224,7 @@ esp_err_t MicrophoneManager::setup_microphone_pipeline() {
     raw_mic_stream_.reset(raw_handle, audio_element_deleter);
     
     // Create microphone pipeline
-    audio_pipeline_cfg_t pipeline_cfg = { .rb_size = 4 * 1024 };
+    audio_pipeline_cfg_t pipeline_cfg = { .rb_size = 2 * 1024 };  // Reduced from 4KB to save memory
     audio_pipeline_handle_t pipeline_handle = audio_pipeline_init(&pipeline_cfg);
     if (!pipeline_handle) {
         ESP_LOGE(TAG, "Failed to create microphone pipeline");

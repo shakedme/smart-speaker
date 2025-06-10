@@ -260,7 +260,7 @@ esp_err_t AudioResponsePlayer::setup_response_pipeline() {
     // Create raw stream for audio input
     raw_stream_cfg_t raw_cfg = {
         .type = AUDIO_STREAM_READER,
-        .out_rb_size = 8 * 1024,
+        .out_rb_size = 4 * 1024,  // Reduced from 8KB to save memory
     };
     
     audio_element_handle_t raw_handle = raw_stream_init(&raw_cfg);
@@ -277,8 +277,8 @@ esp_err_t AudioResponsePlayer::setup_response_pipeline() {
         .chan_cfg = {
             .id = I2S_NUM_0, // Same I2S port as main pipeline
             .role = I2S_ROLE_MASTER,
-            .dma_desc_num = 3,
-            .dma_frame_num = 312,
+            .dma_desc_num = 2,    // Reduced from 3 to save memory
+            .dma_frame_num = 200, // Reduced from 312 to save memory
             .auto_clear = true,
             .auto_clear_before_cb = false,
             .allow_pd = false,
@@ -309,8 +309,8 @@ esp_err_t AudioResponsePlayer::setup_response_pipeline() {
 #endif
         .use_alc = false,
         .volume = 0,
-        .out_rb_size = 8 * 1024,
-        .task_stack = 3584,
+        .out_rb_size = 4 * 1024,  // Reduced from 8KB to save memory
+        .task_stack = 2560,       // Reduced from 3584 to save memory
         .task_core = 0,
         .task_prio = 24, // Higher priority than main pipeline
         .stack_in_ext = false,
@@ -329,7 +329,7 @@ esp_err_t AudioResponsePlayer::setup_response_pipeline() {
     i2s_response_writer_.reset(i2s_handle, audio_element_deleter);
     
     // Create response pipeline
-    audio_pipeline_cfg_t pipeline_cfg = { .rb_size = 8 * 1024 };
+    audio_pipeline_cfg_t pipeline_cfg = { .rb_size = 4 * 1024 };  // Reduced from 8KB to save memory
     audio_pipeline_handle_t pipeline_handle = audio_pipeline_init(&pipeline_cfg);
     if (!pipeline_handle) {
         ESP_LOGE(TAG, "Failed to create response pipeline");

@@ -68,7 +68,7 @@ public:
 private:
     static constexpr const char* TAG = "MIC_MGR";
     static constexpr int SAMPLE_RATE = 16000;
-    static constexpr int AUDIO_BUFFER_SIZE = 1024;
+    static constexpr int AUDIO_BUFFER_SIZE = 512;
     
     // Audio processing task
     static void audio_task(void* arg);

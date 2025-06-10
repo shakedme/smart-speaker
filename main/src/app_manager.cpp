@@ -4,6 +4,7 @@
 extern "C" {
 #include "esp_log.h"
 #include "esp_system.h"
+#include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 }
@@ -25,37 +26,30 @@ namespace btspeaker {
     }
 
     esp_err_t AppManager::init() {
-        ESP_LOGI(TAG, "Initializing Bluetooth Audio Application");
+        ESP_LOGI(TAG, "Initializing application");
 
         if (state_.load() != State::UNINITIALIZED) {
             ESP_LOGW(TAG, "Already initialized");
             return ESP_OK;
         }
 
+        // Initialize NVS first
+        esp_err_t ret = init_nvs();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to initialize NVS: %s", esp_err_to_name(ret));
+            state_ = State::ERROR;
+            return ret;
+        } else {
+            ESP_LOGI(TAG, "NVS initialized successfully");
+        }
+
         // Initialize WiFi first (needed for Gemini API)
         wifi_manager_ = std::make_unique<WiFiManager>();
-        esp_err_t ret = wifi_manager_->init();
+        ret = wifi_manager_->init();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize WiFi: %s", esp_err_to_name(ret));
-            state_ = State::ERROR;
-            return ret;
-        }
-
-        // Connect to WiFi
-        ret = wifi_manager_->connect(CONFIG_WIFI_SSID, CONFIG_WIFI_PASSWORD);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to connect to WiFi: %s", esp_err_to_name(ret));
             ESP_LOGW(TAG, "Voice assistant features will be limited without internet");
             // Continue initialization - Bluetooth audio can still work
-        }
-
-        // Initialize Bluetooth subsystem
-        initializer_ = std::make_unique<BluetoothInitializer>();
-        ret = initializer_->init();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to initialize Bluetooth: %s", esp_err_to_name(ret));
-            state_ = State::ERROR;
-            return ret;
         }
 
         // Initialize audio pipeline manager
@@ -63,16 +57,6 @@ namespace btspeaker {
         ret = pipeline_manager_->setup_pipeline();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to setup audio pipeline: %s", esp_err_to_name(ret));
-            state_ = State::ERROR;
-            return ret;
-        }
-
-        // Initialize AVRCP handler
-        avrcp_handler_ = std::make_unique<AvrcpHandler>();
-        avrcp_handler_->set_pipeline_manager(pipeline_manager_.get());
-        ret = avrcp_handler_->configure_target();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to configure AVRCP: %s", esp_err_to_name(ret));
             state_ = State::ERROR;
             return ret;
         }
@@ -164,15 +148,6 @@ namespace btspeaker {
             pipeline_manager_.reset();
         }
 
-        // Clean up AVRCP handler
-        avrcp_handler_.reset();
-
-        // Clean up Bluetooth
-        if (initializer_) {
-            initializer_->shutdown();
-            initializer_.reset();
-        }
-
         // Clean up WiFi
         if (wifi_manager_) {
             wifi_manager_->shutdown();
@@ -183,9 +158,26 @@ namespace btspeaker {
         ESP_LOGI(TAG, "Bluetooth Audio Application shutdown complete");
     }
 
+
+    esp_err_t AppManager::init_nvs() {
+        ESP_LOGD(TAG, "Initializing NVS");
+        esp_err_t ret = nvs_flash_init();
+        if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+            ESP_LOGW(TAG, "NVS needs erase and reinit: %s", esp_err_to_name(ret));
+            ret = nvs_flash_erase();
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to erase NVS: %s", esp_err_to_name(ret));
+                return ret;
+            }
+            ret = nvs_flash_init();
+        }
+
+        return ret;
+    }
+
     void AppManager::music_playback_cmd_callback(const char *command) {
-        if (!command || !pipeline_manager_ || !avrcp_handler_) {
-            ESP_LOGW(TAG, "Invalid music command or components not available");
+        if (!command || !pipeline_manager_) {
+            ESP_LOGW(TAG, "Invalid music command or pipeline_manager not available");
             return;
         }
 
@@ -202,24 +194,17 @@ namespace btspeaker {
         } else if (strstr(command, "stop")) {
             ret = pipeline_manager_->stop_pipeline();
             ESP_LOGI(TAG, "Voice command: Stop playback");
-        } else if (strstr(command, "start over") || strstr(command, "restart")) {
-            // Stop and start again
-            pipeline_manager_->stop_pipeline();
-            vTaskDelay(pdMS_TO_TICKS(100));
-            ret = pipeline_manager_->start_pipeline();
-            ESP_LOGI(TAG, "Voice command: Restart playback");
         } else {
-            ESP_LOGW(TAG, "Unrecognized music command: %s", command);
+            ESP_LOGW(TAG, "Unknown music command: %s", command);
             return;
         }
 
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to execute music command '%s': %s", command, esp_err_to_name(ret));
-        } else {
-            ESP_LOGI(TAG, "Successfully executed music command: %s", command);
+            ESP_LOGW(TAG, "Failed to execute music command: %s", esp_err_to_name(ret));
         }
-
     }
+
+
 
     AppManager::State AppManager::get_state() const {
         return state_.load();

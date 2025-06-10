@@ -18,8 +18,9 @@ static constexpr const char* TAG = "PIPELINE_MGR";
 esp_err_t AudioPipelineManager::setup_pipeline() {
     ESP_LOGI(TAG, "Setting up audio pipeline");
     
-    // Initialize event interface with RAII
+    // Initialize event interface with default configuration (like official example)
     audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
+    
     audio_event_iface_handle_t evt_handle = audio_event_iface_init(&evt_cfg);
     if (!evt_handle) {
         ESP_LOGE(TAG, "Failed to create audio event interface");
@@ -27,7 +28,9 @@ esp_err_t AudioPipelineManager::setup_pipeline() {
     }
     evt_.reset(evt_handle, audio_event_iface_deleter);
     
-    // Start Bluetooth service
+    // Verify event interface is working
+    ESP_LOGI(TAG, "Event interface created successfully");
+
     bluetooth_service_cfg_t bt_cfg = {
         .device_name = "ESP32_SPEAKER",
         .remote_name = nullptr,
@@ -42,15 +45,14 @@ esp_err_t AudioPipelineManager::setup_pipeline() {
     bt_service_started_ = true;
     ESP_LOGI(TAG, "Bluetooth A2DP Sink started, device name: %s", bt_cfg.device_name);
 
-    // Create I2S stream with safe configuration
     i2s_stream_cfg_t i2s_cfg = {
         .type = AUDIO_STREAM_WRITER,
         .transmit_mode = I2S_COMM_MODE_STD,
         .chan_cfg = {
             .id = I2S_NUM_0,
             .role = I2S_ROLE_MASTER,
-            .dma_desc_num = 3,
-            .dma_frame_num = 312,
+            .dma_desc_num = 4,
+            .dma_frame_num = 160,
             .auto_clear = true,
             .auto_clear_before_cb = false,
             .allow_pd = false,
@@ -72,10 +74,16 @@ esp_err_t AudioPipelineManager::setup_pipeline() {
                 }
             },
         },
+#if SOC_I2S_SUPPORTS_PDM_RX
+        .pdm_rx_cfg = {},
+#endif
+#if SOC_I2S_SUPPORTS_PDM_TX
+        .pdm_tx_cfg = {},
+#endif
         .use_alc = false,
-        .volume = 0,
-        .out_rb_size = 8 * 1024,
-        .task_stack = 3584,
+        .volume = 100,
+        .out_rb_size = 12 * 1024,
+        .task_stack = 3072,
         .task_core = 0,
         .task_prio = 23,
         .stack_in_ext = false,
@@ -83,7 +91,7 @@ esp_err_t AudioPipelineManager::setup_pipeline() {
         .uninstall_drv = true,
         .need_expand = false,
         .expand_src_bits = I2S_DATA_BIT_WIDTH_16BIT,
-        .buffer_len = 3600
+        .buffer_len = 2400
     };
     
     audio_element_handle_t i2s_handle = i2s_stream_init(&i2s_cfg);
@@ -101,8 +109,7 @@ esp_err_t AudioPipelineManager::setup_pipeline() {
     }
     bt_stream_reader_.reset(bt_handle, audio_element_deleter);
     
-    // Create pipeline
-    audio_pipeline_cfg_t pipeline_cfg = { .rb_size = 8 * 1024 };
+    audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
     audio_pipeline_handle_t pipeline_handle = audio_pipeline_init(&pipeline_cfg);
     if (!pipeline_handle) {
         ESP_LOGE(TAG, "Failed to create audio pipeline");
@@ -130,7 +137,7 @@ esp_err_t AudioPipelineManager::setup_pipeline() {
         return ret;
     }
     
-    // Set event listener
+    // Set event listener on pipeline
     ret = audio_pipeline_set_listener(pipeline_.get(), evt_.get());
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to set pipeline listener: %s", esp_err_to_name(ret));
@@ -152,7 +159,7 @@ esp_err_t AudioPipelineManager::start_pipeline() {
         ESP_LOGE(TAG, "Failed to start audio pipeline: %s", esp_err_to_name(ret));
         return ret;
     }
-    
+
     ESP_LOGI(TAG, "Audio pipeline started successfully");
     return ESP_OK;
 }
@@ -206,20 +213,16 @@ esp_err_t AudioPipelineManager::run_event_loop() {
     
     while (true) {
         audio_event_iface_msg_t msg;
-        esp_err_t ret = audio_event_iface_listen(evt_.get(), &msg, pdMS_TO_TICKS(1000));
-        
-        if (ret == ESP_ERR_TIMEOUT) {
-            continue; // Normal timeout, continue listening
-        }
+        esp_err_t ret = audio_event_iface_listen(evt_.get(), &msg, portMAX_DELAY);
         
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Event listen error: %s", esp_err_to_name(ret));
-            break;
+            ESP_LOGE(TAG, "Event interface error: %s", esp_err_to_name(ret));
+            continue;
         }
         
         if (!handle_audio_event(msg)) {
             ESP_LOGI(TAG, "Event handler requested exit");
-            break; // Event handler requested exit
+            break;
         }
     }
     
@@ -246,19 +249,43 @@ bool AudioPipelineManager::handle_audio_event(const audio_event_iface_msg_t& msg
         };
         esp_err_t ret = audio_element_getinfo(bt_stream_reader_.get(), &music_info);
         if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "Music info: sample_rate=%d, bits=%d, channels=%d",
-                     music_info.sample_rates, music_info.bits, music_info.channels);
+            ESP_LOGI(TAG, "=== BLUETOOTH AUDIO FORMAT ===");
+            ESP_LOGI(TAG, "Sample Rate: %d Hz", music_info.sample_rates);
+            ESP_LOGI(TAG, "Bit Depth: %d bits", music_info.bits);
+            ESP_LOGI(TAG, "Channels: %d", music_info.channels);
+            ESP_LOGI(TAG, "Bitrate: %d bps", music_info.bps);
+            ESP_LOGI(TAG, "================================");
             
             // Validate parameters before setting
             if (music_info.sample_rates > 0 && music_info.bits > 0 && music_info.channels > 0) {
+                // Check for supported formats
+                if (music_info.sample_rates < 8000 || music_info.sample_rates > 192000) {
+                    ESP_LOGW(TAG, "Unusual sample rate: %d Hz", music_info.sample_rates);
+                }
+                if (music_info.bits != 16 && music_info.bits != 24 && music_info.bits != 32) {
+                    ESP_LOGW(TAG, "Unusual bit depth: %d bits", music_info.bits);
+                }
+                if (music_info.channels < 1 || music_info.channels > 2) {
+                    ESP_LOGW(TAG, "Unusual channel count: %d", music_info.channels);
+                }
+                
                 ret = i2s_stream_set_clk(i2s_stream_writer_.get(), 
                                        music_info.sample_rates, 
                                        music_info.bits, 
                                        music_info.channels);
                 if (ret != ESP_OK) {
-                    ESP_LOGW(TAG, "Failed to update I2S clock: %s", esp_err_to_name(ret));
+                    ESP_LOGE(TAG, "Failed to update I2S clock: %s", esp_err_to_name(ret));
+                    ESP_LOGE(TAG, "Attempted config: %dHz, %dbit, %dch", 
+                            music_info.sample_rates, music_info.bits, music_info.channels);
+                } else {
+                    ESP_LOGI(TAG, "I2S clock updated successfully to: %dHz, %dbit, %dch", 
+                            music_info.sample_rates, music_info.bits, music_info.channels);
                 }
+            } else {
+                ESP_LOGW(TAG, "Invalid audio parameters received - using defaults");
             }
+        } else {
+            ESP_LOGW(TAG, "Failed to get bluetooth music info: %s", esp_err_to_name(ret));
         }
         return true;
     }
@@ -269,11 +296,16 @@ bool AudioPipelineManager::handle_audio_event(const audio_event_iface_msg_t& msg
         msg.cmd == AEL_MSG_CMD_REPORT_STATUS) {
         
         int state = static_cast<int>(reinterpret_cast<intptr_t>(msg.data));
+        ESP_LOGI(TAG, "I2S stream status: %d", state);
         if (state == AEL_STATUS_STATE_STOPPED || state == AEL_STATUS_STATE_FINISHED) {
             ESP_LOGW(TAG, "I2S stream stopped or finished");
             return false; // Request event loop exit
         }
     }
+    
+    // Log other events for debugging
+    ESP_LOGD(TAG, "Audio event - source_type: %d, cmd: %d, source: %p", 
+             msg.source_type, msg.cmd, msg.source);
     
     return true; // Continue event loop
 }
@@ -281,10 +313,25 @@ bool AudioPipelineManager::handle_audio_event(const audio_event_iface_msg_t& msg
 void AudioPipelineManager::cleanup() {
     ESP_LOGI(TAG, "Cleaning up audio pipeline");
     
-    // Stop pipeline first
+    // Stop pipeline first, with proper error handling
     if (pipeline_) {
-        audio_pipeline_stop(pipeline_.get());
-        audio_pipeline_terminate(pipeline_.get());
+        esp_err_t ret = audio_pipeline_stop(pipeline_.get());
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Pipeline stop returned: %s", esp_err_to_name(ret));
+        }
+        
+        ret = audio_pipeline_wait_for_stop(pipeline_.get());
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Pipeline wait for stop returned: %s", esp_err_to_name(ret));
+        }
+    }
+    
+    // Unregister elements from pipeline before cleanup to avoid double-free
+    if (pipeline_ && bt_stream_reader_) {
+        audio_pipeline_unregister(pipeline_.get(), bt_stream_reader_.get());
+    }
+    if (pipeline_ && i2s_stream_writer_) {
+        audio_pipeline_unregister(pipeline_.get(), i2s_stream_writer_.get());
     }
     
     // Clean up in reverse order of initialization

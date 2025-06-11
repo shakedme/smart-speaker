@@ -1,6 +1,5 @@
 #pragma once
 
-#include "audio_pipeline_manager.hpp"
 #include "voice_assistant_manager.hpp"
 #include "wifi_manager.hpp"
 #include <memory>
@@ -58,7 +57,6 @@ private:
     static AppManager* instance_;
     
     std::unique_ptr<WiFiManager> wifi_manager_;
-    std::unique_ptr<AudioPipelineManager> pipeline_manager_;
     std::unique_ptr<VoiceAssistantManager> voice_assistant_;
 };
 

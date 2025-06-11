@@ -265,6 +265,30 @@ esp_err_t SpotifyPipeline::search(const std::string& query) {
     return ESP_OK;
 }
 
+esp_err_t SpotifyPipeline::skipNext() {
+    if (!is_initialized_) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    ESP_LOGI(TAG, "Skipping to next track");
+    if (device_handler_) {
+        device_handler_->sendCommand(cspot::DeviceStateHandler::CommandType::SKIP_NEXT);
+    }
+    return ESP_OK;
+}
+
+esp_err_t SpotifyPipeline::skipPrevious() {
+    if (!is_initialized_) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    ESP_LOGI(TAG, "Skipping to previous track");
+    if (device_handler_) {
+        device_handler_->sendCommand(cspot::DeviceStateHandler::CommandType::SKIP_PREV);
+    }
+    return ESP_OK;
+}
+
 void SpotifyPipeline::setVolume(uint8_t volume) {
     volume_ = volume;
     ESP_LOGI(TAG, "Setting volume to: %d", volume_);

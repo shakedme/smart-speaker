@@ -43,6 +43,8 @@ public:
     // Playback control
     esp_err_t play(const std::string& uri);
     esp_err_t search(const std::string& query);
+    esp_err_t skipNext();
+    esp_err_t skipPrevious();
     void setVolume(uint8_t volume);
     bool isPlaying() const { return is_playing_; }
 

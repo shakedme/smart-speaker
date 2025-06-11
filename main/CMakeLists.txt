@@ -16,6 +16,11 @@ set(PROJECT_SRCS
         src/wifi_manager.cpp
         src/spotify_pipeline.cpp
         src/audio_source_manager.cpp
+        
+        # ESP32-specific cspot files
+        "../cspot/esp32/main/EspPlayer.cpp"
+        "../cspot/esp32/main/ESPFile.cpp"
+        "../cspot/esp32/main/ESPStatusLed.cpp"
 )
 
 # Register component with all sources
@@ -25,6 +30,7 @@ idf_component_register(
 
         INCLUDE_DIRS
         "."
+        "../cspot/esp32/main"
 
         REQUIRES
         # Your existing requirements

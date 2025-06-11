@@ -56,9 +56,9 @@ public:
 private:
     static constexpr const char* TAG = "AUDIO_RESPONSE";
     static constexpr size_t AUDIO_CHUNK_SIZE = 1024;
-    static constexpr int RESPONSE_SAMPLE_RATE = 24000; // Gemini typical output
-    static constexpr int RESPONSE_CHANNELS = 1;
-    static constexpr int RESPONSE_BITS = 16;
+    static constexpr int DEFAULT_SAMPLE_RATE = 24000; // Gemini typical output
+    static constexpr int DEFAULT_CHANNELS = 1;
+    static constexpr int DEFAULT_BITS = 16;
     
     // Audio playback task
     static void audio_playback_task(void* arg);

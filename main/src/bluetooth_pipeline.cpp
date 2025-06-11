@@ -1,4 +1,5 @@
-#include "../include/audio_pipeline_manager.hpp"
+#include "../include/bluetooth_pipeline.hpp"
+#include "../include/i2s_audio_service.hpp"
 
 extern "C" {
 #include "esp_log.h"
@@ -15,7 +16,7 @@ namespace btspeaker {
 
 static constexpr const char* TAG = "PIPELINE_MGR";
 
-esp_err_t AudioPipelineManager::setup_pipeline() {
+esp_err_t BluetoothPipeline::setup_pipeline() {
     ESP_LOGI(TAG, "Setting up audio pipeline");
     
     // Initialize event interface with default configuration (like official example)
@@ -45,58 +46,17 @@ esp_err_t AudioPipelineManager::setup_pipeline() {
     bt_service_started_ = true;
     ESP_LOGI(TAG, "Bluetooth A2DP Sink started, device name: %s", bt_cfg.device_name);
 
-    i2s_stream_cfg_t i2s_cfg = {
-        .type = AUDIO_STREAM_WRITER,
-        .transmit_mode = I2S_COMM_MODE_STD,
-        .chan_cfg = {
-            .id = I2S_NUM_0,
-            .role = I2S_ROLE_MASTER,
-            .dma_desc_num = 4,
-            .dma_frame_num = 160,
-            .auto_clear = true,
-            .auto_clear_before_cb = false,
-            .allow_pd = false,
-            .intr_priority = 0
-        },
-        .std_cfg = {
-            .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(44100),
-            .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
-            .gpio_cfg = {
-                .mclk = GPIO_NUM_NC,
-                .bclk = static_cast<gpio_num_t>(I2S_BCK_IO),
-                .ws   = static_cast<gpio_num_t>(I2S_WS_IO),
-                .dout = static_cast<gpio_num_t>(I2S_DO_IO),
-                .din  = GPIO_NUM_NC,
-                .invert_flags = {
-                    .mclk_inv = false,
-                    .bclk_inv = false,
-                    .ws_inv = false
-                }
-            },
-        },
-#if SOC_I2S_SUPPORTS_PDM_RX
-        .pdm_rx_cfg = {},
-#endif
-#if SOC_I2S_SUPPORTS_PDM_TX
-        .pdm_tx_cfg = {},
-#endif
-        .use_alc = false,
-        .volume = 100,
-        .out_rb_size = 12 * 1024,
-        .task_stack = 3072,
-        .task_core = 0,
-        .task_prio = 23,
-        .stack_in_ext = false,
-        .multi_out_num = 0,
-        .uninstall_drv = true,
-        .need_expand = false,
-        .expand_src_bits = I2S_DATA_BIT_WIDTH_16BIT,
-        .buffer_len = 2400
-    };
+    // Use shared I2S service for consistent configuration
+    auto& i2s_service = I2SAudioService::getInstance();
+    audio_element_handle_t i2s_handle = i2s_service.createI2SWriter(
+        I2SAudioService::AudioSource::BLUETOOTH,
+        44100, // sample_rate
+        2,     // channels (stereo)
+        16     // bits_per_sample
+    );
     
-    audio_element_handle_t i2s_handle = i2s_stream_init(&i2s_cfg);
     if (!i2s_handle) {
-        ESP_LOGE(TAG, "Failed to create I2S stream");
+        ESP_LOGE(TAG, "Failed to create I2S stream via shared service");
         return ESP_FAIL;
     }
     i2s_stream_writer_.reset(i2s_handle, audio_element_deleter);
@@ -148,7 +108,7 @@ esp_err_t AudioPipelineManager::setup_pipeline() {
     return ESP_OK;
 }
 
-esp_err_t AudioPipelineManager::start_pipeline() {
+esp_err_t BluetoothPipeline::start_pipeline() {
     if (!pipeline_) {
         ESP_LOGE(TAG, "Pipeline not initialized");
         return ESP_ERR_INVALID_STATE;
@@ -164,7 +124,7 @@ esp_err_t AudioPipelineManager::start_pipeline() {
     return ESP_OK;
 }
 
-esp_err_t AudioPipelineManager::stop_pipeline() {
+esp_err_t BluetoothPipeline::stop_pipeline() {
     if (!pipeline_) {
         ESP_LOGW(TAG, "Pipeline not available for stop");
         return ESP_ERR_INVALID_STATE;
@@ -177,7 +137,7 @@ esp_err_t AudioPipelineManager::stop_pipeline() {
     return ret;
 }
 
-esp_err_t AudioPipelineManager::pause_pipeline() {
+esp_err_t BluetoothPipeline::pause_pipeline() {
     if (!pipeline_) {
         ESP_LOGW(TAG, "Pipeline not available for pause");
         return ESP_ERR_INVALID_STATE;
@@ -190,7 +150,7 @@ esp_err_t AudioPipelineManager::pause_pipeline() {
     return ret;
 }
 
-esp_err_t AudioPipelineManager::resume_pipeline() {
+esp_err_t BluetoothPipeline::resume_pipeline() {
     if (!pipeline_) {
         ESP_LOGW(TAG, "Pipeline not available for resume");
         return ESP_ERR_INVALID_STATE;
@@ -203,7 +163,7 @@ esp_err_t AudioPipelineManager::resume_pipeline() {
     return ret;
 }
 
-esp_err_t AudioPipelineManager::run_event_loop() {
+esp_err_t BluetoothPipeline::run_event_loop() {
     if (!evt_) {
         ESP_LOGE(TAG, "Event interface not initialized");
         return ESP_ERR_INVALID_STATE;
@@ -229,7 +189,7 @@ esp_err_t AudioPipelineManager::run_event_loop() {
     return ESP_OK;
 }
 
-bool AudioPipelineManager::handle_audio_event(const audio_event_iface_msg_t& msg) {
+bool BluetoothPipeline::handle_audio_event(const audio_event_iface_msg_t& msg) {
     // Handle Bluetooth music info updates
     if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT && 
         msg.source == bt_stream_reader_.get() &&
@@ -310,7 +270,7 @@ bool AudioPipelineManager::handle_audio_event(const audio_event_iface_msg_t& msg
     return true; // Continue event loop
 }
 
-void AudioPipelineManager::cleanup() {
+void BluetoothPipeline::cleanup() {
     ESP_LOGI(TAG, "Cleaning up audio pipeline");
     
     // Stop pipeline first, with proper error handling

@@ -3,7 +3,7 @@
 #include "../include/wake_word_detector.hpp"
 #include "../include/voice_command_processor.hpp"
 #include "../include/websocket_voice_client.hpp"
-#include "../include/audio_response_player.hpp"
+#include "../include/llm_pipeline.hpp"
 #include "../include/voice_config.hpp"
 
 extern "C" {
@@ -24,7 +24,7 @@ VoiceAssistantManager::~VoiceAssistantManager() {
     shutdown();
 }
 
-esp_err_t VoiceAssistantManager::init(AudioPipelineManager* main_pipeline_manager) {
+esp_err_t VoiceAssistantManager::init(BluetoothPipeline* main_pipeline_manager) {
     if (!main_pipeline_manager) {
         ESP_LOGW(TAG, "Main pipeline manager is null");
 //        return ESP_ERR_INVALID_ARG;
@@ -63,8 +63,8 @@ esp_err_t VoiceAssistantManager::init(AudioPipelineManager* main_pipeline_manage
     }
     
     // Initialize audio response player
-    response_player_ = std::make_unique<AudioResponsePlayer>();
-    ret = response_player_->init(main_pipeline_manager_);
+    response_player_ = std::make_unique<LLMPipeline>();
+    ret = response_player_->init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize response player: %s", esp_err_to_name(ret));
         return ret;

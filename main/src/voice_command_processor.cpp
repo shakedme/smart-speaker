@@ -1,6 +1,6 @@
 #include "../include/voice_command_processor.hpp"
 #include "../include/websocket_voice_client.hpp"
-#include "../include/audio_response_player.hpp"
+#include "../include/llm_pipeline.hpp"
 #include "../include/voice_config.hpp"
 
 extern "C" {
@@ -36,7 +36,7 @@ VoiceCommandProcessor::~VoiceCommandProcessor() {
     shutdown();
 }
 
-esp_err_t VoiceCommandProcessor::init(WebSocketVoiceClient* websocket_client, AudioResponsePlayer* response_player) {
+esp_err_t VoiceCommandProcessor::init(WebSocketVoiceClient* websocket_client, LLMPipeline* response_player) {
     if (!websocket_client || !response_player) {
         ESP_LOGE(TAG, "Invalid parameters");
         return ESP_ERR_INVALID_ARG;

@@ -16,18 +16,18 @@ namespace btspeaker {
 // - I2S_WS_IO (22):  Word Select → PCM5102A LCK  
 // - I2S_DO_IO (26):  Data Out → PCM5102A DIN
 
-class AudioPipelineManager {
+class BluetoothPipeline {
 public:
-    AudioPipelineManager() = default;
-    ~AudioPipelineManager() = default;
+    BluetoothPipeline() = default;
+    ~BluetoothPipeline() = default;
     
     // Delete copy operations
-    AudioPipelineManager(const AudioPipelineManager&) = delete;
-    AudioPipelineManager& operator=(const AudioPipelineManager&) = delete;
+    BluetoothPipeline(const BluetoothPipeline&) = delete;
+    BluetoothPipeline& operator=(const BluetoothPipeline&) = delete;
     
     // Move operations
-    AudioPipelineManager(AudioPipelineManager&&) = default;
-    AudioPipelineManager& operator=(AudioPipelineManager&&) = default;
+    BluetoothPipeline(BluetoothPipeline&&) = default;
+    BluetoothPipeline& operator=(BluetoothPipeline&&) = default;
     
     esp_err_t setup_pipeline();
     esp_err_t start_pipeline();

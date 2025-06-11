@@ -2,6 +2,11 @@
 
 #include "driver/i2s.h"
 
+// Include correct pin definitions from board.h
+extern "C" {
+#include "board.h"
+}
+
 PCM5102AudioSink::PCM5102AudioSink() {
   i2s_config_t i2s_config = {
 
@@ -17,11 +22,12 @@ PCM5102AudioSink::PCM5102AudioSink() {
       .tx_desc_auto_clear = true,  //Auto clear tx descriptor on underflow
       .fixed_mclk = 384 * 44100};
 
+  // Use correct GPIO pins from board.h to match hardware setup
   i2s_pin_config_t pin_config = {
-      .bck_io_num = 27,
-      .ws_io_num = 32,
-      .data_out_num = 25,
-      .data_in_num = -1  //Not used
+      .bck_io_num = I2S_BCK_IO,    // GPIO25: Bit Clock
+      .ws_io_num = I2S_WS_IO,      // GPIO22: Word Select (LCK)
+      .data_out_num = I2S_DO_IO,   // GPIO26: Data Out (DIN)
+      .data_in_num = -1            // Not used (DAC only)
   };
   i2s_driver_install((i2s_port_t)0, &i2s_config, 0, NULL);
   i2s_set_pin((i2s_port_t)0, &pin_config);

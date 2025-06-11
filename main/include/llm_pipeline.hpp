@@ -1,7 +1,6 @@
 #pragma once
 
 #include "esp_raii_wrapper.hpp"
-#include "audio_pipeline_manager.hpp"
 #include <memory>
 #include <atomic>
 #include <vector>
@@ -19,7 +18,7 @@ extern "C" {
 
 namespace btspeaker {
 
-class AudioResponsePlayer {
+class LLMPipeline {
 public:
     enum class State {
         IDLE,
@@ -29,17 +28,18 @@ public:
         ERROR
     };
 
-    AudioResponsePlayer();
-    ~AudioResponsePlayer();
+    LLMPipeline();
+    ~LLMPipeline();
     
     // Delete copy operations
-    AudioResponsePlayer(const AudioResponsePlayer&) = delete;
-    AudioResponsePlayer& operator=(const AudioResponsePlayer&) = delete;
+    LLMPipeline(const LLMPipeline&) = delete;
+    LLMPipeline& operator=(const LLMPipeline&) = delete;
     
-    esp_err_t init(AudioPipelineManager* main_pipeline_manager);
+    // Initialize the LLM pipeline (no external dependencies)
+    esp_err_t init();
     void shutdown();
     
-    // Play audio response (temporarily pause Bluetooth if needed)
+    // Play audio response
     esp_err_t play_audio_response(const uint8_t* audio_data, size_t length);
     
     // Queue audio chunk for streaming playback
@@ -50,11 +50,16 @@ public:
     esp_err_t pause_playback();
     esp_err_t resume_playback();
     
+    // State query
     State get_state() const { return state_.load(); }
     bool is_playing() const { return state_.load() == State::PLAYING; }
+    
+    // Volume control
+    void set_volume(uint8_t volume);
+    uint8_t get_volume() const { return volume_; }
 
 private:
-    static constexpr const char* TAG = "AUDIO_RESPONSE";
+    static constexpr const char* TAG = "LLM_PIPELINE";
     static constexpr size_t AUDIO_CHUNK_SIZE = 1024;
     static constexpr int DEFAULT_SAMPLE_RATE = 24000; // Gemini typical output
     static constexpr int DEFAULT_CHANNELS = 1;
@@ -67,8 +72,6 @@ private:
     // Pipeline management
     esp_err_t setup_response_pipeline();
     esp_err_t cleanup_response_pipeline();
-    esp_err_t temporarily_pause_main_pipeline();
-    esp_err_t restore_main_pipeline();
     
     // Audio processing
     esp_err_t write_audio_to_pipeline(const uint8_t* data, size_t length);
@@ -82,21 +85,17 @@ private:
     std::atomic<State> state_;
     TaskHandle_t playback_task_handle_;
     QueueHandle_t audio_data_queue_;
+    uint8_t volume_;
     
-    // Pipeline components
-    AudioPipelineManager* main_pipeline_manager_;
+    // Pipeline components (independent I2S setup)
     PipelineHandle response_pipeline_;
     ElementHandle raw_response_stream_;
     ElementHandle i2s_response_writer_;
     EventIfaceHandle response_evt_;
     
-    // Playback state
-    bool main_pipeline_was_playing_;
+    // Audio processing
     std::vector<uint8_t> audio_buffer_;
     size_t buffer_position_;
-    
-    // Configuration
-    bool auto_resume_main_pipeline_;
 };
 
 // Audio data queue item

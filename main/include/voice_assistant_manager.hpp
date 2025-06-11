@@ -1,7 +1,7 @@
 #pragma once
 
 #include "esp_raii_wrapper.hpp"
-#include "audio_pipeline_manager.hpp"
+#include "bluetooth_pipeline.hpp"
 #include <memory>
 #include <atomic>
 #include <functional>
@@ -19,7 +19,7 @@ class MicrophoneManager;
 class WakeWordDetector;
 class VoiceCommandProcessor;
 class WebSocketVoiceClient;
-class AudioResponsePlayer;
+class LLMPipeline;
 
 // Callback type for music playback commands
 using MusicPlaybackCallback = std::function<void(const char* command)>;
@@ -56,7 +56,7 @@ public:
     /**
      * @brief Initialize voice assistant with main audio pipeline
      */
-    esp_err_t init(AudioPipelineManager* main_pipeline_manager);
+    esp_err_t init(BluetoothPipeline* main_pipeline_manager);
     
     /**
      * @brief Start voice assistant
@@ -107,10 +107,10 @@ private:
     std::unique_ptr<WakeWordDetector> wake_word_detector_;
     std::unique_ptr<VoiceCommandProcessor> command_processor_;
     std::unique_ptr<WebSocketVoiceClient> websocket_client_;
-    std::unique_ptr<AudioResponsePlayer> response_player_;
+    std::unique_ptr<LLMPipeline> response_player_;
     
     // External references
-    AudioPipelineManager* main_pipeline_manager_;
+    BluetoothPipeline* main_pipeline_manager_;
     MusicPlaybackCallback music_callback_;
 };
 

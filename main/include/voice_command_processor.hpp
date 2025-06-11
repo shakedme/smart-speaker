@@ -15,7 +15,7 @@ namespace btspeaker {
 
 // Forward declarations
 class WebSocketVoiceClient;
-class AudioResponsePlayer;
+class LLMPipeline;
 
 // Callback type for music playback commands
 using MusicPlaybackCallback = std::function<void(const char* command)>;
@@ -49,7 +49,7 @@ public:
     /**
      * @brief Initialize voice command processor
      */
-    esp_err_t init(WebSocketVoiceClient* websocket_client, AudioResponsePlayer* response_player);
+    esp_err_t init(WebSocketVoiceClient* websocket_client, LLMPipeline* response_player);
     
     /**
      * @brief Shutdown voice command processor
@@ -122,7 +122,7 @@ private:
     
     // External components
     WebSocketVoiceClient* websocket_client_;
-    AudioResponsePlayer* response_player_;
+    LLMPipeline* response_player_;
     MusicPlaybackCallback music_callback_;
     
     // Connection state tracking

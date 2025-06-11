@@ -5,9 +5,9 @@ set(CSPOT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../cspot")
 set(PROJECT_SRCS
         main.cpp
         src/esp_raii_wrapper.cpp
-        src/audio_pipeline_manager.cpp
+        src/bluetooth_pipeline.cpp
         src/app_manager.cpp
-        src/audio_response_player.cpp
+        src/llm_pipeline.cpp
         src/websocket_voice_client.cpp
         src/voice_assistant_manager.cpp
         src/microphone_manager.cpp
@@ -15,6 +15,7 @@ set(PROJECT_SRCS
         src/voice_command_processor.cpp
         src/wifi_manager.cpp
         src/spotify_pipeline.cpp
+        src/i2s_audio_service.cpp
         src/audio_source_manager.cpp
         
         # ESP32-specific cspot files

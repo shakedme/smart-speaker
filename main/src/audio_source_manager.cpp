@@ -1,4 +1,5 @@
 #include "../include/audio_source_manager.hpp"
+#include "../include/i2s_audio_service.hpp"
 #include "esp_log.h"
 
 namespace btspeaker {
@@ -17,9 +18,17 @@ esp_err_t AudioSourceManager::initialize() {
 
     ESP_LOGI(TAG, "Initializing AudioSourceManager");
 
+    // Initialize shared I2S service first
+    auto& i2s_service = I2SAudioService::getInstance();
+    esp_err_t ret = i2s_service.initialize();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize I2S service: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
     // Initialize Bluetooth pipeline
-    bt_pipeline_ = std::make_unique<AudioPipelineManager>();
-    esp_err_t ret = bt_pipeline_->setup_pipeline();
+    bt_pipeline_ = std::make_unique<BluetoothPipeline>();
+    ret = bt_pipeline_->setup_pipeline();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to setup Bluetooth pipeline: %s", esp_err_to_name(ret));
         return ret;
@@ -34,8 +43,8 @@ esp_err_t AudioSourceManager::initialize() {
     }
 
     // Initialize voice response player
-    voice_response_player_ = std::make_unique<AudioResponsePlayer>();
-    ret = voice_response_player_->init(bt_pipeline_.get());
+    voice_response_player_ = std::make_unique<LLMPipeline>();
+    ret = voice_response_player_->init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize voice response player: %s", esp_err_to_name(ret));
         return ret;
@@ -130,6 +139,25 @@ esp_err_t AudioSourceManager::switchToSource(AudioSource source) {
     ESP_LOGI(TAG, "Switching from source %d to %d", (int)current_source_, (int)source);
 
     AudioSource old_source = current_source_;
+    
+    // Notify I2S service of source change
+    auto& i2s_service = I2SAudioService::getInstance();
+    I2SAudioService::AudioSource i2s_source;
+    switch (source) {
+        case AudioSource::BLUETOOTH:
+            i2s_source = I2SAudioService::AudioSource::BLUETOOTH;
+            break;
+        case AudioSource::SPOTIFY:
+            i2s_source = I2SAudioService::AudioSource::SPOTIFY;
+            break;
+        case AudioSource::VOICE_RESPONSE:
+            i2s_source = I2SAudioService::AudioSource::VOICE_RESPONSE;
+            break;
+        default:
+            i2s_source = I2SAudioService::AudioSource::NONE;
+            break;
+    }
+    i2s_service.setActiveSource(i2s_source);
 
     // Stop current source (unless it's voice response - that has priority)
     if (current_source_ != AudioSource::VOICE_RESPONSE) {
@@ -506,16 +534,16 @@ void AudioSourceManager::updatePlaybackState() {
         case AudioSource::VOICE_RESPONSE:
             if (voice_response_player_) {
                 switch (voice_response_player_->get_state()) {
-                    case AudioResponsePlayer::State::PLAYING:
+                    case LLMPipeline::State::PLAYING:
                         current_state_ = PlaybackState::PLAYING;
                         break;
-                    case AudioResponsePlayer::State::PAUSED:
+                    case LLMPipeline::State::PAUSED:
                         current_state_ = PlaybackState::PAUSED;
                         break;
-                    case AudioResponsePlayer::State::PREPARING:
+                    case LLMPipeline::State::PREPARING:
                         current_state_ = PlaybackState::PREPARING;
                         break;
-                    case AudioResponsePlayer::State::ERROR:
+                    case LLMPipeline::State::ERROR:
                         current_state_ = PlaybackState::ERROR;
                         break;
                     default:

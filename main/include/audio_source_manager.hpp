@@ -2,9 +2,9 @@
 
 #include <memory>
 #include <functional>
-#include "audio_pipeline_manager.hpp"
+#include "bluetooth_pipeline.hpp"
 #include "spotify_pipeline.hpp"
-#include "audio_response_player.hpp"
+#include "llm_pipeline.hpp"
 
 extern "C" {
 #include "esp_err.h"
@@ -82,9 +82,9 @@ private:
     ~AudioSourceManager() = default;
 
     // Core pipeline components
-    std::unique_ptr<AudioPipelineManager> bt_pipeline_;
+    std::unique_ptr<BluetoothPipeline> bt_pipeline_;
     std::unique_ptr<SpotifyPipeline> spotify_pipeline_;
-    std::unique_ptr<AudioResponsePlayer> voice_response_player_;
+    std::unique_ptr<LLMPipeline> voice_response_player_;
 
     // State management
     AudioSource current_source_;

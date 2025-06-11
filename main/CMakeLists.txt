@@ -1,8 +1,9 @@
-idf_component_register(
-        SRCS
+# Path to cspot repository
+set(CSPOT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../cspot")
 
+# Your project sources
+set(PROJECT_SRCS
         main.cpp
-
         src/esp_raii_wrapper.cpp
         src/audio_pipeline_manager.cpp
         src/app_manager.cpp
@@ -13,44 +14,66 @@ idf_component_register(
         src/wake_word_detector.cpp
         src/voice_command_processor.cpp
         src/wifi_manager.cpp
+)
+
+# Register component with all sources
+idf_component_register(
+        SRCS
+        ${PROJECT_SRCS}
 
         INCLUDE_DIRS
-        # Make headers available to other components
         "."
 
         REQUIRES
-        # Core ESP-IDF components actually used
-        "driver"          # GPIO, I2S drivers (used by audio_board component)
-        "nvs_flash"       # Non-volatile storage (used for NVS initialization)
-        "esp_system"      # System functions (used in main.hpp)
-        "log"             # Logging system (used for ESP_LOG macros)
-        "esp_event"       # Event handling (used by audio pipeline)
-        "audio_board"     # Custom audio board component
-        "bt"              # Bluetooth stack (needed by bluetooth_service)
+        # Your existing requirements
+        driver
+        nvs_flash
+        esp_system
+        log
+        esp_event
+        audio_board
+        bt
+        audio_pipeline
+        audio_stream
+        bluetooth_service
+        esp_wifi
+        esp_websocket_client
+        esp_adc
+        esp-sr
+        json
 
-        # ESP-ADF components actually used
-        "audio_pipeline"  # Audio pipeline management
-        "audio_stream"    # I2S stream functionality
-        "bluetooth_service" # Bluetooth A2DP service
-        "esp_wifi"        # WiFi stack
-        "esp_websocket_client" # WebSocket client for voice streaming
-        "esp_adc"         # ADC support (if using ADC for audio input)
-        "esp-sr"          # ESP Speech Recognition for wake word detection
-        "json"            # JSON parsing for WebSocket messages
+        # Additional for cspot
+        esp_http_client
+        mbedtls
+        pthread
+        esp_timer
+        esp_netif
+        mdns
+        lwip
+        esp_rom
+        freertos
+        heap
+        soc
+)
 
-        # Optional components (uncomment as needed when implementing features)
-        # "esp_timer"       # High-resolution timers
-        # "esp_common"      # Common ESP-IDF utilities
-        # "freertos"        # FreeRTOS kernel
-        # "heap"            # Memory management
-        # "newlib"          # C++ standard library support
-        # "pthread"         # POSIX threads (for C++ threading)
-        # "spi_flash"       # Flash memory access
-        # "esp_netif"       # Network interface
-        # "lwip"            # TCP/IP stack
-        # "esp_peripherals" # ESP-ADF peripheral management
-        # "esp_https_ota"   # OTA updates
-        # "mdns"            # mDNS service discovery
-        # "esp_tls"         # TLS/SSL support
-        # "fatfs"           # File system
+add_subdirectory(${CSPOT_ROOT} ${CMAKE_CURRENT_BINARY_DIR}/cspot)
+
+target_link_libraries(${COMPONENT_LIB} PUBLIC cspot)
+
+# Add compile definitions
+target_compile_definitions(${COMPONENT_LIB} PUBLIC
+        ESP_PLATFORM
+        BELL_ONLY_CJSON
+        PB_ENABLE_MALLOC
+        PB_FIELD_32BIT
+)
+
+# Suppress warnings from external code
+target_compile_options(${COMPONENT_LIB} PRIVATE
+        -Wno-unused-variable
+        -Wno-unused-function
+        -Wno-deprecated-declarations
+        -Wno-missing-field-initializers
+        -Wno-sign-compare
+        $<$<COMPILE_LANGUAGE:CXX>:-std=c++17>
 )

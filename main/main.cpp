@@ -5,6 +5,8 @@
 #include "main.hpp"
 #include "include/app_manager.hpp"
 #include <memory>
+#include "CSpotContext.h"
+#include "PCM5102AudioSink.h"
 
 extern "C" {
 #include "esp_log.h"
@@ -14,6 +16,15 @@ static constexpr const char *TAG = "MAIN";
 static std::unique_ptr <btspeaker::AppManager> g_app_instance;
 
 extern "C" {
+// Declare cspot init function
+void init_cspot() {
+    ESP_LOGI("MAIN", "Initializing CSpot...");
+
+    // This will verify that cspot compiles and links correctly
+    auto audioSink = std::make_shared<PCM5102AudioSink>();
+    ESP_LOGI("MAIN", "CSpot audio sink created");
+}
+
 
 void init() {
     if (!g_app_instance) {
@@ -24,7 +35,10 @@ void init() {
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize app: %s", esp_err_to_name(ret));
     }
+
+    init_cspot();
 }
+
 
 void run() {
     if (!g_app_instance) {

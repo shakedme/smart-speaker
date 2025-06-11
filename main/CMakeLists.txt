@@ -14,6 +14,8 @@ set(PROJECT_SRCS
         src/wake_word_detector.cpp
         src/voice_command_processor.cpp
         src/wifi_manager.cpp
+        src/spotify_pipeline.cpp
+        src/audio_source_manager.cpp
 )
 
 # Register component with all sources

@@ -10,7 +10,7 @@
 // WebSocket Connection Settings
 #define CONFIG_WS_KEEPALIVE_INTERVAL_S  30
 #define CONFIG_WS_PING_INTERVAL_S       10
-#define CONFIG_WS_CHUNK_SIZE            2048  // Reduced from 4096 to save memory
+#define CONFIG_WS_CHUNK_SIZE            2048 
 #define CONFIG_WS_RECONNECT_TIMEOUT_MS  5000
 #define CONFIG_WS_MAX_RECONNECT_ATTEMPTS 5
 

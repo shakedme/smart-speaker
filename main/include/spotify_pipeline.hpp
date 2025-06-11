@@ -61,6 +61,7 @@ private:
 
     // Internal helpers
     void handleSpotifyCommand(const cspot::DeviceStateHandler::Command& command);
+    bool isWifiConnected();
 };
 
 } // namespace btspeaker 

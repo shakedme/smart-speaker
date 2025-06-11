@@ -3,9 +3,7 @@
 extern "C" {
 #include "esp_log.h"
 #include "esp_check.h"
-#include "esp_wifi.h"
-#include "esp_event.h"
-#include "nvs_flash.h"
+#include "esp_netif.h"
 #include "mdns.h"
 }
 
@@ -39,6 +37,14 @@ esp_err_t SpotifyPipeline::initialize() {
 
     ESP_LOGI(TAG, "Initializing Spotify pipeline");
     
+    // Initialize mDNS for Spotify discovery
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize mDNS: %s", esp_err_to_name(err));
+        return err;
+    }
+    mdns_hostname_set("cspot");
+    
     // Create login semaphore
     login_semaphore_ = std::make_shared<bell::WrappedSemaphore>();
     
@@ -49,7 +55,17 @@ esp_err_t SpotifyPipeline::initialize() {
     return ESP_OK;
 }
 
-
+// Check if WiFi is connected (assumes WiFi is handled externally)
+bool SpotifyPipeline::isWifiConnected() {
+    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (netif == NULL) {
+        return false;
+    }
+    
+    esp_netif_ip_info_t ip_info;
+    esp_err_t ret = esp_netif_get_ip_info(netif, &ip_info);
+    return (ret == ESP_OK && ip_info.ip.addr != 0);
+}
 
 void SpotifyPipeline::handleSpotifyCommand(const cspot::DeviceStateHandler::Command& command) {
     ESP_LOGI(TAG, "Received Spotify command: %d", static_cast<int>(command.commandType));
@@ -140,13 +156,20 @@ esp_err_t SpotifyPipeline::start() {
         return ESP_ERR_INVALID_STATE;
     }
     
-    ESP_LOGI(TAG, "Starting Spotify pipeline");
+    // Verify WiFi is connected (managed externally)
+    if (!isWifiConnected()) {
+        ESP_LOGE(TAG, "WiFi not connected - cannot start Spotify");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    ESP_LOGI(TAG, "Starting Spotify pipeline (WiFi is connected)");
     is_running_ = true;
     
-    // Create context and start connection
+    // Create context and start connection to Spotify servers
     auto ctx = cspot::Context::createFromBlob(login_blob_);
     
     try {
+        // This connects to Spotify's servers, NOT WiFi
         ctx->session->connectWithRandomAp();
         ctx->config.authData = ctx->session->authenticate(login_blob_);
         
@@ -176,11 +199,11 @@ esp_err_t SpotifyPipeline::start() {
             ESP_LOGI(TAG, "Spotify pipeline started successfully");
             return ESP_OK;
         } else {
-            ESP_LOGE(TAG, "Failed to authenticate");
+            ESP_LOGE(TAG, "Failed to authenticate with Spotify");
             return ESP_ERR_INVALID_RESPONSE;
         }
     } catch (const std::exception& e) {
-        ESP_LOGE(TAG, "Error while connecting: %s", e.what());
+        ESP_LOGE(TAG, "Error while connecting to Spotify: %s", e.what());
         return ESP_ERR_INVALID_RESPONSE;
     }
 }

@@ -14,7 +14,7 @@ MicrophoneManager::MicrophoneManager()
     : recording_(false)
     , audio_task_handle_(nullptr)
 {
-    ESP_LOGI(TAG, "MicrophoneManager created");
+    ESP_LOGI(TAG, "MicrophoneManager created for SPH0645LM4H I2S MEMS microphones");
 }
 
 MicrophoneManager::~MicrophoneManager() {
@@ -117,31 +117,53 @@ void MicrophoneManager::audio_task(void* arg) {
 }
 
 void MicrophoneManager::run_audio_processing() {
-    ESP_LOGI(TAG, "Audio processing task started");
+    ESP_LOGI(TAG, "Audio processing task started for stereo I2S microphones");
     
     uint8_t* audio_buffer = new uint8_t[AUDIO_BUFFER_SIZE];
+    uint8_t* mono_buffer = new uint8_t[AUDIO_BUFFER_SIZE / 2]; // For mono conversion if needed
     
     while (recording_) {
-        // Read audio from microphone pipeline
+        // Read stereo audio from I2S microphone pipeline
         if (raw_mic_stream_) {
             int bytes_read = raw_stream_read(raw_mic_stream_.get(), 
                                            (char*)audio_buffer, 
                                            AUDIO_BUFFER_SIZE);
             
             if (bytes_read > 0 && audio_callback_) {
+                // Process stereo I2S data
+                // SPH0645LM4H provides 16-bit samples in I2S format
+                
+                // Option 1: Pass stereo data directly to callback
                 audio_callback_(audio_buffer, bytes_read);
+                
+                // Option 2: Convert to mono by averaging channels (commented out)
+                // This can be useful for voice recognition that expects mono input
+                /*
+                int16_t* stereo_samples = (int16_t*)audio_buffer;
+                int16_t* mono_samples = (int16_t*)mono_buffer;
+                int sample_count = bytes_read / (2 * sizeof(int16_t)); // 2 channels
+                
+                for (int i = 0; i < sample_count; i++) {
+                    // Average left and right channels for mono output
+                    int32_t avg = ((int32_t)stereo_samples[i*2] + (int32_t)stereo_samples[i*2+1]) / 2;
+                    mono_samples[i] = (int16_t)avg;
+                }
+                
+                audio_callback_(mono_buffer, sample_count * sizeof(int16_t));
+                */
             }
         }
         
         vTaskDelay(pdMS_TO_TICKS(10)); // Small delay to prevent watchdog
     }
     
+    delete[] mono_buffer;
     delete[] audio_buffer;
     ESP_LOGI(TAG, "Audio processing task ended");
 }
 
 esp_err_t MicrophoneManager::setup_microphone_pipeline() {
-    ESP_LOGI(TAG, "Setting up microphone pipeline");
+    ESP_LOGI(TAG, "Setting up I2S microphone pipeline for SPH0645LM4H MEMS microphones");
     
     // Create event interface
     audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
@@ -152,16 +174,16 @@ esp_err_t MicrophoneManager::setup_microphone_pipeline() {
     }
     mic_evt_.reset(evt_handle, audio_event_iface_deleter);
     
-    // Create I2S microphone stream (use ADC for MAX9814)
-    // Note: MAX9814 outputs analog, so we use ADC input instead of I2S
+    // Create I2S microphone stream for SPH0645LM4H MEMS microphones
+    // Using I2S1 to avoid conflict with I2S0 used for audio output
     i2s_stream_cfg_t i2s_cfg = {
         .type = AUDIO_STREAM_READER,
         .transmit_mode = I2S_COMM_MODE_STD,
         .chan_cfg = {
-            .id = I2S_NUM_1, // Use I2S1 for microphone to avoid conflict
+            .id = I2S_NUM_1, // Use I2S1 for microphones
             .role = I2S_ROLE_MASTER,
-            .dma_desc_num = 2,    // Reduced from 3 to save memory (~8KB saved)
-            .dma_frame_num = 120, // Reduced from 240 to save memory (~16KB saved)
+            .dma_desc_num = 3,    // Increased for better I2S performance
+            .dma_frame_num = 240, // Standard frame size for I2S
             .auto_clear = true,
             .auto_clear_before_cb = false,
             .allow_pd = false,
@@ -169,13 +191,13 @@ esp_err_t MicrophoneManager::setup_microphone_pipeline() {
         },
         .std_cfg = {
             .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
-            .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(MIC_BITS, I2S_SLOT_MODE_MONO),
+            .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(MIC_BITS, I2S_SLOT_MODE_STEREO), // Stereo for two mics
             .gpio_cfg = {
-                .mclk = GPIO_NUM_NC,
-                .bclk = GPIO_NUM_NC,
-                .ws = GPIO_NUM_NC,
-                .dout = GPIO_NUM_NC,
-                .din = GPIO_NUM_35, // MAX9814 connected to GPIO35 (ADC)
+                .mclk = GPIO_NUM_NC,                    // MCLK not needed for SPH0645LM4H
+                .bclk = CONFIG_MIC_I2S_BCK_GPIO,        // GPIO32 - Bit Clock
+                .ws = CONFIG_MIC_I2S_WS_GPIO,           // GPIO33 - Word Select (L/R)
+                .dout = GPIO_NUM_NC,                    // Not used for input
+                .din = CONFIG_MIC_I2S_DIN_GPIO,         // GPIO34 - Data Input
                 .invert_flags = {
                     .mclk_inv = false,
                     .bclk_inv = false,
@@ -191,8 +213,8 @@ esp_err_t MicrophoneManager::setup_microphone_pipeline() {
 #endif
         .use_alc = false,
         .volume = 0,
-        .out_rb_size = 2 * 1024,  // Reduced from 4KB to save memory
-        .task_stack = 1536,       // Reduced from 2048 to save memory  
+        .out_rb_size = 4 * 1024,  // Ring buffer size for stereo I2S data
+        .task_stack = 2048,       // Standard stack size for I2S processing
         .task_core = 1,
         .task_prio = 23,
         .stack_in_ext = false,
@@ -200,7 +222,7 @@ esp_err_t MicrophoneManager::setup_microphone_pipeline() {
         .uninstall_drv = false,
         .need_expand = false,
         .expand_src_bits = I2S_DATA_BIT_WIDTH_16BIT,
-        .buffer_len = AUDIO_BUFFER_SIZE,
+        .buffer_len = AUDIO_BUFFER_SIZE * 2, // Double buffer for stereo
     };
     
     audio_element_handle_t i2s_handle = i2s_stream_init(&i2s_cfg);
@@ -213,7 +235,7 @@ esp_err_t MicrophoneManager::setup_microphone_pipeline() {
     // Create raw stream for audio processing
     raw_stream_cfg_t raw_cfg = {
         .type = AUDIO_STREAM_WRITER,
-        .out_rb_size = 4 * 1024,  // Reduced from 8KB to save memory
+        .out_rb_size = 8 * 1024,  // Larger buffer for stereo I2S data
     };
     
     audio_element_handle_t raw_handle = raw_stream_init(&raw_cfg);
@@ -224,7 +246,7 @@ esp_err_t MicrophoneManager::setup_microphone_pipeline() {
     raw_mic_stream_.reset(raw_handle, audio_element_deleter);
     
     // Create microphone pipeline
-    audio_pipeline_cfg_t pipeline_cfg = { .rb_size = 2 * 1024 };  // Reduced from 4KB to save memory
+    audio_pipeline_cfg_t pipeline_cfg = { .rb_size = 4 * 1024 };  // Ring buffer for pipeline
     audio_pipeline_handle_t pipeline_handle = audio_pipeline_init(&pipeline_cfg);
     if (!pipeline_handle) {
         ESP_LOGE(TAG, "Failed to create microphone pipeline");
@@ -260,7 +282,7 @@ esp_err_t MicrophoneManager::setup_microphone_pipeline() {
         return ret;
     }
     
-    ESP_LOGI(TAG, "Microphone pipeline setup completed");
+    ESP_LOGI(TAG, "I2S microphone pipeline setup completed for SPH0645LM4H");
     return ESP_OK;
 }
 

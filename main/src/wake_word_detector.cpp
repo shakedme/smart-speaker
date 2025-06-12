@@ -18,6 +18,8 @@ WakeWordDetector::WakeWordDetector()
     , afe_handle_(nullptr)
     , afe_data_(nullptr)
     , wake_word_models_(nullptr)
+    , feed_chunksize_(0)
+    , fetch_chunksize_(0)
 {
     ESP_LOGI(TAG, "WakeWordDetector created");
 }
@@ -58,30 +60,45 @@ bool WakeWordDetector::is_wake_word_in_audio(const int16_t* audio_data, size_t s
         return false;
     }
     
-    // Feed audio data to ESP-SR AFE
     esp_afe_sr_iface_t* iface = (esp_afe_sr_iface_t*)afe_handle_;
-    int feed_result = iface->feed((esp_afe_sr_data_t*)afe_data_, audio_data);
     
-    if (feed_result <= 0) {
-        ESP_LOGD(TAG, "AFE feed failed: %d", feed_result);
-        return false;
-    }
-    
-    // Fetch result from AFE
-    afe_fetch_result_t* fetch_result = iface->fetch((esp_afe_sr_data_t*)afe_data_);
-    if (!fetch_result) {
-        return false;
-    }
-    
-    // Check for wake word detection
-    if (fetch_result->wakeup_state == WAKENET_DETECTED) {
-        ESP_LOGI(TAG, "Wake word detected! Index: %d, Channel: %d", 
-                 fetch_result->wake_word_index, fetch_result->trigger_channel_id);
+    // Process audio in proper chunk sizes expected by AFE
+    size_t samples_processed = 0;
+    while (samples_processed < sample_count) {
+        size_t samples_to_process = std::min(sample_count - samples_processed, 
+                                           static_cast<size_t>(feed_chunksize_));
         
-        if (wake_word_callback_) {
-            wake_word_callback_();
+        // Feed audio data to ESP-SR AFE
+        int feed_result = iface->feed((esp_afe_sr_data_t*)afe_data_, 
+                                     audio_data + samples_processed);
+        
+        if (feed_result <= 0) {
+            ESP_LOGD(TAG, "AFE feed failed: %d", feed_result);
+            samples_processed += samples_to_process;
+            continue;
         }
-        return true;
+        
+        // Fetch result from AFE
+        afe_fetch_result_t* fetch_result = iface->fetch((esp_afe_sr_data_t*)afe_data_);
+        if (!fetch_result) {
+            samples_processed += samples_to_process;
+            continue;
+        }
+        
+        // Check for wake word detection
+        if (fetch_result->wakeup_state == WAKENET_DETECTED) {
+            ESP_LOGI(TAG, "Wake word detected!");
+            ESP_LOGI(TAG, "  - Model Index: %d", fetch_result->wakenet_model_index);
+            ESP_LOGI(TAG, "  - Word Index: %d", fetch_result->wake_word_index);
+            ESP_LOGI(TAG, "  - Trigger Channel: %d", fetch_result->trigger_channel_id);
+            
+            if (wake_word_callback_) {
+                wake_word_callback_();
+            }
+            return true;
+        }
+        
+        samples_processed += samples_to_process;
     }
     
     return false;
@@ -99,10 +116,10 @@ esp_err_t WakeWordDetector::setup_esp_sr() {
     if (!models) {
         ESP_LOGW(TAG, "No compiled-in SR models found. Please enable wake word models in menuconfig:");
         ESP_LOGW(TAG, "Component config -> ESP Speech Recognition -> Wake Word Engine -> Enable");
-        ESP_LOGW(TAG, "Component config -> ESP Speech Recognition -> Wake Word Engine -> Select wn9_hiesp");
+        ESP_LOGW(TAG, "Component config -> ESP Speech Recognition -> Wake Word Engine -> Select wn5_hiesp for ESP32");
         return ESP_FAIL;
     }
-    
+
     // Create AFE configuration with memory-optimized settings
     // Input format: "M" means single microphone channel
     afe_config_t *afe_config = afe_config_init("M", models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
@@ -117,14 +134,14 @@ esp_err_t WakeWordDetector::setup_esp_sr() {
     afe_config->pcm_config.mic_num = 1;
     afe_config->pcm_config.ref_num = 0;  // No reference channel for AEC yet
     
-    // Wake word configuration
+    // Wake word configuration for ESP32 (use WakeNet5)
     afe_config->wakenet_init = true;
-    afe_config->wakenet_model_name = const_cast<char*>("wn9_hiesp");  // Use "Hi ESP" wake word
+    afe_config->wakenet_model_name = const_cast<char*>("wn5_hiesp");  // Use WakeNet5 "Hi ESP" wake word for ESP32
     afe_config->wakenet_mode = DET_MODE_95;  // More conservative detection to reduce processing
     
     // MEMORY OPTIMIZATION: Disable all non-essential audio processing
     afe_config->aec_init = false;       // Disable AEC (saves ~50KB)
-    afe_config->se_init = false;        // Disable speech enhancement (saves ~30KB)
+    afe_config->se_init = true;
     afe_config->vad_init = false;       // Disable VAD (saves ~10KB) - wake word has its own VAD
     afe_config->agc_init = false;       // Disable AGC (saves ~5KB) - rely on hardware gain
     afe_config->ns_init = false;        // Disable noise suppression (saves ~20KB)
@@ -142,6 +159,11 @@ esp_err_t WakeWordDetector::setup_esp_sr() {
         return ESP_FAIL;
     }
     
+    // Print wake word model from config
+    if (afe_config->wakenet_model_name) {
+        ESP_LOGI(TAG, "Wake word model: %s", afe_config->wakenet_model_name);
+    }
+    
     // Print configuration for debugging
     ESP_LOGI(TAG, "ESP-SR Memory Optimized Configuration:");
     ESP_LOGI(TAG, "  - Sample Rate: %d Hz", afe_config->pcm_config.sample_rate);
@@ -155,7 +177,6 @@ esp_err_t WakeWordDetector::setup_esp_sr() {
              afe_config->agc_init ? "ON" : "OFF",
              afe_config->ns_init ? "ON" : "OFF");
     
-    // Get AFE handle using the correct function
     esp_afe_sr_iface_t* iface = esp_afe_handle_from_config(afe_config);
     if (!iface || !iface->create_from_config) {
         ESP_LOGE(TAG, "Failed to get AFE interface from config");
@@ -172,10 +193,16 @@ esp_err_t WakeWordDetector::setup_esp_sr() {
         return ESP_FAIL;
     }
     
-    // Print pipeline for debugging
+    // Get proper chunk sizes for audio processing (important addition from official example)
+    feed_chunksize_ = iface->get_feed_chunksize((esp_afe_sr_data_t*)afe_data_);
+    fetch_chunksize_ = iface->get_fetch_chunksize((esp_afe_sr_data_t*)afe_data_);
+    
+    ESP_LOGI(TAG, "AFE Chunk Sizes:");
+    ESP_LOGI(TAG, "  - Feed Chunk Size: %d samples", feed_chunksize_);
+    ESP_LOGI(TAG, "  - Fetch Chunk Size: %d samples", fetch_chunksize_);
+    
     iface->print_pipeline((esp_afe_sr_data_t*)afe_data_);
     
-    // Clean up config as it's no longer needed
     afe_config_free(afe_config);
     
     ESP_LOGI(TAG, "ESP-SR AFE initialized successfully with memory optimizations");
@@ -195,6 +222,8 @@ void WakeWordDetector::cleanup_esp_sr() {
     
     afe_handle_ = nullptr;
     wake_word_models_ = nullptr;
+    feed_chunksize_ = 0;
+    fetch_chunksize_ = 0;
 }
 
 } // namespace btspeaker 

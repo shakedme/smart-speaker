@@ -256,8 +256,7 @@ esp_err_t LLMPipeline::setup_response_pipeline() {
     raw_response_stream_.reset(raw_handle, audio_element_deleter);
     
     // Use shared I2S service for consistent configuration
-    auto& i2s_service = I2SAudioService::getInstance();
-    audio_element_handle_t i2s_handle = i2s_service.createI2SWriter(
+    audio_element_handle_t i2s_handle = I2SAudioService::getInstance().createI2SWriter(
         I2SAudioService::AudioSource::VOICE_RESPONSE,
         DEFAULT_SAMPLE_RATE, // 24000 Hz (Gemini typical output)
         DEFAULT_CHANNELS,    // 1 (mono)

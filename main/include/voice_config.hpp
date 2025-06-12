@@ -14,9 +14,9 @@
 #define CONFIG_WS_RECONNECT_TIMEOUT_MS  5000
 #define CONFIG_WS_MAX_RECONNECT_ATTEMPTS 5
 
-// Audio Configuration
+// Audio Configuration - Updated for SPH0645LM4H I2S MEMS microphones
 #define CONFIG_MIC_SAMPLE_RATE      16000
-#define CONFIG_MIC_CHANNELS         1
+#define CONFIG_MIC_CHANNELS         2        // Stereo input from two microphones
 #define CONFIG_MIC_BITS_PER_SAMPLE  16
 
 // Audio format definitions for I2S
@@ -46,8 +46,13 @@
 #define CONFIG_WIFI_PASSWORD "0543512375"
 #endif
 
-// Hardware Pin Configuration (from hardware spec)
-#define CONFIG_MIC_GPIO             35  // MAX9814 output connected to GPIO35 (ADC1_CH7)
-#define CONFIG_I2S_BCK_GPIO         25  // Bit Clock
-#define CONFIG_I2S_WS_GPIO          22  // Word Select  
-#define CONFIG_I2S_DO_GPIO          26  // Data Out 
+// Hardware Pin Configuration - Updated for SPH0645LM4H I2S MEMS microphones
+// Note: Using I2S1 for microphones to avoid conflict with I2S0 used for audio output (PCM5102A)
+#define CONFIG_MIC_I2S_BCK_GPIO     GPIO_NUM_32  // I2S1 Bit Clock for microphones
+#define CONFIG_MIC_I2S_WS_GPIO      GPIO_NUM_33  // I2S1 Word Select for microphones  
+#define CONFIG_MIC_I2S_DIN_GPIO     GPIO_NUM_34  // I2S1 Data In from microphones
+
+// Audio output pins (PCM5102A) - for reference, using I2S0
+#define CONFIG_I2S_BCK_GPIO         25  // Bit Clock (I2S0)
+#define CONFIG_I2S_WS_GPIO          22  // Word Select (I2S0)
+#define CONFIG_I2S_DO_GPIO          26  // Data Out (I2S0)

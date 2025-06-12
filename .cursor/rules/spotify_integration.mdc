@@ -142,7 +142,7 @@ Supports all Spotify Connect commands:
 - **Power**: 15V from LM2587 boost converter
 
 ### Processing
-- **MCU**: ESP32-WROOM-32E
+- **MCU**: ESP32-DEVKITC-VE
 - **WiFi**: Built-in ESP32 WiFi (managed externally)
 - **Audio Processing**: ESP32 I2S + Bell framework
 

@@ -22,9 +22,10 @@ using AudioDataCallback = std::function<void(const uint8_t* data, size_t length)
  * @brief Manages low-level microphone input pipeline
  * 
  * Responsible for:
- * - I2S microphone stream configuration
- * - Audio pipeline setup and management
+ * - I2S microphone stream configuration for SPH0645LM4H MEMS microphones
+ * - Stereo audio pipeline setup and management  
  * - Raw audio data streaming to callback
+ * - Noise reduction capabilities with dual microphone setup
  */
 class MicrophoneManager {
 public:
@@ -36,7 +37,7 @@ public:
     MicrophoneManager& operator=(const MicrophoneManager&) = delete;
     
     /**
-     * @brief Initialize microphone pipeline
+     * @brief Initialize I2S microphone pipeline for SPH0645LM4H
      */
     esp_err_t init();
     
@@ -57,6 +58,7 @@ public:
     
     /**
      * @brief Set callback for audio data
+     * @note Audio data will be stereo (2 channels) from two SPH0645LM4H microphones
      */
     void set_audio_callback(AudioDataCallback callback);
     
@@ -68,7 +70,8 @@ public:
 private:
     static constexpr const char* TAG = "MIC_MGR";
     static constexpr int SAMPLE_RATE = 16000;
-    static constexpr int AUDIO_BUFFER_SIZE = 512;
+    static constexpr int AUDIO_BUFFER_SIZE = 1024;  // Increased for stereo data
+    static constexpr int CHANNELS = 2;              // Stereo input from two microphones
     
     // Audio processing task
     static void audio_task(void* arg);

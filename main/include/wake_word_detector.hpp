@@ -64,11 +64,6 @@ namespace btspeaker {
          */
         bool is_enabled() const { return enabled_; }
 
-        /**
-         * @brief Set wake word detection threshold
-         */
-        void set_threshold(float threshold) { threshold_ = threshold; }
-
     private:
         static constexpr const char *TAG = "WAKE_WORD";
 
@@ -86,6 +81,10 @@ namespace btspeaker {
         void *afe_handle_;
         void *afe_data_;
         void *wake_word_models_;
+        
+        // Chunk sizes for proper audio processing
+        int feed_chunksize_;
+        int fetch_chunksize_;
     };
 
 } // namespace btspeaker 

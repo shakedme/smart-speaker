@@ -47,8 +47,7 @@ esp_err_t BluetoothPipeline::setup_pipeline() {
     ESP_LOGI(TAG, "Bluetooth A2DP Sink started, device name: %s", bt_cfg.device_name);
 
     // Use shared I2S service for consistent configuration
-    auto& i2s_service = I2SAudioService::getInstance();
-    audio_element_handle_t i2s_handle = i2s_service.createI2SWriter(
+    audio_element_handle_t i2s_handle = I2SAudioService::getInstance().createI2SWriter(
         I2SAudioService::AudioSource::BLUETOOTH,
         44100, // sample_rate
         2,     // channels (stereo)

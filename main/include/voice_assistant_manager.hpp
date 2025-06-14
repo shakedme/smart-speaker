@@ -107,7 +107,7 @@ private:
     std::unique_ptr<WakeWordDetector> wake_word_detector_;
     std::unique_ptr<VoiceCommandProcessor> command_processor_;
     std::unique_ptr<WebSocketVoiceClient> websocket_client_;
-    std::unique_ptr<LLMPipeline> response_player_;
+    // AudioSourceManager handles voice response playback
     
     // External references
     BluetoothPipeline* main_pipeline_manager_;

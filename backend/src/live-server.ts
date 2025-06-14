@@ -1,25 +1,31 @@
 import express from 'express';
-import { createServer } from 'http';
-import { WebSocketServer } from 'ws';
-import { LiveWebSocketHandler } from './live-websocket-handler';
+import {createServer} from 'http';
+import {WebSocketServer} from 'ws';
+import {LiveWebSocketHandler} from './live-websocket-handler';
 import path from 'path';
 
 // Load environment variables
 import dotenv from 'dotenv';
+
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 8080;
 
-// Serve static files from public directory
-app.use(express.static(path.join(process.cwd(), 'public')));
+// Serve static files from public directory (always relative to backend)
+app.use(express.static(path.join(__dirname, '../public')));
+
+// Serve index.html for root path
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, '../public/index.html'));
+});
 
 // Create HTTP server
 const server = createServer(app);
 
 // Create WebSocket server
-const wss = new WebSocketServer({ 
-    server, 
+const wss = new WebSocketServer({
+    server,
     path: '/voice'
 });
 
@@ -68,17 +74,11 @@ server.listen(port, () => {
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-    console.log('🛑 SIGTERM received, shutting down gracefully');
-    server.close(() => {
-        console.log('✅ Server closed');
-        process.exit(0);
-    });
+    console.log('🛑 SIGINT received, shutting down gracefully');
+    process.exit(0);
 });
 
 process.on('SIGINT', () => {
     console.log('🛑 SIGINT received, shutting down gracefully');
-    server.close(() => {
-        console.log('✅ Server closed');
-        process.exit(0);
-    });
-}); 
+    process.exit(0);
+});

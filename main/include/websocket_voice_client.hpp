@@ -25,7 +25,7 @@ public:
     };
 
     // Callback for receiving audio response
-    using AudioResponseCallback = std::function<void(const uint8_t* audio_data, size_t length, bool is_final)>;
+    using AudioResponseCallback = std::function<void(const uint8_t* audio_data, size_t length, bool is_final, const char* intent_json)>;
     using StateChangeCallback = std::function<void(ConnectionState new_state)>;
     
     struct Config {

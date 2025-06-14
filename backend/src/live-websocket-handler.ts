@@ -1,226 +1,459 @@
-import { WebSocket } from 'ws';
-import { v4 as uuidv4 } from 'uuid';
-import { GoogleGenAI, Modality } from '@google/genai';
+import {WebSocket} from 'ws';
+import {v4 as uuidv4} from 'uuid';
+import {GoogleGenAI, Modality, Part} from '@google/genai';
+import {Cobra} from "@picovoice/cobra-node";
+import axios from 'axios';
 
+// The state of the WebSocket session handler
+type SessionState =
+    'IDLE'
+    | 'LISTENING'
+    | 'PROCESSING_INTENT'
+    | 'STREAMING_RESPONSE'
+    | 'HANDLING_COMMAND'
+    | 'WAITING_FOR_USER';
+
+// Type for control messages (now mainly for errors)
 interface ControlMessage {
-    type: 'start_session' | 'end_session' | 'audio_start' | 'audio_end' | 'error';
+    type: 'error';
     message?: string;
 }
+
+// VAD constants
+const VAD_SENSITIVITY = 0.7; // 0.0 (lowest) to 1.0 (highest)
+const VAD_SILENCE_TIMEOUT_MS = 1200; // Time of silence before processing
+const CONVERSATION_TIMEOUT_MS = 5000; // Time to keep conversation session alive with no user input
 
 export class LiveWebSocketHandler {
     private ws: WebSocket;
     private sessionId: string;
-    private isSessionActive: boolean = false;
-    private geminiSession: any = null;
     private gemini: GoogleGenAI;
-    private responseQueue: any[] = [];
+    private cobra: Cobra;
+    private cobraFrameLength: number;
+
+    // State management
+    private sessionState: SessionState = 'IDLE';
+    private responseSession: any = null;
+
+    // Buffers
+    private audioBuffer: Buffer[] = []; // Stores the complete user utterance
+    private vadBuffer: Buffer = Buffer.alloc(0); // Temporary buffer for VAD frame processing
+
+    // VAD state
+    private silenceTimer: NodeJS.Timeout | null = null;
+
+    // Conversation management
+    private conversationTimer: NodeJS.Timeout | null = null;
+    private isGeminiSpeaking: boolean = false;
 
     constructor(ws: WebSocket) {
         this.ws = ws;
         this.sessionId = uuidv4();
-        
-        // Initialize Google Gemini client for Live API
-        this.gemini = new GoogleGenAI({ apiKey: process.env.GOOGLE_AI_API_KEY || '' });
 
-        console.log(`Live Session ${this.sessionId} created`);
+        // Initialize Google Gemini
+        const googleApiKey = process.env.GOOGLE_AI_API_KEY;
+        if (!googleApiKey) {
+            throw new Error('GOOGLE_AI_API_KEY is not set in environment variables.');
+        }
+        this.gemini = new GoogleGenAI({apiKey: googleApiKey});
+
+        // Initialize Picovoice Cobra VAD
+        const picoAccessKey = process.env.PICOVOICE_ACCESS_KEY;
+        if (!picoAccessKey) {
+            throw new Error('PICOVOICE_ACCESS_KEY is not set in environment variables. Get one from Picovoice Console.');
+        }
+        this.cobra = new Cobra(picoAccessKey);
+        this.cobraFrameLength = this.cobra.frameLength;
+
+        this.broadcastStateChange('LISTENING');
+        this.log('info', `Session created. State: ${this.sessionState}. Waiting for audio...`);
     }
 
     public handleMessage(data: Buffer, isBinary: boolean): void {
-        if (isBinary) {
-            this.handleAudioData(data);
-        } else {
-            this.handleControlMessage(data);
+        if (!isBinary) {
+            this.log('warn', `Received unexpected text message: ${data.toString()}`);
+            return;
         }
-    }
 
-    private handleControlMessage(data: Buffer): void {
-        try {
-            const message: ControlMessage = JSON.parse(data.toString());
-            console.log(`Live Session ${this.sessionId}: Received control message:`, message.type);
-
-            switch (message.type) {
-                case 'start_session':
-                    this.startLiveSession();
-                    break;
-                case 'end_session':
-                    this.endLiveSession();
-                    break;
-                default:
-                    console.warn(`Live Session ${this.sessionId}: Unknown control message:`, message.type);
-            }
-        } catch (error) {
-            console.error(`Live Session ${this.sessionId}: Failed to parse control message:`, error);
-            this.sendError('Invalid control message format');
+        if (this.sessionState === 'LISTENING' || this.sessionState === 'WAITING_FOR_USER') {
+            this.handleAudioData(data);
         }
     }
 
     private handleAudioData(data: Buffer): void {
-        if (!this.isSessionActive || !this.geminiSession) {
-            console.warn(`Live Session ${this.sessionId}: Received audio data while session not active`);
-            return;
+        if (this.sessionState !== 'LISTENING' && this.sessionState !== 'WAITING_FOR_USER') return;
+
+        // If we were waiting for user input, transition back to listening
+        if (this.sessionState === 'WAITING_FOR_USER') {
+            this.broadcastStateChange('LISTENING');
+            this.log('info', 'User started speaking again. Continuing conversation.');
         }
 
-        try {
-            // Convert Buffer to base64 for Gemini Live API
-            const base64Audio = data.toString('base64');
-            
-            // Send audio to Gemini Live API using correct format
-            this.geminiSession.sendRealtimeInput({
-                audio: {
-                    data: base64Audio,
-                    mimeType: "audio/pcm;rate=16000"
-                }
-            });
+        // Add incoming audio to the main buffer for the full utterance
+        this.audioBuffer.push(data);
 
-        } catch (error) {
-            console.error(`Live Session ${this.sessionId}: Error sending audio to Gemini:`, error);
+        // Add to the VAD buffer for frame processing
+        this.vadBuffer = Buffer.concat([this.vadBuffer, data]);
+
+        // Process audio in VAD-compatible frames
+        const frameSizeInBytes = this.cobraFrameLength * 2; // 16-bit PCM
+
+        while (this.vadBuffer.length >= frameSizeInBytes) {
+            const audioFrameBytes = this.vadBuffer.subarray(0, frameSizeInBytes);
+            this.vadBuffer = this.vadBuffer.subarray(frameSizeInBytes);
+
+            // Explicitly read Int16 values to ensure correct format for Cobra.
+            const audioFrameInt16 = new Int16Array(this.cobraFrameLength);
+            for (let i = 0; i < this.cobraFrameLength; i++) {
+                audioFrameInt16[i] = audioFrameBytes.readInt16LE(i * 2);
+            }
+
+            const voiceProbability = this.cobra.process(audioFrameInt16);
+
+            if (voiceProbability > VAD_SENSITIVITY) {
+                this.log(`info`, `Voice detected with probability ${voiceProbability}. Accumulating audio...`);
+                this.resetConversationTimer();
+                this.resetSilenceTimer();
+            }
         }
     }
 
-    private async startLiveSession(): Promise<void> {
-        if (this.isSessionActive) {
-            console.warn(`Live Session ${this.sessionId}: Session already active`);
+    private resetSilenceTimer(): void {
+        if (this.silenceTimer) {
+            clearTimeout(this.silenceTimer);
+        }
+        // If we don't hear more speech for the timeout duration, process the command
+        this.silenceTimer = setTimeout(() => {
+            this.log('info', `Silence detected. Processing accumulated audio.`);
+            this.processIntent();
+        }, VAD_SILENCE_TIMEOUT_MS);
+    }
+
+    private resetConversationTimer(): void {
+        if (this.conversationTimer) {
+            clearTimeout(this.conversationTimer);
+        }
+        // If there's no user activity for the timeout duration, close conversation
+        this.conversationTimer = setTimeout(() => {
+            if (!this.isGeminiSpeaking) {
+                this.log('info', 'Conversation timeout. Closing session.');
+                this.endConversation();
+            } else {
+                this.log('info', 'Conversation timeout delayed - Gemini is still speaking.');
+                // Reset timer to check again later
+                this.resetConversationTimer();
+            }
+        }, CONVERSATION_TIMEOUT_MS);
+    }
+
+    private broadcastStateChange(newState: SessionState): void {
+        this.sessionState = newState;
+        if (this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({
+                type: 'state_change',
+                state: newState
+            }));
+        }
+        this.log('info', `State changed to: ${newState}`);
+    }
+
+    private async processIntent(): Promise<void> {
+        if ((this.sessionState !== 'LISTENING' && this.sessionState !== 'WAITING_FOR_USER') || this.audioBuffer.length === 0) {
+            this.log('warn', 'processIntent called with no audio or in wrong state.');
+            this.clearAudioBuffers();
             return;
         }
 
-        try {
-            console.log(`Live Session ${this.sessionId}: Starting Gemini Live session`);
+        this.broadcastStateChange('PROCESSING_INTENT');
+        if (this.silenceTimer) clearTimeout(this.silenceTimer);
 
-            // Create Live API connection using correct syntax
-            this.geminiSession = await this.gemini.live.connect({
+        this.log('info', `Sending ${this.audioBuffer.length} audio chunks to Gemini for intent detection.`);
+
+        try {
+            const fullAudio = Buffer.concat(this.audioBuffer);
+            const wavBuffer = this.createWavBuffer(fullAudio);
+
+            // If we already have a conversation session, continue it
+            if (this.responseSession) {
+                this.log('info', 'Continuing existing conversation session.');
+                this.broadcastStateChange('STREAMING_RESPONSE');
+                this.responseSession.sendClientContent({
+                    turns: [{
+                        parts: [{
+                            inlineData: {
+                                mimeType: 'audio/wav',
+                                data: wavBuffer.toString('base64')
+                            }
+                        }]
+                    }]
+                });
+                this.clearAudioBuffers();
+                return;
+            }
+
+            // First interaction - determine intent
+            const systemInstruction = `You are a smart home assistant intent detection system. 
+            Your task is to analyze the user's speech and determine their intent.
+            Respond with a single, minified JSON object with the format: {"intent": "...", "data": "..."}.
+            Do not include any other text, markdown, or explanation.
+            Possible intents are "spotify", "playback_control", and "information".
+            - For "spotify", the "data" should be the song, artist, or playlist name.
+            - For "playback_control", the "data" should be the action (e.g., "pause", "next", "volume up").
+            - For "information", the "data" should be the user's full question.`;
+            const contents: Part[] = [
+                {text: systemInstruction},
+                {
+                    inlineData: {
+                        mimeType: 'audio/wav',
+                        data: wavBuffer.toString('base64')
+                    }
+                }
+            ];
+            const response = await this.gemini.models.generateContent({
+                model: 'gemini-2.0-flash',
+                contents
+            });
+
+            const text = response.text;
+            if (!text) {
+                this.log('error', 'Gemini response is empty.');
+                this.sendError('Gemini response is empty.');
+                this.resetToListening();
+                return;
+            }
+
+            this.log('info', `Gemini intent response: ${text}`);
+            const intentData = JSON.parse(text);
+
+            await this.handleIntent(intentData);
+
+        } catch (error) {
+            this.log('error', `Failed to get intent from Gemini: ${error}`);
+            this.sendError(`Could not determine intent: ${error}`);
+            this.resetToListening();
+        }
+    }
+
+    private createWavBuffer(pcmData: Buffer): Buffer {
+        const sampleRate = 16000;
+        const numChannels = 1;
+        const bitsPerSample = 16;
+        const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+        const blockAlign = numChannels * (bitsPerSample / 8);
+        const dataSize = pcmData.length;
+        const fileSize = 36 + dataSize;
+
+        const buffer = Buffer.alloc(44);
+
+        // RIFF header
+        buffer.write('RIFF', 0);
+        buffer.writeUInt32LE(fileSize, 4);
+        buffer.write('WAVE', 8);
+
+        // "fmt " sub-chunk
+        buffer.write('fmt ', 12);
+        buffer.writeUInt32LE(16, 16); // Sub-chunk size (16 for PCM)
+        buffer.writeUInt16LE(1, 20); // Audio format (1 for PCM)
+        buffer.writeUInt16LE(numChannels, 22);
+        buffer.writeUInt32LE(sampleRate, 24);
+        buffer.writeUInt32LE(byteRate, 28);
+        buffer.writeUInt16LE(blockAlign, 32);
+        buffer.writeUInt16LE(bitsPerSample, 34);
+
+        // "data" sub-chunk
+        buffer.write('data', 36);
+        buffer.writeUInt32LE(dataSize, 40);
+
+        return Buffer.concat([buffer, pcmData]);
+    }
+
+    private async handleIntent(intent: { intent: string; data: any }): Promise<void> {
+        switch (intent.intent) {
+            case 'information':
+                this.log('info', 'Intent is "information". Starting audio response session.');
+                this.broadcastStateChange('STREAMING_RESPONSE');
+                await this.startAudioResponseSession(intent.data);
+                break;
+            case 'spotify':
+                this.log('info', `Intent is "spotify". Data: ${intent.data}`);
+                this.broadcastStateChange('HANDLING_COMMAND');
+                const uri = await this.resolveSpotifyUri(intent.data);
+                if (uri) {
+                    this.ws.send(JSON.stringify({intent: 'spotify', data: uri}));
+                } else {
+                    this.sendError(`Could not find Spotify URI for: ${intent.data}`);
+                }
+                this.resetToListening(); // Command sent, go back to listening
+                break;
+            case 'playback_control':
+                this.log('info', `Intent is "playback_control". Data: ${intent.data}`);
+                this.broadcastStateChange('HANDLING_COMMAND');
+                this.ws.send(JSON.stringify(intent));
+                this.resetToListening(); // Command sent, go back to listening
+                break;
+            default:
+                this.log('warn', `Unknown intent received: ${intent.intent}`);
+                this.resetToListening();
+                break;
+        }
+    }
+
+    private async startAudioResponseSession(question: string): Promise<void> {
+        try {
+            this.responseSession = await this.gemini.live.connect({
                 model: 'gemini-2.0-flash-live-001',
                 config: {
                     responseModalities: [Modality.AUDIO],
-                    speechConfig: {
-                        voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
-                    },
-                    systemInstruction: `You are a helpful voice assistant for a smart Bluetooth speaker. 
-                    Provide concise, natural responses suitable for voice output. 
-                    Keep responses conversational and under 100 words.
-                    You can help with general questions, check weather, tell jokes, and provide information.`
+                    speechConfig: {voiceConfig: {prebuiltVoiceConfig: {voiceName: "Aoede"}}},
+                    systemInstruction: `You are a helpful voice assistant. Provide concise, natural responses. Keep your responses conversational and be ready for follow-up questions.`
                 },
                 callbacks: {
                     onopen: () => {
-                        console.log(`Live Session ${this.sessionId}: Gemini Live connection opened`);
-                        this.isSessionActive = true;
-                        this.sendControlMessage({ type: 'audio_start' });
+                        this.log('info', 'Audio response session opened.');
                     },
-                    onmessage: (message: any) => {
-                        this.handleGeminiMessage(message);
+                    onmessage: (message: any) => this.handleAudioResponse(message),
+                    onerror: (e: any) => {
+                        this.log('error', `Audio response error: ${e}`);
+                        this.endConversation();
                     },
-                    onerror: (error: any) => {
-                        console.error(`Live Session ${this.sessionId}: Gemini Live error:`, error);
-                        this.sendError('Gemini Live connection error');
+                    onclose: () => {
+                        this.log('info', 'Audio response session closed.');
+                        // Don't reset state here - let conversation timeout handle it
                     },
-                    onclose: (event: any) => {
-                        console.log(`Live Session ${this.sessionId}: Gemini Live connection closed:`, event.reason);
-                        this.isSessionActive = false;
-                        this.sendControlMessage({ type: 'audio_end' });
-                    }
                 }
             });
 
+            this.responseSession.sendClientContent({
+                turns: question
+            });
+
+            // Clear audio buffers after sending
+            this.clearAudioBuffers();
+
         } catch (error) {
-            console.error(`Live Session ${this.sessionId}: Failed to start Live session:`, error);
-            this.sendError('Failed to start live session');
+            this.log('error', `Failed to start audio response session: ${error}`);
+            this.resetToListening();
         }
     }
 
-    private async endLiveSession(): Promise<void> {
-        if (!this.isSessionActive) {
-            console.warn(`Live Session ${this.sessionId}: No active session to end`);
+    private handleAudioResponse(message: any): void {
+        // Handle turn completion
+        if (message.serverContent?.turnComplete) {
+            this.isGeminiSpeaking = false;
+            this.log('info', 'Gemini finished speaking. Waiting for user response.');
+            this.transitionToWaitingForUser();
             return;
         }
 
-        try {
-            console.log(`Live Session ${this.sessionId}: Ending Gemini Live session`);
-            
-            if (this.geminiSession) {
-                this.geminiSession.close();
-                this.geminiSession = null;
+        // Handle audio data
+        const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+        if (audioData) {
+            if (!this.isGeminiSpeaking) {
+                this.isGeminiSpeaking = true;
+                this.log('info', 'Gemini started speaking.');
             }
-            
-            this.isSessionActive = false;
-            this.sendControlMessage({ type: 'audio_end' });
-            
-        } catch (error) {
-            console.error(`Live Session ${this.sessionId}: Error ending session:`, error);
+            const audioBuffer = Buffer.from(audioData, 'base64');
+            // Stream audio back to the client
+            if (this.ws.readyState === WebSocket.OPEN) {
+                this.log('debug', `Sending audio response chunk of ${audioBuffer.length} bytes.`);
+                this.ws.send(audioBuffer);
+            }
         }
     }
 
-    private handleGeminiMessage(message: any): void {
-        try {
-            console.log(`Live Session ${this.sessionId}: Received Gemini message:`, message.type || 'unknown');
-            
-            // Log the full message structure to understand the format
-            console.log(`Live Session ${this.sessionId}: Full message keys:`, Object.keys(message));
-
-            // Handle direct audio data responses from Gemini (skip - we'll use serverContent instead)
-            if (message.data) {
-                console.log(`Live Session ${this.sessionId}: Skipping direct audio data (using serverContent instead): ${message.data.length} chars base64`);
-            }
-
-            // Handle server content with model turn (for audio responses)
-            if (message.serverContent && message.serverContent.modelTurn) {
-                console.log(`Live Session ${this.sessionId}: ServerContent modelTurn found`);
-                const parts = message.serverContent.modelTurn.parts;
-                console.log(`Live Session ${this.sessionId}: ModelTurn parts count: ${parts ? parts.length : 0}`);
-                
-                if (parts) {
-                    for (let i = 0; i < parts.length; i++) {
-                        const part = parts[i];
-                        console.log(`Live Session ${this.sessionId}: Part ${i} keys:`, Object.keys(part));
-                        
-                        if (part.inlineData) {
-                            console.log(`Live Session ${this.sessionId}: Part ${i} inlineData MIME: ${part.inlineData.mimeType}`);
-                            console.log(`Live Session ${this.sessionId}: Part ${i} inlineData size: ${part.inlineData.data.length} chars`);
-                            
-                            if (part.inlineData.mimeType.includes('audio')) {
-                                // Convert base64 audio to buffer and send to frontend
-                                const audioBuffer = Buffer.from(part.inlineData.data, 'base64');
-                                console.log(`Live Session ${this.sessionId}: Decoded part buffer: ${audioBuffer.length} bytes`);
-                                this.sendControlMessage({ type: 'audio_start' });
-                                this.ws.send(audioBuffer);
-                                this.sendControlMessage({ type: 'audio_end' });
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Handle setup complete
-            if (message.setupComplete) {
-                console.log(`Live Session ${this.sessionId}: Gemini Live setup complete`);
-            }
-
-            // Handle turn complete
-            if (message.serverContent && message.serverContent.turnComplete) {
-                console.log(`Live Session ${this.sessionId}: Gemini turn complete`);
-            }
-
-        } catch (error) {
-            console.error(`Live Session ${this.sessionId}: Error handling Gemini message:`, error);
-        }
+    private transitionToWaitingForUser(): void {
+        this.broadcastStateChange('WAITING_FOR_USER');
+        this.resetConversationTimer(); // Start conversation timeout
+        this.log('info', 'Transitioned to waiting for user. Conversation session remains open.');
     }
 
-    private sendControlMessage(message: ControlMessage): void {
-        if (this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify(message));
+    private endConversation(): void {
+        this.log('info', 'Ending conversation session.');
+        if (this.responseSession) {
+            this.responseSession.close();
+            this.responseSession = null;
+        }
+        this.resetToListening();
+    }
+
+    private resetToListening(): void {
+        this.clearAllTimers();
+        this.clearAudioBuffers();
+        this.broadcastStateChange('LISTENING');
+        this.isGeminiSpeaking = false;
+        this.log('info', 'Reset to listening state. Ready for next command.');
+    }
+
+    private clearAudioBuffers(): void {
+        this.audioBuffer = [];
+        this.vadBuffer = Buffer.alloc(0);
+    }
+
+    private clearAllTimers(): void {
+        if (this.silenceTimer) {
+            clearTimeout(this.silenceTimer);
+            this.silenceTimer = null;
+        }
+        if (this.conversationTimer) {
+            clearTimeout(this.conversationTimer);
+            this.conversationTimer = null;
         }
     }
 
     private sendError(message: string): void {
-        console.error(`Live Session ${this.sessionId}: Error: ${message}`);
-        this.sendControlMessage({ type: 'error', message });
+        console.error(`Session ${this.sessionId}: Error: ${message}`);
+        if (this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({type: 'error', message} as ControlMessage));
+        }
     }
 
     public async cleanup(): Promise<void> {
-        try {
-            await this.endLiveSession();
-        } catch (error) {
-            console.error(`Live Session ${this.sessionId}: Error during cleanup:`, error);
-        }
-        
-        console.log(`Live Session ${this.sessionId}: Cleaned up`);
+        this.log('info', 'Cleaning up session...');
+        this.endConversation();
+        this.clearAllTimers();
+        this.sessionState = 'IDLE';
+        this.cobra.release(); // Release Cobra resources
     }
-} 
+
+    private log(level: 'info' | 'warn' | 'error' | 'debug', message: string): void {
+        console.log(`[${level.toUpperCase()}] Session ${this.sessionId}: ${message}`);
+    }
+
+    // --- Spotify Integration ---
+    private async resolveSpotifyUri(query: string): Promise<string | null> {
+        if (!query) return null;
+        const token = await this.getSpotifyAccessToken();
+        if (!token) return null;
+        const type = 'track,playlist,artist';
+        const url = `https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=${type}&limit=1`;
+        try {
+            const resp = await axios.get(url, {headers: {Authorization: `Bearer ${token}`}});
+            if (resp.data.tracks?.items.length > 0) return resp.data.tracks.items[0].uri;
+            if (resp.data.playlists?.items.length > 0) return resp.data.playlists.items[0].uri;
+            if (resp.data.artists?.items.length > 0) return resp.data.artists.items[0].uri;
+            return null;
+        } catch (e) {
+            this.sendError('Spotify API error: ' + e);
+            return null;
+        }
+    }
+
+    private async getSpotifyAccessToken(): Promise<string | null> {
+        const clientId = process.env.SPOTIFY_CLIENT_ID;
+        const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
+        if (!clientId || !clientSecret) return null;
+        const creds = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+        try {
+            const resp = await axios.post('https://accounts.spotify.com/api/token', 'grant_type=client_credentials', {
+                headers: {
+                    Authorization: `Basic ${creds}`,
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+            });
+            return resp.data.access_token;
+        } catch (e) {
+            this.sendError('Spotify token error: ' + e);
+            return null;
+        }
+    }
+}

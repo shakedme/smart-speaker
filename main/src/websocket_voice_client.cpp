@@ -109,35 +109,23 @@ void WebSocketVoiceClient::disconnect() {
 
 esp_err_t WebSocketVoiceClient::start_recording_session() {
     if (!is_connected()) {
-        ESP_LOGE(TAG, "Not connected to server");
+        ESP_LOGE(TAG, "Not connected to server, cannot start recording session");
         return ESP_ERR_INVALID_STATE;
     }
     
     if (recording_session_active_) {
-        ESP_LOGW(TAG, "Recording session already active");
+        ESP_LOGW(TAG, "Recording session is already active");
         return ESP_OK;
     }
     
-    ESP_LOGI(TAG, "Starting live session");
-    
-    esp_err_t ret = send_control_message("{\"type\":\"start_session\"}");
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send start session message");
-        return ret;
-    }
-    
+    ESP_LOGI(TAG, "Starting audio recording session to backend");
     recording_session_active_ = true;
     return ESP_OK;
 }
 
 esp_err_t WebSocketVoiceClient::send_audio_chunk(const uint8_t* audio_data, size_t length) {
-    if (!is_connected()) {
-        ESP_LOGE(TAG, "Not connected to server");
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    if (!recording_session_active_) {
-        ESP_LOGE(TAG, "No active live session");
+    if (!is_connected() || !recording_session_active_) {
+        ESP_LOGE(TAG, "Not connected or recording session not active, cannot send audio");
         return ESP_ERR_INVALID_STATE;
     }
     
@@ -161,19 +149,16 @@ esp_err_t WebSocketVoiceClient::send_audio_chunk(const uint8_t* audio_data, size
 
 esp_err_t WebSocketVoiceClient::stop_recording_session() {
     if (!recording_session_active_) {
-        ESP_LOGW(TAG, "No active live session");
+        ESP_LOGW(TAG, "Recording session not currently active");
         return ESP_OK;
     }
     
-    ESP_LOGI(TAG, "Ending live session");
-    
-    esp_err_t ret = send_control_message("{\"type\":\"end_session\"}");
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send end session message");
-        return ret;
-    }
-    
+    ESP_LOGI(TAG, "Stopping audio recording session");
     recording_session_active_ = false;
+    
+    // The connection is not closed here. The server will close it when it's done.
+    // Or the main manager can call disconnect().
+    
     return ESP_OK;
 }
 
@@ -188,9 +173,8 @@ void WebSocketVoiceClient::set_state_change_callback(StateChangeCallback callbac
 void WebSocketVoiceClient::cancel_operations() {
     recording_session_active_ = false;
     
-    if (is_connected()) {
-        send_control_message("{\"type\":\"end_session\"}");
-    }
+    // Disconnect will trigger cleanup.
+    disconnect();
 }
 
 // Static WebSocket event handler
@@ -209,6 +193,9 @@ void WebSocketVoiceClient::handle_websocket_event(esp_websocket_event_id_t event
             ESP_LOGI(TAG, "WebSocket connected");
             reconnect_attempts_ = 0;
             set_state(ConnectionState::CONNECTED);
+            
+            // Automatically start recording session once connected
+            start_recording_session();
             break;
             
         case WEBSOCKET_EVENT_DISCONNECTED:
@@ -216,7 +203,7 @@ void WebSocketVoiceClient::handle_websocket_event(esp_websocket_event_id_t event
             recording_session_active_ = false;
             set_state(ConnectionState::DISCONNECTED);
             
-            // Start reconnection task
+            // Start reconnection task if configured
             if (reconnect_attempts_ < config_.max_reconnect_attempts) {
                 xTaskCreate(reconnect_task, "ws_reconnect", 4096, this, 5, &reconnect_task_handle_);
             } else {
@@ -308,43 +295,59 @@ esp_err_t WebSocketVoiceClient::send_control_message(const std::string& message)
 }
 
 void WebSocketVoiceClient::handle_text_message(const char* data, size_t length) {
-    // Null-terminate the message for JSON parsing
     std::string message(data, length);
-    ESP_LOGD(TAG, "Received text message: %s", message.c_str());
-    
-    cJSON* json = cJSON_Parse(message.c_str());
-    if (!json) {
-        ESP_LOGE(TAG, "Failed to parse JSON message");
+    ESP_LOGD(TAG, "Received backend message: %s", message.c_str());
+
+    cJSON* root = cJSON_Parse(message.c_str());
+    if (!root) {
+        ESP_LOGE(TAG, "Failed to parse backend JSON response");
         return;
     }
-    
-    cJSON* type = cJSON_GetObjectItem(json, "type");
-    if (cJSON_IsString(type)) {
-        std::string type_str = type->valuestring;
+
+    // Check message type
+    cJSON* type_item = cJSON_GetObjectItem(root, "type");
+    if (type_item && cJSON_IsString(type_item)) {
+        std::string msg_type = type_item->valuestring;
         
-        if (type_str == "audio_start") {
-            ESP_LOGI(TAG, "Server started audio response");
-        } else if (type_str == "audio_end") {
-            ESP_LOGI(TAG, "Server finished audio response");
-            if (audio_callback_) {
-                audio_callback_(nullptr, 0, true); // Signal end of response
+        if (msg_type == "state_change") {
+            // Handle backend state change
+            cJSON* state_item = cJSON_GetObjectItem(root, "state");
+            if (state_item && cJSON_IsString(state_item)) {
+                std::string new_state = state_item->valuestring;
+                ESP_LOGI(TAG, "Backend state changed to: %s", new_state.c_str());
+                
+                if (audio_callback_) {
+                    // Pass state change to command processor
+                    audio_callback_(nullptr, 0, false, message.c_str());
+                }
             }
-        } else if (type_str == "error") {
-            cJSON* message_obj = cJSON_GetObjectItem(json, "message");
-            if (cJSON_IsString(message_obj)) {
-                ESP_LOGE(TAG, "Server error: %s", message_obj->valuestring);
+        } else if (msg_type == "error") {
+            // Handle error message
+            cJSON* error_msg = cJSON_GetObjectItem(root, "message");
+            if (error_msg && cJSON_IsString(error_msg)) {
+                ESP_LOGE(TAG, "Received error from backend: %s", error_msg->valuestring);
+            }
+        }
+    } else {
+        // Check for legacy intent messages (for backward compatibility)
+        cJSON* intent_item = cJSON_GetObjectItem(root, "intent");
+        if (intent_item && cJSON_IsString(intent_item)) {
+            ESP_LOGI(TAG, "Received intent from backend: %s", message.c_str());
+            if (audio_callback_) {
+                // Pass intent JSON to command processor
+                audio_callback_(nullptr, 0, true, message.c_str());
             }
         }
     }
-    
-    cJSON_Delete(json);
+
+    cJSON_Delete(root);
 }
 
 void WebSocketVoiceClient::handle_binary_message(const uint8_t* data, size_t length) {
     ESP_LOGD(TAG, "Received binary message: %zu bytes", length);
     
     if (audio_callback_) {
-        audio_callback_(data, length, false);
+        audio_callback_(data, length, false, nullptr);
     }
 }
 

@@ -49,7 +49,7 @@ public:
     /**
      * @brief Initialize voice command processor
      */
-    esp_err_t init(WebSocketVoiceClient* websocket_client, LLMPipeline* response_player);
+    esp_err_t init(WebSocketVoiceClient* websocket_client);
     
     /**
      * @brief Shutdown voice command processor
@@ -103,8 +103,9 @@ private:
     esp_err_t send_to_websocket(const uint8_t* audio_data, size_t length);
     
     // Audio response handling
-    void handle_websocket_response(const uint8_t* audio_data, size_t length, bool is_final);
+    void handle_websocket_response(const uint8_t* audio_data, size_t length, bool is_final, const char* message_json);
     void handle_connection_state_change(int connection_state);
+    void handle_backend_state_change(const std::string& backend_state);
     
     // State management
     void set_state(State new_state);
@@ -122,7 +123,6 @@ private:
     
     // External components
     WebSocketVoiceClient* websocket_client_;
-    LLMPipeline* response_player_;
     MusicPlaybackCallback music_callback_;
     
     // Connection state tracking

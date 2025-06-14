@@ -103,16 +103,6 @@
             box-shadow: 0 6px 20px rgba(244, 67, 54, 0.4);
         }
 
-        .btn-secondary {
-            background: linear-gradient(45deg, #607D8B, #455A64);
-            color: white;
-        }
-
-        .btn-secondary:hover:not(:disabled) {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(96, 125, 139, 0.4);
-        }
-
         button:disabled {
             opacity: 0.6;
             cursor: not-allowed;
@@ -145,16 +135,6 @@
         .log-warn { color: #FF9800; }
         .log-error { color: #f44336; }
         .log-debug { color: #2196F3; }
-
-        .audio-controls {
-            margin-top: 20px;
-            text-align: center;
-        }
-
-        audio {
-            width: 100%;
-            margin-top: 10px;
-        }
 
         .recording-indicator {
             display: none;
@@ -203,6 +183,29 @@
         .server-url input::placeholder {
             color: rgba(255, 255, 255, 0.7);
         }
+
+        .intent-panel {
+            display: none;
+            margin-top: 20px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .intent-panel h3 {
+            margin-top: 0;
+            color: #FFD700;
+        }
+
+        .intent-panel pre {
+            color: #fff;
+            font-size: 1.1em;
+            background: rgba(0, 0, 0, 0.1);
+            border-radius: 8px;
+            padding: 12px;
+            overflow-x: auto;
+        }
     </style>
 </head>
 <body>
@@ -216,42 +219,42 @@
 
         <div class="status-panel">
             <div class="status-item">
-                <span class="status-label">Connection Status:</span>
+                <span class="status-label">Connection:</span>
                 <span class="status-value" id="connectionStatus">DISCONNECTED</span>
             </div>
             <div class="status-item">
-                <span class="status-label">Recording Status:</span>
-                <span class="status-value" id="recordingStatus">STOPPED</span>
+                <span class="status-label">Mic Status:</span>
+                <span class="status-value" id="recordingStatus">INACTIVE</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Backend State:</span>
+                <span class="status-value" id="backendState">IDLE</span>
             </div>
             <div class="status-item">
                 <span class="status-label">Audio Chunks Sent:</span>
                 <span class="status-value" id="chunksSent">0</span>
             </div>
-            <div class="status-item">
-                <span class="status-label">Audio Response Size:</span>
-                <span class="status-value" id="responseSize">0 bytes</span>
-            </div>
         </div>
 
         <div class="controls">
-            <button id="connectBtn" class="btn-primary">Connect</button>
-                            <button id="startRecordingBtn" class="btn-primary" disabled>Start Live Session</button>
-            <button id="stopRecordingBtn" class="btn-danger" disabled>End Session</button>
-            <button id="cancelBtn" class="btn-secondary" disabled>Cancel</button>
+            <button id="connectBtn" class="btn-primary">Connect & Start Mic</button>
         </div>
 
         <div class="recording-indicator" id="recordingIndicator">
             <div class="pulse"></div>
-            <span>Recording in progress... Speak now!</span>
+            <span id="recordingText">Listening for your command...</span>
         </div>
-
-        <!-- Audio will play automatically via Web Audio API - no UI needed -->
 
         <div class="log-panel" id="logPanel">
             <div class="log-entry log-info">
                 <span class="log-timestamp">[Ready]</span>
-                Voice testing interface ready. Click Connect to start.
+                Click "Connect & Start Mic" to begin.
             </div>
+        </div>
+
+        <div class="intent-panel" id="intentPanel">
+            <h3 style="margin-top:0; color:#FFD700;">Last Intent</h3>
+            <pre id="intentJson"></pre>
         </div>
     </div>
 
@@ -261,20 +264,17 @@
                 this.ws = null;
                 this.isConnected = false;
                 this.isRecording = false;
-                this.mediaRecorder = null;
                 this.audioStream = null;
-                this.audioChunks = [];
                 this.chunksSent = 0;
                 this.inputAudioContext = null;
                 this.outputAudioContext = null;
-                this.audioBuffer = [];
+                this.audioBufferQueue = [];
                 this.isPlaying = false;
-                this.playbackQueue = [];
                 this.nextPlayTime = 0;
 
                 this.initializeElements();
                 this.bindEvents();
-                this.log('info', 'Voice test client initialized');
+                this.log('info', 'VAD test client initialized.');
             }
 
             initializeElements() {
@@ -282,14 +282,14 @@
                     serverUrl: document.getElementById('serverUrl'),
                     connectionStatus: document.getElementById('connectionStatus'),
                     recordingStatus: document.getElementById('recordingStatus'),
+                    backendState: document.getElementById('backendState'),
                     chunksSent: document.getElementById('chunksSent'),
-                    responseSize: document.getElementById('responseSize'),
                     connectBtn: document.getElementById('connectBtn'),
-                    startRecordingBtn: document.getElementById('startRecordingBtn'),
-                    stopRecordingBtn: document.getElementById('stopRecordingBtn'),
-                    cancelBtn: document.getElementById('cancelBtn'),
                     recordingIndicator: document.getElementById('recordingIndicator'),
-                    logPanel: document.getElementById('logPanel')
+                    recordingText: document.getElementById('recordingText'),
+                    logPanel: document.getElementById('logPanel'),
+                    intentPanel: document.getElementById('intentPanel'),
+                    intentJson: document.getElementById('intentJson'),
                 };
             }
 
@@ -298,32 +298,25 @@
                     if (this.isConnected) {
                         this.disconnect();
                     } else {
-                        this.connect();
+                        this.connectAndRecord();
                     }
-                });
-
-                this.elements.startRecordingBtn.addEventListener('click', () => {
-                    this.startRecording();
-                });
-
-                this.elements.stopRecordingBtn.addEventListener('click', () => {
-                    this.stopRecording();
-                });
-
-                this.elements.cancelBtn.addEventListener('click', () => {
-                    this.cancel();
                 });
             }
 
-            async connect() {
+            async connectAndRecord() {
                 const url = this.elements.serverUrl.value.trim();
                 if (!url) {
                     this.log('error', 'Please enter a valid WebSocket URL');
                     return;
                 }
 
+                if (this.ws) {
+                    this.ws.close();
+                }
+
                 try {
                     this.log('info', `Connecting to ${url}...`);
+                    this.elements.connectBtn.disabled = true;
                     this.ws = new WebSocket(url);
 
                     this.ws.onopen = () => {
@@ -331,23 +324,25 @@
                         this.updateConnectionStatus('CONNECTED');
                         this.elements.connectBtn.textContent = 'Disconnect';
                         this.elements.connectBtn.className = 'btn-danger';
-                        this.elements.startRecordingBtn.disabled = false;
-                        this.log('info', 'WebSocket connected successfully');
+                        this.log('info', 'WebSocket connected. Starting microphone...');
+                        this.startMicrophone();
                     };
 
                     this.ws.onclose = (event) => {
                         this.isConnected = false;
+                        this.isRecording = false;
                         this.updateConnectionStatus('DISCONNECTED');
-                        this.elements.connectBtn.textContent = 'Connect';
+                        this.updateRecordingStatus('INACTIVE', false);
+                        this.elements.connectBtn.textContent = 'Connect & Start Mic';
                         this.elements.connectBtn.className = 'btn-primary';
-                        this.elements.startRecordingBtn.disabled = true;
-                        this.elements.stopRecordingBtn.disabled = true;
-                        this.elements.cancelBtn.disabled = true;
-                        this.log('warn', `WebSocket disconnected: ${event.code} ${event.reason}`);
+                        this.log('warn', `WebSocket disconnected: ${event.code}`);
+                        if (this.audioStream) {
+                            this.audioStream.getTracks().forEach(track => track.stop());
+                        }
                     };
 
                     this.ws.onerror = (error) => {
-                        this.log('error', `WebSocket error: ${error}`);
+                        this.log('error', 'WebSocket error. Check server console.');
                     };
 
                     this.ws.onmessage = (event) => {
@@ -356,89 +351,60 @@
 
                 } catch (error) {
                     this.log('error', `Connection failed: ${error.message}`);
+                } finally {
+                    this.elements.connectBtn.disabled = false;
                 }
             }
 
             disconnect() {
                 if (this.ws) {
                     this.ws.close();
-                    this.ws = null;
-                }
-                if (this.audioStream) {
-                    this.audioStream.getTracks().forEach(track => track.stop());
-                    this.audioStream = null;
                 }
             }
 
-            async startRecording() {
-                if (!this.isConnected) {
-                    this.log('error', 'Not connected to server');
-                    return;
-                }
-
+            async startMicrophone() {
                 try {
-                    // Ensure output audio context is enabled with user interaction
-                    if (!this.outputAudioContext) {
-                        this.outputAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    // Initialize output audio context on user interaction
+                    if (!this.outputAudioContext || this.outputAudioContext.state === 'closed') {
+                        this.outputAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+                        this.log('info', 'Output audio context created.');
                     }
-                    
                     if (this.outputAudioContext.state === 'suspended') {
                         await this.outputAudioContext.resume();
-                        this.log('info', 'Audio context resumed - audio playback enabled');
                     }
+
                     // Get microphone access
                     this.audioStream = await navigator.mediaDevices.getUserMedia({
-                        audio: {
-                            sampleRate: 16000,
-                            channelCount: 1,
-                            echoCancellation: true,
-                            noiseSuppression: true
-                        }
+                        audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true }
                     });
 
-                    // Setup input audio context for microphone processing
-                    this.inputAudioContext = new (window.AudioContext || window.webkitAudioContext)({
-                        sampleRate: 16000
-                    });
+                    // Setup input audio context for mic processing
+                    this.inputAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                    const source = this.inputAudioContext.createMediaStreamSource(this.audioStream);
 
-                    // Output audio context already initialized above
-
-                    // Create inline AudioWorklet processor
+                    // Create AudioWorklet for efficient audio processing
                     const workletCode = `
                         class AudioProcessor extends AudioWorkletProcessor {
                             process(inputs, outputs, parameters) {
                                 const input = inputs[0];
                                 if (input.length > 0) {
-                                    const inputData = input[0]; // First channel
-                                    
-                                    // Convert float32 to int16 PCM
-                                    const pcmData = new Int16Array(inputData.length);
-                                    for (let i = 0; i < inputData.length; i++) {
-                                        pcmData[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+                                    const pcmData = new Int16Array(input[0].length);
+                                    for (let i = 0; i < input[0].length; i++) {
+                                        pcmData[i] = Math.max(-1, Math.min(1, input[0][i])) * 32767;
                                     }
-                                    
-                                    // Send to main thread
-                                    this.port.postMessage(pcmData.buffer);
+                                    this.port.postMessage(pcmData.buffer, [pcmData.buffer]);
                                 }
                                 return true;
                             }
                         }
                         registerProcessor('audio-processor', AudioProcessor);
                     `;
-
-                    // Create blob URL for the worklet
                     const blob = new Blob([workletCode], { type: 'application/javascript' });
                     const workletUrl = URL.createObjectURL(blob);
-
-                    // Add the worklet module
                     await this.inputAudioContext.audioWorklet.addModule(workletUrl);
                     URL.revokeObjectURL(workletUrl);
 
-                    // Create source and worklet node
-                    const source = this.inputAudioContext.createMediaStreamSource(this.audioStream);
                     const workletNode = new AudioWorkletNode(this.inputAudioContext, 'audio-processor');
-
-                    // Handle messages from worklet
                     workletNode.port.onmessage = (event) => {
                         if (this.isRecording && this.ws && this.ws.readyState === WebSocket.OPEN) {
                             this.ws.send(event.data);
@@ -446,221 +412,45 @@
                             this.elements.chunksSent.textContent = this.chunksSent;
                         }
                     };
-
-                    // Connect the audio graph
                     source.connect(workletNode);
 
-                    this.log('debug', `Input AudioContext sample rate: ${this.inputAudioContext.sampleRate}`);
-
-                    // Send start session control message for Live API
-                    this.sendControlMessage({ type: 'start_session' });
-                    
                     this.isRecording = true;
                     this.chunksSent = 0;
-                    this.audioBuffer = [];
-                    this.isPlaying = false;
-                    this.nextPlayTime = 0;
-                    this.updateRecordingStatus('LIVE SESSION');
-                    this.elements.recordingIndicator.classList.add('active');
-                    this.elements.startRecordingBtn.disabled = true;
-                    this.elements.stopRecordingBtn.disabled = false;
-                    this.elements.cancelBtn.disabled = false;
-
-                    
-                    this.log('info', 'Started live voice session');
+                    this.elements.chunksSent.textContent = '0';
+                    this.updateRecordingStatus('LISTENING', true);
+                    this.log('info', 'Microphone active. Send audio to server.');
 
                 } catch (error) {
-                    this.log('error', `Failed to start recording: ${error.message}`);
-                }
-            }
-
-            stopRecording() {
-                if (!this.isRecording) {
-                    this.log('warn', 'Not currently recording');
-                    return;
-                }
-
-                // Send end session control message for Live API
-                this.sendControlMessage({ type: 'end_session' });
-                
-                this.isRecording = false;
-                this.updateRecordingStatus('PROCESSING');
-                this.elements.recordingIndicator.classList.remove('active');
-                this.elements.startRecordingBtn.disabled = false;
-                this.elements.stopRecordingBtn.disabled = true;
-                this.elements.cancelBtn.disabled = true;
-
-                // Stop audio stream
-                if (this.audioStream) {
-                    this.audioStream.getTracks().forEach(track => track.stop());
-                }
-                if (this.inputAudioContext) {
-                    this.inputAudioContext.close();
-                }
-                if (this.outputAudioContext) {
-                    this.outputAudioContext.close();
-                }
-
-                this.log('info', `Ended live session. Sent ${this.chunksSent} audio chunks`);
-            }
-
-            cancel() {
-                this.sendControlMessage({ type: 'cancel' });
-                
-                this.isRecording = false;
-                this.updateRecordingStatus('CANCELLED');
-                this.elements.recordingIndicator.classList.remove('active');
-                this.elements.startRecordingBtn.disabled = false;
-                this.elements.stopRecordingBtn.disabled = true;
-                this.elements.cancelBtn.disabled = true;
-
-                if (this.audioStream) {
-                    this.audioStream.getTracks().forEach(track => track.stop());
-                }
-                if (this.inputAudioContext) {
-                    this.inputAudioContext.close();
-                }
-                if (this.outputAudioContext) {
-                    this.outputAudioContext.close();
-                }
-
-                this.log('info', 'Cancelled live session');
-            }
-
-            sendControlMessage(message) {
-                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                    this.ws.send(JSON.stringify(message));
-                    this.log('debug', `Sent control message: ${message.type}`);
+                    this.log('error', `Mic error: ${error.message}`);
+                    this.updateRecordingStatus('ERROR', false);
+                    this.disconnect();
                 }
             }
 
             handleMessage(event) {
                 if (typeof event.data === 'string') {
-                    // Text message (control)
                     try {
                         const message = JSON.parse(event.data);
-                        this.handleControlMessage(message);
+                        if (message.intent) {
+                            this.displayIntentJson(message);
+                        } else if (message.type === 'error') {
+                            this.log('error', `Server Error: ${message.message}`);
+                        } else if (message.type === 'state_change') {
+                            this.updateBackendState(message.state);
+                        }
                     } catch (error) {
-                        this.log('error', `Failed to parse control message: ${error.message}`);
+                        this.log('warn', `Received non-JSON text: "${event.data}"`);
                     }
                 } else {
-                    // Binary message (audio data)
-                    this.handleAudioData(event.data);
+                    // Binary message is audio data
+                    this.queueAudioForPlayback(event.data);
                 }
             }
-
-            handleControlMessage(message) {
-                this.log('info', `Received control message: ${message.type}`);
-                
-                switch (message.type) {
-                    case 'audio_start':
-                        this.updateRecordingStatus('RECEIVING AUDIO');
-                        this.log('info', 'Server started sending audio response');
-                        break;
-                        
-                    case 'audio_end':
-                        this.updateRecordingStatus('STOPPED');
-                        this.log('info', 'Server finished sending audio response');
-                        // Audio should already be playing from handleAudioData
-                        break;
-                        
-                    case 'error':
-                        this.updateRecordingStatus('ERROR');
-                        this.log('error', `Server error: ${message.message || 'Unknown error'}`);
-                        break;
-                }
-            }
-
-            handleAudioData(data) {
-                const totalSize = data.size || data.byteLength || data.length || 0;
-                this.elements.responseSize.textContent = `${totalSize} bytes`;
-                this.log('debug', `Received audio chunk: ${totalSize} bytes`);
-                
-                // Add to buffer instead of playing immediately
-                this.audioBuffer.push(data);
-                
-                // Start buffered playback if we have enough chunks and aren't already playing
-                if (this.audioBuffer.length >= 3 && !this.isPlaying) {
-                    this.log('info', `Starting buffered playback with ${this.audioBuffer.length} chunks`);
+            
+            queueAudioForPlayback(audioData) {
+                this.audioBufferQueue.push(audioData);
+                if (!this.isPlaying && this.audioBufferQueue.length > 3) {
                     this.startBufferedPlayback();
-                }
-            }
-
-            async playAudioChunk(audioData) {
-                try {
-                    // Check if audio context exists and is running
-                    if (!this.outputAudioContext) {
-                        this.log('warn', 'Audio context not initialized - start recording first');
-                        return;
-                    }
-
-                    // Ensure output audio context is running
-                    if (this.outputAudioContext.state === 'suspended') {
-                        this.log('warn', 'Audio context suspended - audio enabled after starting session');
-                        return;
-                    }
-
-                    // Convert to ArrayBuffer with detailed logging
-                    let arrayBuffer;
-                    this.log('debug', `Audio data type for conversion: ${audioData.constructor.name}`);
-                    
-                    if (audioData instanceof Blob) {
-                        this.log('debug', 'Converting Blob to ArrayBuffer');
-                        arrayBuffer = await audioData.arrayBuffer();
-                    } else if (audioData instanceof ArrayBuffer) {
-                        this.log('debug', 'Already ArrayBuffer');
-                        arrayBuffer = audioData;
-                    } else if (audioData.buffer instanceof ArrayBuffer) {
-                        this.log('debug', 'Using .buffer property');
-                        arrayBuffer = audioData.buffer;
-                    } else {
-                        this.log('debug', 'Treating as raw data');
-                        arrayBuffer = audioData;
-                    }
-                    
-                    this.log('debug', `Final ArrayBuffer size: ${arrayBuffer.byteLength} bytes`);
-
-                    this.log('debug', `Decoding audio data: ${arrayBuffer.byteLength} bytes`);
-
-                    // Try to decode as MP3/encoded audio first
-                    let audioBuffer;
-                    try {
-                        // IMPORTANT: decodeAudioData consumes/transfers the ArrayBuffer!
-                        // Make a copy first to preserve original data
-                        const arrayBufferCopy = arrayBuffer.slice();
-                        audioBuffer = await this.outputAudioContext.decodeAudioData(arrayBufferCopy);
-                    } catch (decodeError) {
-                        this.log('debug', `MP3 decode failed, trying raw PCM: ${decodeError.message}`);
-                        this.log('debug', `ArrayBuffer after failed decode: ${arrayBuffer.byteLength} bytes`);
-                        
-                        // If that fails, try to interpret as raw PCM data (24kHz, 16-bit, mono)
-                        audioBuffer = await this.createPCMAudioBuffer(arrayBuffer);
-                    }
-                    
-                    // Create buffer source and play immediately
-                    const source = this.outputAudioContext.createBufferSource();
-                    source.buffer = audioBuffer;
-                    source.connect(this.outputAudioContext.destination);
-                    source.start(0);
-                    
-                    this.log('info', `🔊 Playing audio: ${audioBuffer.duration.toFixed(2)}s, ${audioBuffer.sampleRate}Hz`);
-
-                } catch (error) {
-                    this.log('error', `Web Audio API failed: ${error.message}`);
-                    
-                    // Fallback: try to play via Audio API (requires user interaction)
-                    try {
-                        const blob = audioData instanceof Blob ? audioData : new Blob([audioData], { type: 'audio/mp3' });
-                        const audio = new Audio(URL.createObjectURL(blob));
-                        
-                        audio.play().then(() => {
-                            this.log('info', '🔊 Playing via fallback Audio API');
-                        }).catch(e => {
-                            this.log('warn', 'Audio playback requires user interaction - click to enable');
-                        });
-                    } catch (fallbackError) {
-                        this.log('error', `Fallback audio playback failed: ${fallbackError.message}`);
-                    }
                 }
             }
 
@@ -668,136 +458,112 @@
                 if (this.isPlaying) return;
                 
                 this.isPlaying = true;
+                this.log('info', 'Audio response detected. Starting playback.');
                 this.nextPlayTime = this.outputAudioContext.currentTime;
                 
-                // Process initial buffer
-                await this.processAudioQueue();
+                // Continuous playback loop that handles new chunks as they arrive
+                const playbackLoop = async () => {
+                    while (this.audioBufferQueue.length > 0) {
+                        const audioData = this.audioBufferQueue.shift();
+                        await this.scheduleAudioChunk(audioData);
+                    }
+                    
+                    // Check if more chunks arrived while we were processing
+                    if (this.audioBufferQueue.length > 0) {
+                        // Continue playing new chunks immediately
+                        setTimeout(playbackLoop, 10);
+                    } else {
+                        // No more chunks currently, but don't stop playback yet
+                        // Wait a bit longer for potential new chunks
+                        setTimeout(() => {
+                            if (this.audioBufferQueue.length > 0) {
+                                // New chunks arrived, continue playing
+                                playbackLoop();
+                            } else {
+                                // Still no chunks, wait a bit more but check if playback should continue
+                                setTimeout(() => {
+                                    if (this.audioBufferQueue.length > 0) {
+                                        playbackLoop();
+                                    }
+                                    // If still no chunks after waiting, playback will be stopped by state change
+                                }, 100);
+                            }
+                        }, 50);
+                    }
+                };
                 
-                // Continue processing as more chunks arrive
-                this.scheduleNextChunk();
+                playbackLoop();
             }
 
-            async processAudioQueue() {
-                while (this.audioBuffer.length > 0) {
-                    const audioData = this.audioBuffer.shift();
-                    await this.scheduleAudioChunk(audioData);
+            // Method to explicitly stop playback (called when backend state changes)
+            stopPlayback() {
+                if (this.isPlaying) {
+                    this.isPlaying = false;
+                    this.log('info', 'Playback stopped by state change.');
                 }
             }
 
             async scheduleAudioChunk(audioData) {
                 try {
-                    if (!this.outputAudioContext) return;
+                    const arrayBuffer = await (audioData instanceof Blob ? audioData.arrayBuffer() : audioData);
+                    
+                    // The backend sends raw PCM 16-bit 24kHz audio from Gemini Live API
+                    const audioBuffer = this.outputAudioContext.createBuffer(1, arrayBuffer.byteLength / 2, 24000);
+                    const channelData = audioBuffer.getChannelData(0);
+                    const dataView = new DataView(arrayBuffer);
 
-                    // Convert to ArrayBuffer
-                    let arrayBuffer;
-                    if (audioData instanceof Blob) {
-                        arrayBuffer = await audioData.arrayBuffer();
-                    } else if (audioData instanceof ArrayBuffer) {
-                        arrayBuffer = audioData;
-                    } else if (audioData.buffer instanceof ArrayBuffer) {
-                        arrayBuffer = audioData.buffer;
-                    } else {
-                        arrayBuffer = audioData;
+                    for (let i = 0; i < audioBuffer.length; i++) {
+                        channelData[i] = dataView.getInt16(i * 2, true) / 32768.0;
                     }
 
-                    // Create audio buffer
-                    let audioBuffer;
-                    try {
-                        const arrayBufferCopy = arrayBuffer.slice();
-                        audioBuffer = await this.outputAudioContext.decodeAudioData(arrayBufferCopy);
-                    } catch (decodeError) {
-                        audioBuffer = await this.createPCMAudioBuffer(arrayBuffer);
-                    }
-
-                    // Schedule for seamless playback
                     const source = this.outputAudioContext.createBufferSource();
                     source.buffer = audioBuffer;
                     source.connect(this.outputAudioContext.destination);
                     
-                    // Schedule to start right after previous chunk ends
                     source.start(this.nextPlayTime);
                     this.nextPlayTime += audioBuffer.duration;
-                    
-                    this.log('debug', `Scheduled audio: ${audioBuffer.duration.toFixed(3)}s at ${this.nextPlayTime.toFixed(3)}s`);
+                    this.log('debug', `Scheduled audio chunk: ${audioBuffer.duration.toFixed(3)}s`);
 
                 } catch (error) {
                     this.log('error', `Failed to schedule audio chunk: ${error.message}`);
+                    this.isPlaying = false; // Stop playback on error
                 }
-            }
-
-            scheduleNextChunk() {
-                // Continue processing buffer every 100ms
-                setTimeout(() => {
-                    if (this.audioBuffer.length > 0) {
-                        this.processAudioQueue();
-                        this.scheduleNextChunk();
-                    } else if (this.nextPlayTime <= this.outputAudioContext.currentTime + 1) {
-                        // Playback finished, stop
-                        this.isPlaying = false;
-                        this.log('info', 'Buffered playback finished');
-                    } else {
-                        this.scheduleNextChunk();
-                    }
-                }, 100);
-            }
-
-            async createPCMAudioBuffer(arrayBuffer) {
-                // Debug the ArrayBuffer state
-                this.log('debug', `createPCMAudioBuffer received: ${arrayBuffer.constructor.name}`);
-                this.log('debug', `ArrayBuffer byteLength: ${arrayBuffer.byteLength}`);
-                
-                // Use the actual sample rate from Gemini: audio/pcm;rate=24000
-                // The original speed issue was likely due to ArrayBuffer consumption, not sample rate
-                let sampleRate = 24000;
-                const numChannels = 1;
-                const bytesPerSample = 2; // 16-bit
-                
-                const numSamples = Math.floor(arrayBuffer.byteLength / bytesPerSample);
-                
-                if (numSamples <= 0) {
-                    throw new Error(`Invalid PCM data: ${arrayBuffer.byteLength} bytes = ${numSamples} samples`);
-                }
-                
-                this.log('debug', `Creating PCM buffer: ${numSamples} samples, ${arrayBuffer.byteLength} bytes`);
-                
-                const audioBuffer = this.outputAudioContext.createBuffer(numChannels, numSamples, sampleRate);
-                
-                // Convert Int16 little-endian PCM to Float32 for Web Audio API
-                const dataView = new DataView(arrayBuffer);
-                const channelData = audioBuffer.getChannelData(0);
-                
-                for (let i = 0; i < numSamples; i++) {
-                    // Read 16-bit little-endian signed integer
-                    const sample = dataView.getInt16(i * 2, true); // true = little-endian
-                    // Convert from Int16 range (-32768 to 32767) to Float32 range (-1.0 to 1.0)
-                    channelData[i] = sample / 32768.0;
-                }
-                
-                this.log('debug', `Created PCM buffer: ${numSamples} samples, ${sampleRate}Hz, duration: ${(numSamples/sampleRate).toFixed(3)}s`);
-                return audioBuffer;
             }
 
             updateConnectionStatus(status) {
                 this.elements.connectionStatus.textContent = status;
-                this.elements.connectionStatus.className = 'status-value';
-                if (status === 'CONNECTED') {
-                    this.elements.connectionStatus.style.color = '#4CAF50';
-                } else if (status === 'DISCONNECTED') {
-                    this.elements.connectionStatus.style.color = '#f44336';
+                this.elements.connectionStatus.style.color = status === 'CONNECTED' ? '#4CAF50' : '#f44336';
+            }
+
+            updateRecordingStatus(status, isActive) {
+                this.elements.recordingStatus.textContent = status;
+                if (isActive) {
+                    this.elements.recordingIndicator.classList.add('active');
                 } else {
-                    this.elements.connectionStatus.style.color = '#FF9800';
+                    this.elements.recordingIndicator.classList.remove('active');
                 }
             }
 
-            updateRecordingStatus(status) {
-                this.elements.recordingStatus.textContent = status;
-                this.elements.recordingStatus.className = 'status-value';
-                if (status === 'RECORDING') {
-                    this.elements.recordingStatus.style.color = '#f44336';
-                } else if (status === 'STOPPED') {
-                    this.elements.recordingStatus.style.color = '#4CAF50';
-                } else {
-                    this.elements.recordingStatus.style.color = '#FF9800';
+            updateBackendState(state) {
+                this.elements.backendState.textContent = state;
+                
+                // Update recording indicator text based on state
+                if (state === 'WAITING_FOR_USER') {
+                    this.elements.recordingText.textContent = 'Your turn to speak...';
+                    // Stop playback when we know Gemini finished speaking
+                    this.stopPlayback();
+                } else if (state === 'LISTENING') {
+                    this.elements.recordingText.textContent = 'Listening for your command...';
+                    // Also stop playback when going back to listening (conversation ended)
+                    this.stopPlayback();
+                } else if (state === 'STREAMING_RESPONSE') {
+                    this.elements.recordingText.textContent = 'Assistant is responding...';
+                } else if (state === 'PROCESSING_INTENT') {
+                    this.elements.recordingText.textContent = 'Processing your request...';
+                } else if (state === 'HANDLING_COMMAND') {
+                    this.elements.recordingText.textContent = 'Executing command...';
+                    // Stop playback for non-conversational commands
+                    this.stopPlayback();
                 }
             }
 
@@ -806,18 +572,21 @@
                 const logEntry = document.createElement('div');
                 logEntry.className = `log-entry log-${level}`;
                 logEntry.innerHTML = `<span class="log-timestamp">[${timestamp}]</span>${message}`;
-                
                 this.elements.logPanel.appendChild(logEntry);
                 this.elements.logPanel.scrollTop = this.elements.logPanel.scrollHeight;
+            }
 
-                // Keep only last 100 log entries
-                while (this.elements.logPanel.children.length > 100) {
-                    this.elements.logPanel.removeChild(this.elements.logPanel.firstChild);
+            displayIntentJson(json) {
+                if (json) {
+                    this.elements.intentPanel.style.display = 'block';
+                    this.elements.intentJson.textContent = JSON.stringify(json, null, 2);
+                } else {
+                    this.elements.intentPanel.style.display = 'none';
+                    this.elements.intentJson.textContent = '';
                 }
             }
         }
 
-        // Initialize the client when page loads
         document.addEventListener('DOMContentLoaded', () => {
             new VoiceTestClient();
         });

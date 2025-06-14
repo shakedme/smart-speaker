@@ -188,7 +188,13 @@ namespace btspeaker {
         auto& audio_source_mgr = AudioSourceManager::getInstance();
         esp_err_t ret = ESP_OK;
 
-        if (strstr(command, "play") || strstr(command, "resume")) {
+        // Check for Spotify URI (spotify:track:xxx, spotify:playlist:xxx, etc.)
+        if (strncmp(command, "spotify:", 8) == 0) {
+            ESP_LOGI(TAG, "Voice command: Play Spotify URI: %s", command);
+            ret = audio_source_mgr.spotifyPlay(std::string(command));
+        }
+        // Check for basic playback control commands
+        else if (strstr(command, "play") || strstr(command, "resume")) {
             ret = audio_source_mgr.play();
             ESP_LOGI(TAG, "Voice command: Resume playback");
         } else if (strstr(command, "pause")) {
@@ -203,10 +209,20 @@ namespace btspeaker {
         } else if (strstr(command, "previous") || strstr(command, "back")) {
             ret = audio_source_mgr.skipPrevious();
             ESP_LOGI(TAG, "Voice command: Skip previous");
+        } else if (strstr(command, "volume up")) {
+            auto current_volume = audio_source_mgr.getVolume();
+            auto new_volume = std::min(100, static_cast<int>(current_volume) + 10);
+            audio_source_mgr.setVolume(new_volume);
+            ESP_LOGI(TAG, "Voice command: Volume up to %d", new_volume);
+        } else if (strstr(command, "volume down")) {
+            auto current_volume = audio_source_mgr.getVolume();
+            auto new_volume = std::max(0, static_cast<int>(current_volume) - 10);
+            audio_source_mgr.setVolume(new_volume);
+            ESP_LOGI(TAG, "Voice command: Volume down to %d", new_volume);
         } else if (strstr(command, "bluetooth")) {
             ret = audio_source_mgr.switchToSource(AudioSource::BLUETOOTH);
             ESP_LOGI(TAG, "Voice command: Switch to Bluetooth");
-        } else if (strstr(command, "spotify")) {
+        } else if (strstr(command, "spotify") && strncmp(command, "spotify:", 8) != 0) {
             ret = audio_source_mgr.switchToSource(AudioSource::SPOTIFY);
             ESP_LOGI(TAG, "Voice command: Switch to Spotify");
         } else {

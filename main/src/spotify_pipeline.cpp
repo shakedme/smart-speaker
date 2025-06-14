@@ -250,11 +250,33 @@ esp_err_t SpotifyPipeline::play(const std::string& uri) {
     if (!is_initialized_) {
         return ESP_ERR_INVALID_STATE;
     }
-    
-    ESP_LOGI(TAG, "Playing Spotify URI: %s", uri.c_str());
-    if (device_handler_) {
-        device_handler_->sendCommand(cspot::DeviceStateHandler::CommandType::PLAY);
+    return playUriInternal(uri);
+}
+
+esp_err_t SpotifyPipeline::playUriInternal(const std::string& uri) {
+    if (!device_handler_ || !context_) {
+        ESP_LOGE(TAG, "Device handler or context not initialized");
+        return ESP_ERR_INVALID_STATE;
     }
+    ESP_LOGI(TAG, "[playUriInternal] Playing Spotify URI: %s", uri.c_str());
+
+    // Clear current queue
+    device_handler_->currentTracks.clear();
+
+    // Create ProvidedTrack for the URI
+    ProvidedTrack track = ProvidedTrack_init_zero;
+    track.uri = strdup(uri.c_str());
+    track.provider = strdup("queue");
+    device_handler_->currentTracks.push_back(track);
+    device_handler_->offset = 0;
+
+    // Reset preloaded tracks
+    if (device_handler_->trackQueue) {
+        device_handler_->trackQueue->preloadedTracks.clear();
+    }
+
+    // Trigger playback
+    device_handler_->sendCommand(cspot::DeviceStateHandler::CommandType::PLAY);
     return ESP_OK;
 }
 

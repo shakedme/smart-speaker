@@ -1,6 +1,6 @@
 #include "../include/voice_command_processor.hpp"
 #include "../include/websocket_voice_client.hpp"
-#include "../include/llm_pipeline.hpp"
+#include "../include/audio_source_manager.hpp"
 #include "../include/voice_config.hpp"
 
 extern "C" {
@@ -8,6 +8,7 @@ extern "C" {
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include <string.h>
+#include "cJSON.h"
 }
 
 namespace btspeaker {
@@ -24,9 +25,7 @@ const size_t VoiceCommandProcessor::MUSIC_COMMANDS_COUNT =
 VoiceCommandProcessor::VoiceCommandProcessor()
     : state_(State::IDLE)
     , state_mutex_(nullptr)
-    , stream_buffer_pos_(0)
     , websocket_client_(nullptr)
-    , response_player_(nullptr)
     , server_available_(false)
 {
     ESP_LOGI(TAG, "VoiceCommandProcessor created");
@@ -36,14 +35,13 @@ VoiceCommandProcessor::~VoiceCommandProcessor() {
     shutdown();
 }
 
-esp_err_t VoiceCommandProcessor::init(WebSocketVoiceClient* websocket_client, LLMPipeline* response_player) {
-    if (!websocket_client || !response_player) {
+esp_err_t VoiceCommandProcessor::init(WebSocketVoiceClient* websocket_client) {
+    if (!websocket_client) {
         ESP_LOGE(TAG, "Invalid parameters");
         return ESP_ERR_INVALID_ARG;
     }
     
     websocket_client_ = websocket_client;
-    response_player_ = response_player;
     
     // Create state mutex
     state_mutex_ = xSemaphoreCreateMutex();
@@ -52,16 +50,9 @@ esp_err_t VoiceCommandProcessor::init(WebSocketVoiceClient* websocket_client, LL
         return ESP_ERR_NO_MEM;
     }
     
-    // Initialize small streaming buffer
-    stream_buffer_ = std::make_unique<uint8_t[]>(STREAM_CHUNK_SIZE);
-    if (!stream_buffer_) {
-        ESP_LOGE(TAG, "Failed to allocate streaming buffer");
-        return ESP_ERR_NO_MEM;
-    }
-    
     // Set up WebSocket callbacks
-    auto audio_callback = [this](const uint8_t* audio_data, size_t length, bool is_final) {
-        handle_websocket_response(audio_data, length, is_final);
+    auto audio_callback = [this](const uint8_t* audio_data, size_t length, bool is_final, const char* intent_json) {
+        handle_websocket_response(audio_data, length, is_final, intent_json);
     };
     websocket_client_->set_audio_response_callback(audio_callback);
     
@@ -70,120 +61,25 @@ esp_err_t VoiceCommandProcessor::init(WebSocketVoiceClient* websocket_client, LL
     };
     websocket_client_->set_state_change_callback(state_callback);
     
-    ESP_LOGI(TAG, "Voice command processor initialized (streaming buffer size: %zu bytes)", STREAM_CHUNK_SIZE);
+    ESP_LOGI(TAG, "Voice command processor initialized");
     return ESP_OK;
 }
 
 void VoiceCommandProcessor::shutdown() {
     ESP_LOGI(TAG, "Shutting down voice command processor");
     
-    // Set state to IDLE before deleting mutex to avoid accessing deleted mutex
     if (state_mutex_) {
-        if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
-            state_.store(State::IDLE);
-            xSemaphoreGive(state_mutex_);
-        }
         vSemaphoreDelete(state_mutex_);
         state_mutex_ = nullptr;
-    } else {
-        // If mutex is already gone, just set state directly
-        state_.store(State::IDLE);
     }
     
-    stream_buffer_.reset();
-    stream_buffer_pos_ = 0;
-}
-
-esp_err_t VoiceCommandProcessor::start_recording() {
-    ESP_LOGI(TAG, "Starting voice command recording");
-    
-    if (state_.load() != State::IDLE) {
-        ESP_LOGW(TAG, "Cannot start recording in current state: %d", static_cast<int>(state_.load()));
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    stream_buffer_pos_ = 0;
-    set_state(State::RECORDING);
-    
-    // Start recording session on server if connected
-    if (server_available_ && websocket_client_->is_connected()) {
-        esp_err_t ret = websocket_client_->start_recording_session();
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to start server recording session, will use offline mode");
-            server_available_ = false;
-        }
-    }
-    
-    ESP_LOGI(TAG, "Voice command recording started (server mode: %s)", 
-             server_available_ ? "online" : "offline");
-    return ESP_OK;
-}
-
-esp_err_t VoiceCommandProcessor::process_audio_data(const uint8_t* data, size_t length) {
-    if (!data || length == 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    if (state_.load() != State::RECORDING) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    // If server is available, stream directly
-    if (server_available_ && websocket_client_->is_connected()) {
-        return send_to_websocket(data, length);
-    }
-    
-    // Otherwise, buffer for offline processing
-    if (stream_buffer_pos_ + length >= STREAM_CHUNK_SIZE) {
-        ESP_LOGW(TAG, "Stream buffer full, finishing recording");
-        return finish_recording();
-    }
-    
-    // Copy audio data to buffer
-    memcpy(stream_buffer_.get() + stream_buffer_pos_, data, length);
-    stream_buffer_pos_ += length;
-    
-    ESP_LOGD(TAG, "Buffered %zu bytes, total: %zu/%zu", length, stream_buffer_pos_, STREAM_CHUNK_SIZE);
-    return ESP_OK;
-}
-
-esp_err_t VoiceCommandProcessor::finish_recording() {
-    ESP_LOGI(TAG, "Finishing voice command recording");
-    
-    if (state_.load() != State::RECORDING) {
-        ESP_LOGW(TAG, "Not currently recording");
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    set_state(State::PROCESSING);
-    
-    // Stop recording session on server if connected
-    if (server_available_ && websocket_client_->is_connected()) {
-        esp_err_t ret = websocket_client_->stop_recording_session();
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to stop server recording session");
-        }
-        // Server will send response via WebSocket callback
-        return ESP_OK;
-    }
-    
-    // Handle offline command processing
-    if (stream_buffer_pos_ > 0) {
-        return handle_offline_command(stream_buffer_.get(), stream_buffer_pos_);
-    } else {
-        ESP_LOGW(TAG, "No audio data recorded");
-        set_state(State::IDLE);
-        return ESP_ERR_INVALID_SIZE;
-    }
+    state_.store(State::IDLE);
 }
 
 esp_err_t VoiceCommandProcessor::cancel_recording() {
-    ESP_LOGI(TAG, "Cancelling voice command recording");
+    ESP_LOGI(TAG, "Cancelling voice command processing");
     
-    stream_buffer_pos_ = 0;
-    
-    // Cancel server operations if connected
-    if (server_available_ && websocket_client_->is_connected()) {
+    if (server_available_ && websocket_client_ && websocket_client_->is_connected()) {
         websocket_client_->cancel_operations();
     }
     
@@ -214,40 +110,102 @@ bool VoiceCommandProcessor::check_music_command(const char* text) {
     return false;
 }
 
-esp_err_t VoiceCommandProcessor::send_to_websocket(const uint8_t* audio_data, size_t length) {
-    if (!websocket_client_ || !websocket_client_->is_connected()) {
-        ESP_LOGE(TAG, "WebSocket client not connected");
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    ESP_LOGD(TAG, "Streaming %zu bytes to WebSocket server", length);
-    
-    esp_err_t ret = websocket_client_->send_audio_chunk(audio_data, length);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send audio chunk: %s", esp_err_to_name(ret));
-        server_available_ = false;
-        return ret;
-    }
-    
-    return ESP_OK;
-}
-
-void VoiceCommandProcessor::handle_websocket_response(const uint8_t* audio_data, size_t length, bool is_final) {
-    if (is_final) {
-        ESP_LOGI(TAG, "WebSocket audio response completed");
-        set_state(State::IDLE);
+void VoiceCommandProcessor::handle_websocket_response(const uint8_t* audio_data, size_t length, bool is_final, const char* message_json) {
+    // Handle binary audio data (voice response streaming)
+    if (audio_data && length > 0) {
+        ESP_LOGI(TAG, "Received TTS audio from backend (%zu bytes)", length);
+        set_state(State::PLAYING_RESPONSE);
+        // Queue audio chunk for streaming playback via AudioSourceManager
+        auto& audio_source_mgr = AudioSourceManager::getInstance();
+        audio_source_mgr.queueVoiceResponseChunk(audio_data, length, false);
         return;
     }
-    
-    if (audio_data && length > 0) {
-        ESP_LOGD(TAG, "Received audio response chunk: %zu bytes", length);
-        
-        set_state(State::PLAYING_RESPONSE);
-        
-        // Queue audio for playback with is_final parameter
-        if (response_player_) {
-            response_player_->queue_audio_chunk(audio_data, length, is_final);
+
+    // Handle text messages (state changes and intents)
+    if (message_json && strlen(message_json) > 0) {
+        cJSON* root = cJSON_Parse(message_json);
+        if (!root) {
+            ESP_LOGE(TAG, "Failed to parse message JSON");
+            return;
         }
+
+        // Check for state change messages
+        cJSON* type_item = cJSON_GetObjectItem(root, "type");
+        if (type_item && cJSON_IsString(type_item)) {
+            std::string msg_type = type_item->valuestring;
+            
+            if (msg_type == "state_change") {
+                cJSON* state_item = cJSON_GetObjectItem(root, "state");
+                if (state_item && cJSON_IsString(state_item)) {
+                    handle_backend_state_change(state_item->valuestring);
+                }
+                cJSON_Delete(root);
+                return;
+            }
+        }
+
+        // Handle intent messages (is_final indicates this is an intent, not a state change)
+        if (is_final) {
+            ESP_LOGI(TAG, "Received intent JSON from backend: %s", message_json);
+            set_state(State::PROCESSING);
+            
+            cJSON* intent_item = cJSON_GetObjectItem(root, "intent");
+            if (intent_item && cJSON_IsString(intent_item)) {
+                std::string intent_type = intent_item->valuestring;
+                cJSON* data_item = cJSON_GetObjectItem(root, "data");
+                std::string data_value = (data_item && cJSON_IsString(data_item)) ? data_item->valuestring : "";
+
+                if (intent_type == "spotify") {
+                    ESP_LOGI(TAG, "Handling Spotify intent with data: %s", data_value.c_str());
+                    if (music_callback_ && !data_value.empty()) {
+                        music_callback_(data_value.c_str());
+                    }
+                    set_state(State::IDLE);
+                } else if (intent_type == "playback_control") {
+                    ESP_LOGI(TAG, "Handling playback control intent: %s", data_value.c_str());
+                    if (music_callback_ && !data_value.empty()) {
+                        music_callback_(data_value.c_str());
+                    }
+                    set_state(State::IDLE);
+                } else if (intent_type == "information") {
+                    ESP_LOGI(TAG, "Information intent acknowledged. TTS audio will stream.");
+                    // State will be managed by backend state changes
+                } else {
+                    ESP_LOGW(TAG, "Unknown intent type: %s", intent_type.c_str());
+                    set_state(State::IDLE);
+                }
+            }
+        }
+        cJSON_Delete(root);
+    }
+}
+
+void VoiceCommandProcessor::handle_backend_state_change(const std::string& backend_state) {
+    ESP_LOGI(TAG, "Backend state changed to: %s", backend_state.c_str());
+    
+    if (backend_state == "LISTENING") {
+        ESP_LOGI(TAG, "Backend is listening for commands");
+        set_state(State::IDLE);
+        // Stop any voice response playback
+        auto& audio_source_mgr = AudioSourceManager::getInstance();
+        audio_source_mgr.stopVoiceResponse();
+    } else if (backend_state == "PROCESSING_INTENT") {
+        ESP_LOGI(TAG, "Backend is processing intent");
+        set_state(State::PROCESSING);
+    } else if (backend_state == "STREAMING_RESPONSE") {
+        ESP_LOGI(TAG, "Backend is streaming voice response");
+        set_state(State::PLAYING_RESPONSE);
+    } else if (backend_state == "WAITING_FOR_USER") {
+        ESP_LOGI(TAG, "Backend is waiting for user response (conversation mode)");
+        // Stop voice response playback but keep session active
+        auto& audio_source_mgr = AudioSourceManager::getInstance();
+        audio_source_mgr.queueVoiceResponseChunk(nullptr, 0, true);
+        set_state(State::IDLE);
+    } else if (backend_state == "HANDLING_COMMAND") {
+        ESP_LOGI(TAG, "Backend is handling command");
+        set_state(State::PROCESSING);
+    } else {
+        ESP_LOGW(TAG, "Unknown backend state: %s", backend_state.c_str());
     }
 }
 
@@ -258,41 +216,39 @@ void VoiceCommandProcessor::handle_connection_state_change(int connection_state)
         case WebSocketVoiceClient::ConnectionState::CONNECTED:
             ESP_LOGI(TAG, "WebSocket server connected - online mode available");
             server_available_ = true;
+            set_state(State::IDLE);
             break;
             
-        case WebSocketVoiceClient::ConnectionState::DISCONNECTED:
-        case WebSocketVoiceClient::ConnectionState::ERROR:
-            ESP_LOGW(TAG, "WebSocket server unavailable - using offline mode");
+        case WebSocketVoiceClient::ConnectionState::CONNECTING:
+            ESP_LOGI(TAG, "WebSocket connecting...");
             server_available_ = false;
             break;
             
-        default:
+        case WebSocketVoiceClient::ConnectionState::DISCONNECTED:
+        {
+            ESP_LOGW(TAG, "WebSocket server disconnected - going idle");
+            server_available_ = false;
+            // Finalize any audio that was playing
+            auto& audio_source_mgr = AudioSourceManager::getInstance();
+            audio_source_mgr.stopVoiceResponse();
+            set_state(State::IDLE);
             break;
-    }
-}
+        }
 
-esp_err_t VoiceCommandProcessor::handle_offline_command(const uint8_t* audio_data, size_t length) {
-    ESP_LOGI(TAG, "Processing command in offline mode (%zu bytes)", length);
-    
-    // In offline mode, we can only handle simple music commands
-    // This is a placeholder - in a real implementation, you might:
-    // 1. Use local speech recognition
-    // 2. Use simple audio pattern matching
-    // 3. Default to music control based on audio characteristics
-    
-    // For now, just assume it's a basic play command
-    ESP_LOGW(TAG, "Offline mode: Assuming basic music command");
-    if (music_callback_) {
-        music_callback_("play");
+        case WebSocketVoiceClient::ConnectionState::ERROR:
+        {
+            ESP_LOGW(TAG, "WebSocket server unavailable - using offline mode");
+            server_available_ = false;
+            auto& audio_source_mgr = AudioSourceManager::getInstance();
+            audio_source_mgr.stopVoiceResponse();
+            set_state(State::IDLE);
+            break;
+        }
     }
-    
-    set_state(State::IDLE);
-    return ESP_OK;
 }
 
 void VoiceCommandProcessor::set_state(State new_state) {
     if (!state_mutex_) {
-        // Mutex not available (probably during shutdown), just set the state directly
         state_.store(new_state);
         return;
     }

@@ -64,6 +64,7 @@ private:
     // Internal helpers
     void handleSpotifyCommand(const cspot::DeviceStateHandler::Command& command);
     bool isWifiConnected();
+    esp_err_t playUriInternal(const std::string& uri);
 };
 
 } // namespace btspeaker 

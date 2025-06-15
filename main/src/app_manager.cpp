@@ -67,6 +67,32 @@ namespace btspeaker {
             ESP_LOGI(TAG, "Audio source changed from %d to %d", (int)from, (int)to);
         });
 
+        // Check and handle Spotify authentication
+        if (wifi_manager_->is_connected()) {
+            ESP_LOGI(TAG, "WiFi connected - checking Spotify authentication status");
+            
+            auto spotify_pipeline = audio_source_mgr.getSpotifyPipeline();
+            if (spotify_pipeline) {
+                if (spotify_pipeline->isAuthenticated()) {
+                    ESP_LOGI(TAG, "Spotify already authenticated for user: %s", 
+                             spotify_pipeline->getStoredUsername().c_str());
+                } else {
+                    ESP_LOGI(TAG, "Spotify not authenticated - starting Zeroconf discovery");
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════════");
+                    ESP_LOGI(TAG, "  SPOTIFY SETUP REQUIRED");
+                    ESP_LOGI(TAG, "  1. Open Spotify app on your phone");
+                    ESP_LOGI(TAG, "  2. Start playing music");
+                    ESP_LOGI(TAG, "  3. Tap the Connect/Devices icon");
+                    ESP_LOGI(TAG, "  4. Select 'ESP32_SPEAKER' from the list");
+                    ESP_LOGI(TAG, "  5. Your credentials will be saved automatically");
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════════");
+                    
+                    // The SpotifyPipeline will handle Zeroconf discovery automatically
+                    // when it starts without stored authentication
+                }
+            }
+        }
+
         // Initialize voice assistant manager (only if WiFi is connected)
         if (wifi_manager_->is_connected()) {
             voice_assistant_ = std::make_unique<VoiceAssistantManager>();

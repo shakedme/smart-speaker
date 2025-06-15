@@ -9,6 +9,8 @@ extern "C" {
 #include <string.h>
 }
 
+#include <utility>
+
 namespace btspeaker {
 
 WebSocketVoiceClient::WebSocketVoiceClient(const Config& config)
@@ -163,11 +165,11 @@ esp_err_t WebSocketVoiceClient::stop_recording_session() {
 }
 
 void WebSocketVoiceClient::set_audio_response_callback(AudioResponseCallback callback) {
-    audio_callback_ = callback;
+    audio_callback_ = std::move(callback);
 }
 
 void WebSocketVoiceClient::set_state_change_callback(StateChangeCallback callback) {
-    state_callback_ = callback;
+    state_callback_ = std::move(callback);
 }
 
 void WebSocketVoiceClient::cancel_operations() {
@@ -180,8 +182,8 @@ void WebSocketVoiceClient::cancel_operations() {
 // Static WebSocket event handler
 void WebSocketVoiceClient::websocket_event_handler(void* handler_args, esp_event_base_t base, 
                                                    int32_t event_id, void* event_data) {
-    WebSocketVoiceClient* client = static_cast<WebSocketVoiceClient*>(handler_args);
-    esp_websocket_event_data_t* data = static_cast<esp_websocket_event_data_t*>(event_data);
+    auto* client = static_cast<WebSocketVoiceClient*>(handler_args);
+    auto* data = static_cast<esp_websocket_event_data_t*>(event_data);
     
     client->handle_websocket_event(static_cast<esp_websocket_event_id_t>(event_id), data);
 }

@@ -77,6 +77,10 @@ public:
     using SourceChangeCallback = std::function<void(AudioSource from, AudioSource to)>;
     void setSourceChangeCallback(SourceChangeCallback callback);
 
+    // ===== PIPELINE ACCESS METHODS =====
+    SpotifyPipeline* getSpotifyPipeline() const { return spotify_pipeline_.get(); }
+    BluetoothPipeline* getBluetoothPipeline() const { return bt_pipeline_.get(); }
+
 private:
     AudioSourceManager() = default;
     ~AudioSourceManager() = default;

@@ -50,14 +50,12 @@ public:
     // Connection management
     esp_err_t connect();
     void disconnect();
-    bool is_connected() const { return state_.load() == ConnectionState::CONNECTED; }
-    ConnectionState get_state() const { return state_.load(); }
+    [[nodiscard]] bool is_connected() const { return state_.load() == ConnectionState::CONNECTED; }
+    [[nodiscard]] ConnectionState get_state() const { return state_.load(); }
     
     // Live audio streaming
-    esp_err_t start_recording_session();  // Now starts a live session
     esp_err_t send_audio_chunk(const uint8_t* audio_data, size_t length);
-    esp_err_t stop_recording_session();   // Now ends a live session
-    
+
     // Callback registration
     void set_audio_response_callback(AudioResponseCallback callback);
     void set_state_change_callback(StateChangeCallback callback);
@@ -79,7 +77,6 @@ private:
     void set_state(ConnectionState new_state);
     
     // Message handling
-    esp_err_t send_control_message(const std::string& message);
     void handle_text_message(const char* data, size_t length);
     void handle_binary_message(const uint8_t* data, size_t length);
     
@@ -100,15 +97,7 @@ private:
     
     // State tracking
     bool initialized_;
-    bool recording_session_active_;  // Now tracks live session state
     int reconnect_attempts_;
-    
-    // Audio format constants
-    static constexpr int INPUT_SAMPLE_RATE = 16000;
-    static constexpr int INPUT_CHANNELS = 1;
-    static constexpr int INPUT_BITS = 16;
-    static constexpr int OUTPUT_SAMPLE_RATE = 24000;
-    static constexpr int OUTPUT_CHANNELS = 2;
 };
 
 } // namespace btspeaker 

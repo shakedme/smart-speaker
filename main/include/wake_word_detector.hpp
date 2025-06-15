@@ -2,9 +2,14 @@
 
 #include <memory>
 #include <functional>
+#include <atomic>
 
 extern "C" {
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "freertos/ringbuf.h"
 }
 
 namespace btspeaker {
@@ -17,8 +22,9 @@ namespace btspeaker {
  * Responsible for:
  * - ESP-SR initialization and configuration
  * - Wake word model loading
- * - Audio processing for wake word detection
+ * - Audio processing for wake word detection via dedicated task
  * - Callback notification when wake word is detected
+ * - Ring buffer management for continuous audio processing
  */
     class WakeWordDetector {
     public:
@@ -42,12 +48,13 @@ namespace btspeaker {
         void shutdown();
 
         /**
-         * @brief Process audio data for wake word detection
-         * @param audio_data Raw audio samples (16-bit PCM)
-         * @param sample_count Number of samples in the buffer
-         * @return true if wake word detected, false otherwise
+         * @brief Feed stereo audio data to wake word detector (thread-safe)
+         * This will convert stereo to mono and feed to ring buffer for processing
+         * @param stereo_data Raw stereo audio data (uint8_t format)
+         * @param data_length Length of data in bytes
+         * @return ESP_OK on success
          */
-        bool is_wake_word_in_audio(const int16_t *audio_data, size_t sample_count);
+        esp_err_t feed_audio_data(const uint8_t* stereo_data, size_t data_length);
 
         /**
          * @brief Set callback for wake word detection
@@ -57,7 +64,7 @@ namespace btspeaker {
         /**
          * @brief Enable/disable wake word detection
          */
-        void set_enabled(bool enabled) { enabled_ = enabled; }
+        void set_enabled(bool enabled);
 
         /**
          * @brief Check if wake word detection is enabled
@@ -65,26 +72,47 @@ namespace btspeaker {
         bool is_enabled() const { return enabled_; }
 
     private:
-        static constexpr const char *TAG = "WAKE_WORD";
-
-        // ESP-SR related setup (currently stubbed)
-        esp_err_t setup_esp_sr();
-
-        void cleanup_esp_sr();
-
-        // Member variables
-        bool enabled_;
-        float threshold_;
-        WakeWordCallback wake_word_callback_;
-
-        // ESP-SR handles (currently nullptr - to be implemented when ESP-SR is ready)
-        void *afe_handle_;
-        void *afe_data_;
-        void *wake_word_models_;
+        static constexpr const char* TAG = "WakeWordDetector";
         
-        // Chunk sizes for proper audio processing
+        // Task configuration
+        static constexpr size_t WAKE_WORD_TASK_STACK_SIZE = 4096;
+        static constexpr UBaseType_t WAKE_WORD_TASK_PRIORITY = 5;
+        static constexpr size_t RING_BUFFER_SIZE = 8192;  // 8KB ring buffer for audio data
+        
+        // ESP-SR state
+        std::atomic<bool> enabled_;
+        float threshold_;
+        
+        // Task management
+        TaskHandle_t processing_task_handle_;
+        RingbufHandle_t audio_ring_buffer_;
+        SemaphoreHandle_t enable_mutex_;
+        std::atomic<bool> task_running_;
+        
+        // ESP-SR AFE components
+        void* afe_handle_;        // esp_afe_sr_iface_t*
+        void* afe_data_;          // esp_afe_sr_data_t*
+        void* wake_word_models_;  // srmodel_list_t*
         int feed_chunksize_;
         int fetch_chunksize_;
+        
+        // Audio processing - removed mono conversion buffer
+        // ESP-SR AFE now processes dual microphone data directly
+        
+        // Callback
+        WakeWordCallback wake_word_callback_;
+        
+        // Internal methods
+        esp_err_t setup_esp_sr();
+        void cleanup_esp_sr();
+        
+        esp_err_t start_processing_task();
+        void stop_processing_task();
+        static void wake_word_task(void* arg);
+        void run_wake_word_processing();
+        
+        // Audio processing methods - updated for dual microphone processing
+        bool process_stereo_audio_chunk(const int16_t* stereo_samples, size_t frame_count);
     };
 
 } // namespace btspeaker 

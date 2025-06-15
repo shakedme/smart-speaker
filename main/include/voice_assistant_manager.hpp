@@ -56,7 +56,7 @@ public:
     /**
      * @brief Initialize voice assistant with main audio pipeline
      */
-    esp_err_t init(BluetoothPipeline* main_pipeline_manager);
+    esp_err_t init();
     
     /**
      * @brief Start voice assistant
@@ -76,17 +76,12 @@ public:
     /**
      * @brief Set callback for music playback commands
      */
-    void set_music_playback_callback(MusicPlaybackCallback callback);
+    void set_music_playback_callback(const MusicPlaybackCallback& callback);
     
     /**
      * @brief Get current state
      */
     State get_state() const { return state_.load(); }
-    
-    /**
-     * @brief Manually trigger voice command recording (for testing or button trigger)
-     */
-    esp_err_t trigger_voice_command();
 
 private:
     static constexpr const char* TAG = "VOICE_ASST";
@@ -109,8 +104,6 @@ private:
     std::unique_ptr<WebSocketVoiceClient> websocket_client_;
     // AudioSourceManager handles voice response playback
     
-    // External references
-    BluetoothPipeline* main_pipeline_manager_;
     MusicPlaybackCallback music_callback_;
 };
 

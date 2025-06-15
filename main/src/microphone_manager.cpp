@@ -111,7 +111,7 @@ void MicrophoneManager::set_audio_callback(AudioDataCallback callback) {
 }
 
 void MicrophoneManager::audio_task(void* arg) {
-    MicrophoneManager* self = static_cast<MicrophoneManager*>(arg);
+    auto* self = static_cast<MicrophoneManager*>(arg);
     self->run_audio_processing();
     vTaskDelete(NULL);
 }
@@ -119,8 +119,8 @@ void MicrophoneManager::audio_task(void* arg) {
 void MicrophoneManager::run_audio_processing() {
     ESP_LOGI(TAG, "Audio processing task started for stereo I2S microphones");
     
-    uint8_t* audio_buffer = new uint8_t[AUDIO_BUFFER_SIZE];
-    uint8_t* mono_buffer = new uint8_t[AUDIO_BUFFER_SIZE / 2]; // For mono conversion if needed
+    auto* audio_buffer = new uint8_t[AUDIO_BUFFER_SIZE];
+    auto* mono_buffer = new uint8_t[AUDIO_BUFFER_SIZE / 2]; // For mono conversion if needed
     
     while (recording_) {
         // Read stereo audio from I2S microphone pipeline

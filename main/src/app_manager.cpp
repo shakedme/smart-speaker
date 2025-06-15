@@ -96,7 +96,7 @@ namespace btspeaker {
         // Initialize voice assistant manager (only if WiFi is connected)
         if (wifi_manager_->is_connected()) {
             voice_assistant_ = std::make_unique<VoiceAssistantManager>();
-            ret = voice_assistant_->init(nullptr);  // AudioSourceManager handles audio internally
+            ret = voice_assistant_->init();  // AudioSourceManager handles audio internally
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to initialize voice assistant: %s", esp_err_to_name(ret));
                 ESP_LOGW(TAG, "Continuing without voice assistant features");

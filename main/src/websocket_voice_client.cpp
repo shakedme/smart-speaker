@@ -20,7 +20,6 @@ WebSocketVoiceClient::WebSocketVoiceClient(const Config& config)
     , state_mutex_(nullptr)
     , reconnect_task_handle_(nullptr)
     , initialized_(false)
-    , recording_session_active_(false)
     , reconnect_attempts_(0)
 {
     ESP_LOGI(TAG, "WebSocketVoiceClient created");
@@ -105,29 +104,12 @@ void WebSocketVoiceClient::disconnect() {
         reconnect_task_handle_ = nullptr;
     }
     
-    recording_session_active_ = false;
     set_state(ConnectionState::DISCONNECTED);
 }
 
-esp_err_t WebSocketVoiceClient::start_recording_session() {
-    if (!is_connected()) {
-        ESP_LOGE(TAG, "Not connected to server, cannot start recording session");
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    if (recording_session_active_) {
-        ESP_LOGW(TAG, "Recording session is already active");
-        return ESP_OK;
-    }
-    
-    ESP_LOGI(TAG, "Starting audio recording session to backend");
-    recording_session_active_ = true;
-    return ESP_OK;
-}
-
 esp_err_t WebSocketVoiceClient::send_audio_chunk(const uint8_t* audio_data, size_t length) {
-    if (!is_connected() || !recording_session_active_) {
-        ESP_LOGE(TAG, "Not connected or recording session not active, cannot send audio");
+    if (!is_connected()) {
+        ESP_LOGE(TAG, "Not connected, cannot send audio");
         return ESP_ERR_INVALID_STATE;
     }
     
@@ -149,21 +131,6 @@ esp_err_t WebSocketVoiceClient::send_audio_chunk(const uint8_t* audio_data, size
     return ESP_OK;
 }
 
-esp_err_t WebSocketVoiceClient::stop_recording_session() {
-    if (!recording_session_active_) {
-        ESP_LOGW(TAG, "Recording session not currently active");
-        return ESP_OK;
-    }
-    
-    ESP_LOGI(TAG, "Stopping audio recording session");
-    recording_session_active_ = false;
-    
-    // The connection is not closed here. The server will close it when it's done.
-    // Or the main manager can call disconnect().
-    
-    return ESP_OK;
-}
-
 void WebSocketVoiceClient::set_audio_response_callback(AudioResponseCallback callback) {
     audio_callback_ = std::move(callback);
 }
@@ -173,8 +140,6 @@ void WebSocketVoiceClient::set_state_change_callback(StateChangeCallback callbac
 }
 
 void WebSocketVoiceClient::cancel_operations() {
-    recording_session_active_ = false;
-    
     // Disconnect will trigger cleanup.
     disconnect();
 }
@@ -195,14 +160,10 @@ void WebSocketVoiceClient::handle_websocket_event(esp_websocket_event_id_t event
             ESP_LOGI(TAG, "WebSocket connected");
             reconnect_attempts_ = 0;
             set_state(ConnectionState::CONNECTED);
-            
-            // Automatically start recording session once connected
-            start_recording_session();
             break;
             
         case WEBSOCKET_EVENT_DISCONNECTED:
             ESP_LOGI(TAG, "WebSocket disconnected");
-            recording_session_active_ = false;
             set_state(ConnectionState::DISCONNECTED);
             
             // Start reconnection task if configured
@@ -278,24 +239,6 @@ void WebSocketVoiceClient::set_state(ConnectionState new_state) {
     }
 }
 
-esp_err_t WebSocketVoiceClient::send_control_message(const std::string& message) {
-    if (!websocket_client_) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    esp_err_t ret = esp_websocket_client_send_text(websocket_client_, 
-                                                   message.c_str(), 
-                                                   message.length(), 
-                                                   portMAX_DELAY);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send control message: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    
-    ESP_LOGD(TAG, "Sent control message: %s", message.c_str());
-    return ESP_OK;
-}
-
 void WebSocketVoiceClient::handle_text_message(const char* data, size_t length) {
     std::string message(data, length);
     ESP_LOGD(TAG, "Received backend message: %s", message.c_str());
@@ -355,7 +298,7 @@ void WebSocketVoiceClient::handle_binary_message(const uint8_t* data, size_t len
 
 // Static reconnection task
 void WebSocketVoiceClient::reconnect_task(void* pvParameters) {
-    WebSocketVoiceClient* client = static_cast<WebSocketVoiceClient*>(pvParameters);
+    auto* client = static_cast<WebSocketVoiceClient*>(pvParameters);
     
     vTaskDelay(pdMS_TO_TICKS(client->config_.reconnect_timeout_ms));
     

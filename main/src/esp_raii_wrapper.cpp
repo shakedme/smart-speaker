@@ -8,7 +8,7 @@ namespace btspeaker {
 
 static constexpr const char* TAG = "ESP_HANDLE";
 
-void audio_pipeline_deleter(audio_pipeline_handle_t handle) {
+void audioPipelineDeleter(audio_pipeline_handle_t handle) {
     if (handle) {
         ESP_LOGD(TAG, "Deleting audio pipeline");
         // Stop pipeline before terminating to avoid NULL pointer issues
@@ -19,7 +19,7 @@ void audio_pipeline_deleter(audio_pipeline_handle_t handle) {
     }
 }
 
-void audio_element_deleter(audio_element_handle_t handle) {
+void audioElementDeleter(audio_element_handle_t handle) {
     if (handle) {
         ESP_LOGD(TAG, "Deleting audio element");
         // Stop element if it's running
@@ -31,7 +31,7 @@ void audio_element_deleter(audio_element_handle_t handle) {
     }
 }
 
-void audio_event_iface_deleter(audio_event_iface_handle_t handle) {
+void audioEventIfaceDeleter(audio_event_iface_handle_t handle) {
     if (handle) {
         ESP_LOGD(TAG, "Deleting audio event interface");
         audio_event_iface_destroy(handle);

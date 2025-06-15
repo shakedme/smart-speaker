@@ -76,7 +76,7 @@ namespace btspeaker {
             return ret;
         }
 
-        microphone_manager_->set_audio_callback(
+        microphone_manager_->setAudioCallback(
                 [this](const uint8_t *data, size_t length) {
                     on_audio_data(data, length);
                 }
@@ -100,7 +100,7 @@ namespace btspeaker {
         }
 
         // Start microphone recording
-        esp_err_t ret = microphone_manager_->start_recording();
+        esp_err_t ret = microphone_manager_->startRecording();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start microphone recording: %s", esp_err_to_name(ret));
             return ret;
@@ -116,7 +116,7 @@ namespace btspeaker {
 
         // Stop microphone recording
         if (microphone_manager_) {
-            microphone_manager_->stop_recording();
+            microphone_manager_->stopRecording();
         }
 
         // Cancel any ongoing command processing
@@ -286,5 +286,6 @@ namespace btspeaker {
             }
         }
     }
+
 
 } // namespace btspeaker 

@@ -12,7 +12,7 @@ namespace btspeaker {
 
 MicrophoneManager::MicrophoneManager()
     : recording_(false)
-    , audio_task_handle_(nullptr)
+    , audioTaskHandle_(nullptr)
 {
     ESP_LOGI(TAG, "MicrophoneManager created for SPH0645LM4H I2S MEMS microphones");
 }
@@ -24,7 +24,7 @@ MicrophoneManager::~MicrophoneManager() {
 esp_err_t MicrophoneManager::init() {
     ESP_LOGI(TAG, "Initializing microphone manager");
     
-    esp_err_t ret = setup_microphone_pipeline();
+    esp_err_t ret = setupMicrophonePipeline();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to setup microphone pipeline: %s", esp_err_to_name(ret));
         return ret;
@@ -34,25 +34,25 @@ esp_err_t MicrophoneManager::init() {
     return ESP_OK;
 }
 
-esp_err_t MicrophoneManager::start_recording() {
+esp_err_t MicrophoneManager::startRecording() {
     if (recording_) {
         ESP_LOGW(TAG, "Already recording");
         return ESP_OK;
     }
     
-    if (!mic_pipeline_) {
+    if (!micPipeline_) {
         ESP_LOGE(TAG, "Microphone pipeline not initialized");
         return ESP_ERR_INVALID_STATE;
     }
     
     // Create audio processing task
     BaseType_t task_created = xTaskCreate(
-        audio_task,
-        "mic_audio",
-        3072, // Reduced stack size from 4096 to save memory (~1KB saved)
-        this,
-        5,    // Priority
-        &audio_task_handle_
+            audioTask,
+            "mic_audio",
+            3072, // Reduced stack size from 4096 to save memory (~1KB saved)
+            this,
+            5,    // Priority
+            &audioTaskHandle_
     );
     
     if (task_created != pdPASS) {
@@ -61,11 +61,11 @@ esp_err_t MicrophoneManager::start_recording() {
     }
     
     // Start pipeline
-    esp_err_t ret = audio_pipeline_run(mic_pipeline_.get());
+    esp_err_t ret = audio_pipeline_run(micPipeline_.get());
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start microphone pipeline: %s", esp_err_to_name(ret));
-        vTaskDelete(audio_task_handle_);
-        audio_task_handle_ = nullptr;
+        vTaskDelete(audioTaskHandle_);
+        audioTaskHandle_ = nullptr;
         return ret;
     }
     
@@ -74,7 +74,7 @@ esp_err_t MicrophoneManager::start_recording() {
     return ESP_OK;
 }
 
-esp_err_t MicrophoneManager::stop_recording() {
+esp_err_t MicrophoneManager::stopRecording() {
     if (!recording_) {
         return ESP_OK;
     }
@@ -82,17 +82,17 @@ esp_err_t MicrophoneManager::stop_recording() {
     recording_ = false;
     
     // Stop pipeline
-    if (mic_pipeline_) {
-        esp_err_t ret = audio_pipeline_stop(mic_pipeline_.get());
+    if (micPipeline_) {
+        esp_err_t ret = audio_pipeline_stop(micPipeline_.get());
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "Failed to stop microphone pipeline: %s", esp_err_to_name(ret));
         }
     }
     
     // Stop task
-    if (audio_task_handle_) {
-        vTaskDelete(audio_task_handle_);
-        audio_task_handle_ = nullptr;
+    if (audioTaskHandle_) {
+        vTaskDelete(audioTaskHandle_);
+        audioTaskHandle_ = nullptr;
     }
     
     ESP_LOGI(TAG, "Microphone recording stopped");
@@ -101,22 +101,22 @@ esp_err_t MicrophoneManager::stop_recording() {
 
 void MicrophoneManager::shutdown() {
     ESP_LOGI(TAG, "Shutting down microphone manager");
-    
-    stop_recording();
-    cleanup_pipeline();
+
+    stopRecording();
+    cleanupPipeline();
 }
 
-void MicrophoneManager::set_audio_callback(AudioDataCallback callback) {
-    audio_callback_ = callback;
+void MicrophoneManager::setAudioCallback(AudioDataCallback callback) {
+    audioCallback_ = callback;
 }
 
-void MicrophoneManager::audio_task(void* arg) {
+void MicrophoneManager::audioTask(void* arg) {
     auto* self = static_cast<MicrophoneManager*>(arg);
-    self->run_audio_processing();
+    self->runAudioProcessing();
     vTaskDelete(NULL);
 }
 
-void MicrophoneManager::run_audio_processing() {
+void MicrophoneManager::runAudioProcessing() {
     ESP_LOGI(TAG, "Audio processing task started for stereo I2S microphones");
     
     auto* audio_buffer = new uint8_t[AUDIO_BUFFER_SIZE];
@@ -124,17 +124,17 @@ void MicrophoneManager::run_audio_processing() {
     
     while (recording_) {
         // Read stereo audio from I2S microphone pipeline
-        if (raw_mic_stream_) {
-            int bytes_read = raw_stream_read(raw_mic_stream_.get(), 
-                                           (char*)audio_buffer, 
-                                           AUDIO_BUFFER_SIZE);
+        if (rawMicStream_) {
+            int bytes_read = raw_stream_read(rawMicStream_.get(),
+                                             (char*)audio_buffer,
+                                             AUDIO_BUFFER_SIZE);
             
-            if (bytes_read > 0 && audio_callback_) {
+            if (bytes_read > 0 && audioCallback_) {
                 // Process stereo I2S data
                 // SPH0645LM4H provides 16-bit samples in I2S format
                 
                 // Option 1: Pass stereo data directly to callback
-                audio_callback_(audio_buffer, bytes_read);
+                audioCallback_(audio_buffer, bytes_read);
                 
                 // Option 2: Convert to mono by averaging channels (commented out)
                 // This can be useful for voice recognition that expects mono input
@@ -162,7 +162,7 @@ void MicrophoneManager::run_audio_processing() {
     ESP_LOGI(TAG, "Audio processing task ended");
 }
 
-esp_err_t MicrophoneManager::setup_microphone_pipeline() {
+esp_err_t MicrophoneManager::setupMicrophonePipeline() {
     ESP_LOGI(TAG, "Setting up I2S microphone pipeline for SPH0645LM4H MEMS microphones");
     
     // Create event interface
@@ -172,7 +172,7 @@ esp_err_t MicrophoneManager::setup_microphone_pipeline() {
         ESP_LOGE(TAG, "Failed to create microphone event interface");
         return ESP_FAIL;
     }
-    mic_evt_.reset(evt_handle, audio_event_iface_deleter);
+    micEvent_.reset(evt_handle, audioEventIfaceDeleter);
     
     // Create I2S microphone stream for SPH0645LM4H MEMS microphones
     // Using I2S1 to avoid conflict with I2S0 used for audio output
@@ -230,7 +230,7 @@ esp_err_t MicrophoneManager::setup_microphone_pipeline() {
         ESP_LOGE(TAG, "Failed to create I2S microphone stream");
         return ESP_FAIL;
     }
-    i2s_mic_stream_.reset(i2s_handle, audio_element_deleter);
+    i2SMicStream_.reset(i2s_handle, audioElementDeleter);
     
     // Create raw stream for audio processing
     raw_stream_cfg_t raw_cfg = {
@@ -243,7 +243,7 @@ esp_err_t MicrophoneManager::setup_microphone_pipeline() {
         ESP_LOGE(TAG, "Failed to create raw microphone stream");
         return ESP_FAIL;
     }
-    raw_mic_stream_.reset(raw_handle, audio_element_deleter);
+    rawMicStream_.reset(raw_handle, audioElementDeleter);
     
     // Create microphone pipeline
     audio_pipeline_cfg_t pipeline_cfg = { .rb_size = 4 * 1024 };  // Ring buffer for pipeline
@@ -252,16 +252,16 @@ esp_err_t MicrophoneManager::setup_microphone_pipeline() {
         ESP_LOGE(TAG, "Failed to create microphone pipeline");
         return ESP_FAIL;
     }
-    mic_pipeline_.reset(pipeline_handle, audio_pipeline_deleter);
+    micPipeline_.reset(pipeline_handle, audioPipelineDeleter);
     
     // Register elements
-    esp_err_t ret = audio_pipeline_register(mic_pipeline_.get(), i2s_mic_stream_.get(), "mic_i2s");
+    esp_err_t ret = audio_pipeline_register(micPipeline_.get(), i2SMicStream_.get(), "mic_i2s");
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register I2S mic stream: %s", esp_err_to_name(ret));
         return ret;
     }
     
-    ret = audio_pipeline_register(mic_pipeline_.get(), raw_mic_stream_.get(), "mic_raw");
+    ret = audio_pipeline_register(micPipeline_.get(), rawMicStream_.get(), "mic_raw");
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register raw mic stream: %s", esp_err_to_name(ret));
         return ret;
@@ -269,14 +269,14 @@ esp_err_t MicrophoneManager::setup_microphone_pipeline() {
     
     // Link elements
     const char* link_tag[] = {"mic_i2s", "mic_raw"};
-    ret = audio_pipeline_link(mic_pipeline_.get(), link_tag, 2);
+    ret = audio_pipeline_link(micPipeline_.get(), link_tag, 2);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to link microphone elements: %s", esp_err_to_name(ret));
         return ret;
     }
     
     // Set event listener
-    ret = audio_pipeline_set_listener(mic_pipeline_.get(), mic_evt_.get());
+    ret = audio_pipeline_set_listener(micPipeline_.get(), micEvent_.get());
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to set microphone listener: %s", esp_err_to_name(ret));
         return ret;
@@ -286,13 +286,13 @@ esp_err_t MicrophoneManager::setup_microphone_pipeline() {
     return ESP_OK;
 }
 
-esp_err_t MicrophoneManager::cleanup_pipeline() {
+esp_err_t MicrophoneManager::cleanupPipeline() {
     ESP_LOGI(TAG, "Cleaning up microphone pipeline");
     
-    raw_mic_stream_.reset();
-    i2s_mic_stream_.reset();
-    mic_pipeline_.reset();
-    mic_evt_.reset();
+    rawMicStream_.reset();
+    i2SMicStream_.reset();
+    micPipeline_.reset();
+    micEvent_.reset();
     
     return ESP_OK;
 }

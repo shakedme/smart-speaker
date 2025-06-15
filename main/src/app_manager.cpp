@@ -29,13 +29,13 @@ namespace btspeaker {
     esp_err_t AppManager::init() {
         ESP_LOGI(TAG, "Initializing application");
 
-        if (state_.load() != State::UNINITIALIZED) {
+        if (get_state() != State::UNINITIALIZED) {
             ESP_LOGW(TAG, "Already initialized");
             return ESP_OK;
         }
 
         // Initialize NVS first
-        esp_err_t ret = init_nvs();
+        esp_err_t ret = initNVS();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize NVS: %s", esp_err_to_name(ret));
             state_ = State::ERROR;
@@ -44,68 +44,37 @@ namespace btspeaker {
             ESP_LOGI(TAG, "NVS initialized successfully");
         }
 
-        // Initialize WiFi first (needed for Gemini API)
-        wifi_manager_ = std::make_unique<WiFiManager>();
-        ret = wifi_manager_->init();
+        // Initialize WiFi first
+        wifiManager = std::make_unique<WiFiManager>();
+        ret = wifiManager->init();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize WiFi: %s", esp_err_to_name(ret));
             ESP_LOGW(TAG, "Voice assistant features will be limited without internet");
             // Continue initialization - Bluetooth audio can still work
         }
 
-        // Initialize AudioSourceManager (replaces direct pipeline management)
-        auto& audio_source_mgr = AudioSourceManager::getInstance();
-        ret = audio_source_mgr.initialize();
+        // Initialize AudioSourceManager
+        auto& audioSourceManager = AudioSourceManager::getInstance();
+        ret = audioSourceManager.initialize();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize AudioSourceManager: %s", esp_err_to_name(ret));
             state_ = State::ERROR;
             return ret;
         }
 
-        // Set up source change callback for debugging/logging
-        audio_source_mgr.setSourceChangeCallback([](AudioSource from, AudioSource to) {
-            ESP_LOGI(TAG, "Audio source changed from %d to %d", (int)from, (int)to);
-        });
-
-        // Check and handle Spotify authentication
-        if (wifi_manager_->is_connected()) {
-            ESP_LOGI(TAG, "WiFi connected - checking Spotify authentication status");
-            
-            auto spotify_pipeline = audio_source_mgr.getSpotifyPipeline();
-            if (spotify_pipeline) {
-                if (spotify_pipeline->isAuthenticated()) {
-                    ESP_LOGI(TAG, "Spotify already authenticated for user: %s", 
-                             spotify_pipeline->getStoredUsername().c_str());
-                } else {
-                    ESP_LOGI(TAG, "Spotify not authenticated - starting Zeroconf discovery");
-                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════════");
-                    ESP_LOGI(TAG, "  SPOTIFY SETUP REQUIRED");
-                    ESP_LOGI(TAG, "  1. Open Spotify app on your phone");
-                    ESP_LOGI(TAG, "  2. Start playing music");
-                    ESP_LOGI(TAG, "  3. Tap the Connect/Devices icon");
-                    ESP_LOGI(TAG, "  4. Select 'ESP32_SPEAKER' from the list");
-                    ESP_LOGI(TAG, "  5. Your credentials will be saved automatically");
-                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════════");
-                    
-                    // The SpotifyPipeline will handle Zeroconf discovery automatically
-                    // when it starts without stored authentication
-                }
-            }
-        }
-
-        // Initialize voice assistant manager (only if WiFi is connected)
-        if (wifi_manager_->is_connected()) {
-            voice_assistant_ = std::make_unique<VoiceAssistantManager>();
-            ret = voice_assistant_->init();  // AudioSourceManager handles audio internally
+        // Initialize voice assistant manager
+        if (wifiManager->is_connected()) {
+            voiceAssistant = std::make_unique<VoiceAssistantManager>();
+            ret = voiceAssistant->init();  // AudioSourceManager handles audio internally
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to initialize voice assistant: %s", esp_err_to_name(ret));
                 ESP_LOGW(TAG, "Continuing without voice assistant features");
-                voice_assistant_.reset();
+                voiceAssistant.reset();
             } else {
                 // Set music playback callback for voice commands
-                voice_assistant_->set_music_playback_callback(
+                voiceAssistant->set_music_playback_callback(
                         [this](const char *command) {
-                            this->music_playback_cmd_callback(command);
+                            this->musicPlaybackCmdCallback(command);
                         }
                 );
                 ESP_LOGI(TAG, "Voice assistant initialized successfully");
@@ -120,7 +89,7 @@ namespace btspeaker {
     }
 
     esp_err_t AppManager::run() {
-        if (state_.load() != State::INITIALIZED) {
+        if (get_state() != State::INITIALIZED) {
             ESP_LOGE(TAG, "Application not initialized");
             return ESP_ERR_INVALID_STATE;
         }
@@ -129,8 +98,8 @@ namespace btspeaker {
         state_ = State::RUNNING;
 
         // Start AudioSourceManager
-        auto& audio_source_mgr = AudioSourceManager::getInstance();
-        esp_err_t ret = audio_source_mgr.start();
+        auto& audioSourceManager = AudioSourceManager::getInstance();
+        esp_err_t ret = audioSourceManager.start();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start AudioSourceManager: %s", esp_err_to_name(ret));
             state_ = State::ERROR;
@@ -138,12 +107,12 @@ namespace btspeaker {
         }
 
         // Start voice assistant if available
-        if (voice_assistant_) {
-            ret = voice_assistant_->start();
+        if (voiceAssistant) {
+            ret = voiceAssistant->start();
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to start voice assistant: %s", esp_err_to_name(ret));
                 ESP_LOGW(TAG, "Continuing without voice assistant");
-                voice_assistant_.reset();
+                voiceAssistant.reset();
             } else {
                 ESP_LOGI(TAG, "Voice assistant started successfully");
             }
@@ -151,9 +120,7 @@ namespace btspeaker {
 
         ESP_LOGI(TAG, "Application running. Starting event loop...");
 
-        // Run the main event loop (keep using the Bluetooth pipeline for now)
-        // TODO: Consider moving event loop management to AudioSourceManager
-        while (state_.load() == State::RUNNING) {
+        while (get_state() == State::RUNNING) {
             vTaskDelay(pdMS_TO_TICKS(1000));  // Simple event loop for now
         }
 
@@ -166,10 +133,10 @@ namespace btspeaker {
         ESP_LOGI(TAG, "Shutting down Bluetooth Audio Application");
 
         // Stop voice assistant first
-        if (voice_assistant_) {
-            voice_assistant_->stop();
-            voice_assistant_->shutdown();
-            voice_assistant_.reset();
+        if (voiceAssistant) {
+            voiceAssistant->stop();
+            voiceAssistant->shutdown();
+            voiceAssistant.reset();
         }
 
         // Clean up AudioSourceManager
@@ -177,9 +144,9 @@ namespace btspeaker {
         audio_source_mgr.stop();
 
         // Clean up WiFi
-        if (wifi_manager_) {
-            wifi_manager_->shutdown();
-            wifi_manager_.reset();
+        if (wifiManager) {
+            wifiManager->shutdown();
+            wifiManager.reset();
         }
 
         state_ = State::UNINITIALIZED;
@@ -187,7 +154,7 @@ namespace btspeaker {
     }
 
 
-    esp_err_t AppManager::init_nvs() {
+    esp_err_t AppManager::initNVS() {
         ESP_LOGD(TAG, "Initializing NVS");
         esp_err_t ret = nvs_flash_init();
         if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -203,7 +170,7 @@ namespace btspeaker {
         return ret;
     }
 
-    void AppManager::music_playback_cmd_callback(const char *command) {
+    void AppManager::musicPlaybackCmdCallback(const char *command) {
         if (!command) {
             ESP_LOGW(TAG, "Invalid music command");
             return;
@@ -211,57 +178,8 @@ namespace btspeaker {
 
         ESP_LOGI(TAG, "Processing voice music command: %s", command);
 
-        auto& audio_source_mgr = AudioSourceManager::getInstance();
-        esp_err_t ret = ESP_OK;
-
-        // Check for Spotify URI (spotify:track:xxx, spotify:playlist:xxx, etc.)
-        if (strncmp(command, "spotify:", 8) == 0) {
-            ESP_LOGI(TAG, "Voice command: Play Spotify URI: %s", command);
-            ret = audio_source_mgr.spotifyPlay(std::string(command));
-        }
-        // Check for basic playback control commands
-        else if (strstr(command, "play") || strstr(command, "resume")) {
-            ret = audio_source_mgr.play();
-            ESP_LOGI(TAG, "Voice command: Resume playback");
-        } else if (strstr(command, "pause")) {
-            ret = audio_source_mgr.pause();
-            ESP_LOGI(TAG, "Voice command: Pause playback");
-        } else if (strstr(command, "stop")) {
-            ret = audio_source_mgr.stopPlayback();
-            ESP_LOGI(TAG, "Voice command: Stop playback");
-        } else if (strstr(command, "next") || strstr(command, "skip")) {
-            ret = audio_source_mgr.skipNext();
-            ESP_LOGI(TAG, "Voice command: Skip next");
-        } else if (strstr(command, "previous") || strstr(command, "back")) {
-            ret = audio_source_mgr.skipPrevious();
-            ESP_LOGI(TAG, "Voice command: Skip previous");
-        } else if (strstr(command, "volume up")) {
-            auto current_volume = audio_source_mgr.getVolume();
-            auto new_volume = std::min(100, static_cast<int>(current_volume) + 10);
-            audio_source_mgr.setVolume(new_volume);
-            ESP_LOGI(TAG, "Voice command: Volume up to %d", new_volume);
-        } else if (strstr(command, "volume down")) {
-            auto current_volume = audio_source_mgr.getVolume();
-            auto new_volume = std::max(0, static_cast<int>(current_volume) - 10);
-            audio_source_mgr.setVolume(new_volume);
-            ESP_LOGI(TAG, "Voice command: Volume down to %d", new_volume);
-        } else if (strstr(command, "bluetooth")) {
-            ret = audio_source_mgr.switchToSource(AudioSource::BLUETOOTH);
-            ESP_LOGI(TAG, "Voice command: Switch to Bluetooth");
-        } else if (strstr(command, "spotify") && strncmp(command, "spotify:", 8) != 0) {
-            ret = audio_source_mgr.switchToSource(AudioSource::SPOTIFY);
-            ESP_LOGI(TAG, "Voice command: Switch to Spotify");
-        } else {
-            ESP_LOGW(TAG, "Unknown music command: %s", command);
-            return;
-        }
-
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to execute music command: %s", esp_err_to_name(ret));
-        }
+        AudioSourceManager::getInstance().onMusicCommand(command);
     }
-
-
 
     AppManager::State AppManager::get_state() const {
         return state_.load();

@@ -43,8 +43,7 @@ public:
     // Core lifecycle
     esp_err_t initialize();
     esp_err_t shutdown();
-    bool isInitialized() const { return is_initialized_; }
-    
+
     // Audio stream creation for pipelines
     audio_element_handle_t createI2SWriter(AudioSource source, 
                                           int sample_rate = 44100,
@@ -53,17 +52,6 @@ public:
     
     // Source management
     esp_err_t setActiveSource(AudioSource source);
-    AudioSource getActiveSource() const { return active_source_; }
-    
-    // I2S configuration management
-    esp_err_t updateI2SFormat(int sample_rate, int bits_per_sample, int channels);
-    
-    // Volume control (applied to hardware)
-    void setMasterVolume(uint8_t volume);
-    uint8_t getMasterVolume() const { return master_volume_; }
-    
-    // Hardware status
-    bool isI2SActive() const;
 
 private:
     I2SAudioService() = default;
@@ -74,23 +62,23 @@ private:
     I2SAudioService& operator=(const I2SAudioService&) = delete;
     
     // Internal I2S management
-    esp_err_t initializeI2SDriver();
+
     esp_err_t deinitializeI2SDriver();
-    i2s_stream_cfg_t createI2SConfig(AudioSource source, int sample_rate, int channels, int bits_per_sample);
+    i2s_stream_cfg_t createI2SConfig(AudioSource source, int sampleRate, int channels, int bitsPerSample);
     
     // Thread safety
     mutable std::mutex mutex_;
     
     // State management
-    bool is_initialized_;
-    AudioSource active_source_;
-    uint8_t master_volume_;
+    bool isInitialized_;
+    AudioSource activeSource_;
+    uint8_t masterVolume_;
     
     // I2S driver state
-    bool i2s_driver_installed_;
-    int current_sample_rate_;
-    int current_channels_;
-    int current_bits_per_sample_;
+    bool i2SDriverInstalled_;
+    int currentSampleRate_;
+    int currentChannels_;
+    int currentBitsPerSample_;
     
     // Constants
     static constexpr const char* TAG = "I2S_AUDIO_SERVICE";

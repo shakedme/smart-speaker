@@ -44,12 +44,12 @@ public:
     /**
      * @brief Start microphone recording
      */
-    esp_err_t start_recording();
+    esp_err_t startRecording();
     
     /**
      * @brief Stop microphone recording
      */
-    esp_err_t stop_recording();
+    esp_err_t stopRecording();
     
     /**
      * @brief Shutdown microphone manager
@@ -60,37 +60,31 @@ public:
      * @brief Set callback for audio data
      * @note Audio data will be stereo (2 channels) from two SPH0645LM4H microphones
      */
-    void set_audio_callback(AudioDataCallback callback);
-    
-    /**
-     * @brief Check if microphone is currently recording
-     */
-    bool is_recording() const { return recording_; }
+    void setAudioCallback(AudioDataCallback callback);
 
 private:
     static constexpr const char* TAG = "MIC_MGR";
     static constexpr int SAMPLE_RATE = 16000;
     static constexpr int AUDIO_BUFFER_SIZE = 1024;  // Increased for stereo data
-    static constexpr int CHANNELS = 2;              // Stereo input from two microphones
-    
+
     // Audio processing task
-    static void audio_task(void* arg);
-    void run_audio_processing();
+    static void audioTask(void* arg);
+    void runAudioProcessing();
     
     // Pipeline setup
-    esp_err_t setup_microphone_pipeline();
-    esp_err_t cleanup_pipeline();
+    esp_err_t setupMicrophonePipeline();
+    esp_err_t cleanupPipeline();
     
     // Member variables
     bool recording_;
-    TaskHandle_t audio_task_handle_;
-    AudioDataCallback audio_callback_;
+    TaskHandle_t audioTaskHandle_;
+    AudioDataCallback audioCallback_;
     
     // Pipeline components
-    PipelineHandle mic_pipeline_;
-    ElementHandle i2s_mic_stream_;
-    ElementHandle raw_mic_stream_;
-    EventIfaceHandle mic_evt_;
+    PipelineHandle micPipeline_;
+    ElementHandle i2SMicStream_;
+    ElementHandle rawMicStream_;
+    EventIfaceHandle micEvent_;
 };
 
 } // namespace btspeaker 

@@ -16,21 +16,21 @@ I2SAudioService& I2SAudioService::getInstance() {
 esp_err_t I2SAudioService::initialize() {
     std::lock_guard<std::mutex> lock(mutex_);
     
-    if (is_initialized_) {
+    if (isInitialized_) {
         return ESP_OK;
     }
     
     ESP_LOGI(TAG, "Initializing I2S Audio Service");
     
     // Initialize state
-    active_source_ = AudioSource::NONE;
-    master_volume_ = DEFAULT_VOLUME;
-    i2s_driver_installed_ = false;
-    current_sample_rate_ = DEFAULT_SAMPLE_RATE;
-    current_channels_ = DEFAULT_CHANNELS;
-    current_bits_per_sample_ = DEFAULT_BITS;
-    
-    is_initialized_ = true;
+    activeSource_ = AudioSource::NONE;
+    masterVolume_ = DEFAULT_VOLUME;
+    i2SDriverInstalled_ = false;
+    currentSampleRate_ = DEFAULT_SAMPLE_RATE;
+    currentChannels_ = DEFAULT_CHANNELS;
+    currentBitsPerSample_ = DEFAULT_BITS;
+
+    isInitialized_ = true;
     ESP_LOGI(TAG, "I2S Audio Service initialized (driver will be installed on first use)");
     return ESP_OK;
 }
@@ -38,19 +38,19 @@ esp_err_t I2SAudioService::initialize() {
 esp_err_t I2SAudioService::shutdown() {
     std::lock_guard<std::mutex> lock(mutex_);
     
-    if (!is_initialized_) {
+    if (!isInitialized_) {
         return ESP_OK;
     }
     
     ESP_LOGI(TAG, "Shutting down I2S Audio Service");
     
     // Deinitialize I2S driver if it was installed
-    if (i2s_driver_installed_) {
+    if (i2SDriverInstalled_) {
         deinitializeI2SDriver();
     }
-    
-    active_source_ = AudioSource::NONE;
-    is_initialized_ = false;
+
+    activeSource_ = AudioSource::NONE;
+    isInitialized_ = false;
     
     ESP_LOGI(TAG, "I2S Audio Service shut down");
     return ESP_OK;
@@ -62,7 +62,7 @@ audio_element_handle_t I2SAudioService::createI2SWriter(AudioSource source,
                                                        int bits_per_sample) {
     std::lock_guard<std::mutex> lock(mutex_);
     
-    if (!is_initialized_) {
+    if (!isInitialized_) {
         ESP_LOGE(TAG, "Service not initialized");
         return nullptr;
     }
@@ -71,133 +71,82 @@ audio_element_handle_t I2SAudioService::createI2SWriter(AudioSource source,
              static_cast<int>(source), sample_rate, channels, bits_per_sample);
     
     // Create I2S stream configuration
-    i2s_stream_cfg_t i2s_cfg = createI2SConfig(source, sample_rate, channels, bits_per_sample);
+    i2s_stream_cfg_t i2SConfig = createI2SConfig(source, sample_rate, channels, bits_per_sample);
     
     // Create the I2S stream element
-    audio_element_handle_t i2s_handle = i2s_stream_init(&i2s_cfg);
-    if (!i2s_handle) {
+    audio_element_handle_t i2SHandle = i2s_stream_init(&i2SConfig);
+    if (!i2SHandle) {
         ESP_LOGE(TAG, "Failed to create I2S stream for source %d", static_cast<int>(source));
         return nullptr;
     }
     
     ESP_LOGI(TAG, "Created I2S writer for source %d", static_cast<int>(source));
-    return i2s_handle;
+    return i2SHandle;
 }
 
 esp_err_t I2SAudioService::setActiveSource(AudioSource source) {
     std::lock_guard<std::mutex> lock(mutex_);
     
-    if (!is_initialized_) {
+    if (!isInitialized_) {
         return ESP_ERR_INVALID_STATE;
     }
     
-    if (active_source_ == source) {
+    if (activeSource_ == source) {
         return ESP_OK;
     }
     
-    ESP_LOGI(TAG, "Switching active source from %d to %d", 
-             static_cast<int>(active_source_), static_cast<int>(source));
-    
-    active_source_ = source;
-    return ESP_OK;
-}
+    ESP_LOGI(TAG, "Switching active source from %d to %d",
+             static_cast<int>(activeSource_), static_cast<int>(source));
 
-esp_err_t I2SAudioService::updateI2SFormat(int sample_rate, int bits_per_sample, int channels) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    
-    if (!is_initialized_) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    // Check if format actually changed
-    if (current_sample_rate_ == sample_rate && 
-        current_bits_per_sample_ == bits_per_sample && 
-        current_channels_ == channels) {
-        return ESP_OK;
-    }
-    
-    ESP_LOGI(TAG, "Updating I2S format: %dHz, %dbit, %dch", sample_rate, bits_per_sample, channels);
-    
-    // Update current format
-    current_sample_rate_ = sample_rate;
-    current_bits_per_sample_ = bits_per_sample;
-    current_channels_ = channels;
-    
-    // Note: Individual pipelines will handle their own I2S stream updates
-    // This service tracks the current format for new stream creation
-    
-    return ESP_OK;
-}
-
-void I2SAudioService::setMasterVolume(uint8_t volume) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    master_volume_ = volume;
-    ESP_LOGI(TAG, "Master volume set to %d", volume);
-}
-
-bool I2SAudioService::isI2SActive() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return is_initialized_ && active_source_ != AudioSource::NONE;
-}
-
-esp_err_t I2SAudioService::initializeI2SDriver() {
-    // This is called from within a locked context
-    if (i2s_driver_installed_) {
-        return ESP_OK;
-    }
-    
-    ESP_LOGI(TAG, "Installing I2S driver");
-    // Note: I2S driver installation is handled by individual i2s_stream_init calls
-    // This service coordinates but doesn't directly manage the low-level driver
-    i2s_driver_installed_ = true;
+    activeSource_ = source;
     return ESP_OK;
 }
 
 esp_err_t I2SAudioService::deinitializeI2SDriver() {
     // This is called from within a locked context
-    if (!i2s_driver_installed_) {
+    if (!i2SDriverInstalled_) {
         return ESP_OK;
     }
     
     ESP_LOGI(TAG, "Deinitializing I2S driver");
     // Note: I2S driver cleanup is handled by individual pipeline cleanup
-    i2s_driver_installed_ = false;
+    i2SDriverInstalled_ = false;
     return ESP_OK;
 }
 
 i2s_stream_cfg_t I2SAudioService::createI2SConfig(AudioSource source, 
-                                                  int sample_rate, 
+                                                  int sampleRate,
                                                   int channels, 
-                                                  int bits_per_sample) {
+                                                  int bitsPerSample) {
     // This is called from within a locked context
     
     // Determine source-specific configuration
-    int task_priority = 23; // Default
-    int out_rb_size = 12 * 1024; // Default
-    bool uninstall_drv = false; // Shared I2S, don't uninstall
+    int taskPriority = 23; // Default
+    int outRbSize = 12 * 1024; // Default
+    bool uninstallDrv = false; // Shared I2S, don't uninstall
     
     switch (source) {
         case AudioSource::BLUETOOTH:
-            task_priority = 23;
-            out_rb_size = 12 * 1024;
-            uninstall_drv = false; // Share with other sources
+            taskPriority = 23;
+            outRbSize = 12 * 1024;
+            uninstallDrv = false; // Share with other sources
             break;
         case AudioSource::SPOTIFY:
-            task_priority = 24;
-            out_rb_size = 8 * 1024;
-            uninstall_drv = false;
+            taskPriority = 24;
+            outRbSize = 8 * 1024;
+            uninstallDrv = false;
             break;
         case AudioSource::VOICE_RESPONSE:
-            task_priority = 25; // Higher priority for voice
-            out_rb_size = 4 * 1024;
-            uninstall_drv = false;
+            taskPriority = 25; // Higher priority for voice
+            outRbSize = 4 * 1024;
+            uninstallDrv = false;
             break;
         default:
             break;
     }
     
     // Create standardized I2S configuration using board.h pins
-    i2s_stream_cfg_t i2s_cfg = {
+    i2s_stream_cfg_t i2SCfg = {
         .type = AUDIO_STREAM_WRITER,
         .transmit_mode = I2S_COMM_MODE_STD,
         .chan_cfg = {
@@ -211,9 +160,9 @@ i2s_stream_cfg_t I2SAudioService::createI2SConfig(AudioSource source,
             .intr_priority = 0
         },
         .std_cfg = {
-            .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(static_cast<uint32_t>(sample_rate)),
+            .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(static_cast<uint32_t>(sampleRate)),
             .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
-                static_cast<i2s_data_bit_width_t>(bits_per_sample),
+                static_cast<i2s_data_bit_width_t>(bitsPerSample),
                 static_cast<i2s_slot_mode_t>(channels == 1 ? I2S_SLOT_MODE_MONO : I2S_SLOT_MODE_STEREO)
             ),
             .gpio_cfg = {
@@ -236,23 +185,23 @@ i2s_stream_cfg_t I2SAudioService::createI2SConfig(AudioSource source,
         .pdm_tx_cfg = {},
 #endif
         .use_alc = false,
-        .volume = master_volume_,
-        .out_rb_size = out_rb_size,
+        .volume = masterVolume_,
+        .out_rb_size = outRbSize,
         .task_stack = 3072,
         .task_core = 0,
-        .task_prio = task_priority,
+        .task_prio = taskPriority,
         .stack_in_ext = false,
         .multi_out_num = 0,
-        .uninstall_drv = uninstall_drv,
+        .uninstall_drv = uninstallDrv,
         .need_expand = false,
-        .expand_src_bits = static_cast<i2s_data_bit_width_t>(bits_per_sample),
+        .expand_src_bits = static_cast<i2s_data_bit_width_t>(bitsPerSample),
         .buffer_len = 2400
     };
     
-    ESP_LOGD(TAG, "Created I2S config for source %d: %dHz, %dch, %dbit, prio=%d", 
-             static_cast<int>(source), sample_rate, channels, bits_per_sample, task_priority);
+    ESP_LOGD(TAG, "Created I2S config for source %d: %dHz, %dch, %dbit, prio=%d",
+             static_cast<int>(source), sampleRate, channels, bitsPerSample, taskPriority);
     
-    return i2s_cfg;
+    return i2SCfg;
 }
 
 } // namespace btspeaker 

@@ -69,9 +69,9 @@ private:
 };
 
 // Specialized deleters for ESP-IDF handles
-void audio_pipeline_deleter(audio_pipeline_handle_t handle);
-void audio_element_deleter(audio_element_handle_t handle);
-void audio_event_iface_deleter(audio_event_iface_handle_t handle);
+void audioPipelineDeleter(audio_pipeline_handle_t handle);
+void audioElementDeleter(audio_element_handle_t handle);
+void audioEventIfaceDeleter(audio_event_iface_handle_t handle);
 
 // Type aliases for commonly used handles
 using PipelineHandle = EspHandle<audio_pipeline_handle_t>;

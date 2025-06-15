@@ -44,10 +44,12 @@ public:
     esp_err_t start();
     esp_err_t stop();
 
+    void  onMusicCommand(const char* command);
+
     // Source switching
     esp_err_t switchToSource(AudioSource source);
-    AudioSource getCurrentSource() const { return current_source_; }
-    AudioSource getPreviousSource() const { return previous_source_; }
+    [[nodiscard]] AudioSource getCurrentSource() const { return current_source_; }
+    [[nodiscard]] AudioSource getPreviousSource() const { return previous_source_; }
 
     // Common playback controls (delegates to current active source)
     esp_err_t play();
@@ -57,29 +59,16 @@ public:
     esp_err_t skipNext();
     esp_err_t skipPrevious();
     void setVolume(uint8_t volume);
-    uint8_t getVolume() const { return volume_; }
+    [[nodiscard]] uint8_t getVolume() const { return volume_; }
 
     // Voice response controls (highest priority)
-    esp_err_t playVoiceResponse(const uint8_t* audio_data, size_t length);
     esp_err_t queueVoiceResponseChunk(const uint8_t* audio_data, size_t length, bool is_final);
     esp_err_t stopVoiceResponse();
 
     // Spotify-specific controls
     esp_err_t spotifyPlay(const std::string& uri);
-    esp_err_t spotifySearch(const std::string& query);
 
-    // State query
-    PlaybackState getPlaybackState() const;
-    bool isPlaying() const;
-    bool isVoiceResponsePlaying() const;
-
-    // Callback registration for state changes
-    using SourceChangeCallback = std::function<void(AudioSource from, AudioSource to)>;
-    void setSourceChangeCallback(SourceChangeCallback callback);
-
-    // ===== PIPELINE ACCESS METHODS =====
-    SpotifyPipeline* getSpotifyPipeline() const { return spotify_pipeline_.get(); }
-    BluetoothPipeline* getBluetoothPipeline() const { return bt_pipeline_.get(); }
+    [[nodiscard]] SpotifyPipeline* getSpotifyPipeline() const { return spotify_pipeline_.get(); }
 
 private:
     AudioSourceManager() = default;
@@ -93,27 +82,15 @@ private:
     // State management
     AudioSource current_source_;
     AudioSource previous_source_;  // For restoration after voice response
-    PlaybackState current_state_;
     uint8_t volume_;
     bool is_initialized_;
     bool auto_restore_previous_source_;
-
-    // Callback for state changes
-    SourceChangeCallback source_change_callback_;
 
     // Internal helpers
     esp_err_t stopCurrentSource();
     esp_err_t startSource(AudioSource source);
     esp_err_t pauseCurrentSourceForVoice();
     esp_err_t restorePreviousSource();
-    
-    // Voice response completion callback
-    static void onVoiceResponseComplete(void* user_data);
-    void handleVoiceResponseComplete();
-    
-    // State synchronization
-    void updatePlaybackState();
-    void notifySourceChange(AudioSource from, AudioSource to);
 };
 
 } // namespace btspeaker 

@@ -29,27 +29,21 @@ public:
     BluetoothPipeline(BluetoothPipeline&&) = default;
     BluetoothPipeline& operator=(BluetoothPipeline&&) = default;
     
-    esp_err_t setup_pipeline();
-    esp_err_t start_pipeline();
-    esp_err_t stop_pipeline();
-    esp_err_t pause_pipeline();
-    esp_err_t resume_pipeline();
-    
-    esp_err_t run_event_loop();
-    
-    bool is_pipeline_ready() const { return pipeline_ && i2s_stream_writer_ && bt_stream_reader_; }
-    
+    esp_err_t setupPipeline();
+    esp_err_t startPipeline();
+    esp_err_t stopPipeline();
+    esp_err_t pausePipeline();
+    esp_err_t resumePipeline();
+
     void cleanup();
 
 private:
-    bool handle_audio_event(const audio_event_iface_msg_t& msg);
-    
     // RAII-managed resources
     PipelineHandle pipeline_;
-    ElementHandle i2s_stream_writer_;
-    ElementHandle bt_stream_reader_;
+    ElementHandle i2SStreamWriter;
+    ElementHandle btStreamReader;
     EventIfaceHandle evt_;
-    bool bt_service_started_ = false;
+    bool btServiceStarted = false;
 };
 
 } // namespace btspeaker 

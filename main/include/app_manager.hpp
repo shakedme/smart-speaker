@@ -49,15 +49,15 @@ private:
     static constexpr const char* TAG = "BT_AUDIO_APP";
     
     // Music playback command callback for voice assistant
-    void music_playback_cmd_callback(const char* command);
+    void musicPlaybackCmdCallback(const char* command);
 
-    esp_err_t init_nvs();
+    esp_err_t initNVS();
 
     std::atomic<State> state_;
     static AppManager* instance_;
     
-    std::unique_ptr<WiFiManager> wifi_manager_;
-    std::unique_ptr<VoiceAssistantManager> voice_assistant_;
+    std::unique_ptr<WiFiManager> wifiManager;
+    std::unique_ptr<VoiceAssistantManager> voiceAssistant;
 };
 
 } // namespace btspeaker 

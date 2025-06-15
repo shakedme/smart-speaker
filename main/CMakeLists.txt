@@ -53,6 +53,7 @@ idf_component_register(
 
         # Additional for cspot
         esp_http_client
+        esp_http_server
         mbedtls
         pthread
         esp_timer

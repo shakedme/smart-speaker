@@ -80,7 +80,6 @@ namespace btspeaker {
         musicCallback = std::move(callback);
     }
 
-
     void VoiceCommandProcessor::handleWebsocketResponse(const uint8_t *audioData, size_t length, bool isFinal,
                                                         const char *messageJson) {
         // Handle binary audio data (voice response streaming)

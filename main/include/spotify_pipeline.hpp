@@ -96,7 +96,6 @@ private:
     void clearStoredAuth();
     esp_err_t startHttpServer();
     void stopHttpServer();
-    void handleSpotifyCommand(const cspot::DeviceStateHandler::Command& command);
 
     // HTTP handlers
     static esp_err_t spotifyInfoGetHandler(httpd_req_t *req);

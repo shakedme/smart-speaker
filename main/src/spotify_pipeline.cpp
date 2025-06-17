@@ -453,10 +453,8 @@ namespace btspeaker {
                 isRunning = false;
             });
 
-            // Set up command callback
-            deviceStateHandler->stateCallback = [this](const cspot::DeviceStateHandler::Command &command) {
-                handleSpotifyCommand(command);
-            };
+            // Note: EspPlayer will set the critical stateCallback in its constructor
+            // so we don't set it here to avoid override conflicts
 
             // Start audio streaming now that we have a device handler
             esp_err_t audio_ret = startAudioStreaming();
@@ -472,85 +470,6 @@ namespace btspeaker {
         } catch (const std::exception &e) {
             ESP_LOGE(TAG, "Authentication failed: %s", e.what());
             return ESP_FAIL;
-        }
-    }
-
-    void SpotifyPipeline::handleSpotifyCommand(const cspot::DeviceStateHandler::Command &command) {
-        ESP_LOGI(TAG, "Received Spotify command: %d", static_cast<int>(command.commandType));
-
-        switch (command.commandType) {
-            case cspot::DeviceStateHandler::CommandType::PLAY:
-                ESP_LOGI(TAG, "Play command received");
-                isPlaying = true;
-                break;
-
-            case cspot::DeviceStateHandler::CommandType::PAUSE:
-                ESP_LOGI(TAG, "Pause command received");
-                isPlaying = false;
-                break;
-
-            case cspot::DeviceStateHandler::CommandType::STOP:
-                ESP_LOGI(TAG, "Stop command received");
-                isPlaying = false;
-                break;
-
-            case cspot::DeviceStateHandler::CommandType::SKIP_NEXT:
-                ESP_LOGI(TAG, "Skip next command received");
-                break;
-
-            case cspot::DeviceStateHandler::CommandType::SKIP_PREV:
-                ESP_LOGI(TAG, "Skip previous command received");
-                break;
-
-            case cspot::DeviceStateHandler::CommandType::VOLUME:
-                ESP_LOGI(TAG, "Volume command received");
-                if (std::holds_alternative<int32_t>(command.data)) {
-                    volume = static_cast<uint8_t>(std::get<int32_t>(command.data));
-                    ESP_LOGI(TAG, "Volume set to: %d", volume.load());
-                }
-                break;
-
-            case cspot::DeviceStateHandler::CommandType::SEEK:
-                ESP_LOGI(TAG, "Seek command received");
-                break;
-
-            case cspot::DeviceStateHandler::CommandType::TRACK_INFO:
-                ESP_LOGI(TAG, "Track info command received");
-                break;
-
-            case cspot::DeviceStateHandler::CommandType::PLAYBACK_START:
-                ESP_LOGI(TAG, "Playback start command received");
-                isPlaying = true;
-                break;
-
-            case cspot::DeviceStateHandler::CommandType::PLAYBACK:
-                ESP_LOGI(TAG, "Playback command received");
-                break;
-
-            case cspot::DeviceStateHandler::CommandType::DEPLETED:
-                ESP_LOGI(TAG, "Track depleted command received");
-                break;
-
-            case cspot::DeviceStateHandler::CommandType::FLUSH:
-                ESP_LOGI(TAG, "Flush command received");
-                break;
-
-            case cspot::DeviceStateHandler::CommandType::DISC:
-                ESP_LOGI(TAG, "Disconnect command received");
-                isRunning = false;
-                break;
-
-            case cspot::DeviceStateHandler::CommandType::SET_SHUFFLE:
-                ESP_LOGI(TAG, "Set shuffle command received");
-                break;
-
-            case cspot::DeviceStateHandler::CommandType::SET_REPEAT:
-                ESP_LOGI(TAG, "Set repeat command received");
-                break;
-
-            default:
-                ESP_LOGW(TAG, "Unknown command type: %d", static_cast<int>(command.commandType));
-                break;
         }
     }
 

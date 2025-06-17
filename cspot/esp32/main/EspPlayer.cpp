@@ -21,7 +21,7 @@
 EspPlayer::EspPlayer(std::shared_ptr<AudioSink> sink,
                      std::shared_ptr<cspot::DeviceStateHandler> handler)
     : bell::Task("player", 12 * 1024, 0, 1) {
-  this->handler = handler;
+  this->handler = std::move(handler);
   this->audioSink = std::move(sink);
 
   this->circularBuffer = std::make_shared<bell::CircularBuffer>(1024 * 128);

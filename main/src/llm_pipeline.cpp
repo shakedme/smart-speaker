@@ -65,10 +65,6 @@ void LLMPipeline::shutdown() {
 }
 
 esp_err_t LLMPipeline::queueAudioChunk(const uint8_t* audio_data, size_t length, bool is_final) {
-    if (!audio_data || length == 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
     if (state_.load() == State::IDLE) {
         ESP_LOGI(TAG, "Starting LLM audio playback");
         set_state(State::PREPARING);

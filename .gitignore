@@ -12,6 +12,8 @@ dependencies.lock
 *.pyc
 __pycache__/
 
+~/Projects/esp-adf
+
 # Build optimization
 precompiled_libs/
 .ccache/

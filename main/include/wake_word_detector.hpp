@@ -49,27 +49,26 @@ namespace btspeaker {
 
         /**
          * @brief Feed stereo audio data to wake word detector (thread-safe)
-         * This will convert stereo to mono and feed to ring buffer for processing
          * @param stereo_data Raw stereo audio data (uint8_t format)
          * @param data_length Length of data in bytes
          * @return ESP_OK on success
          */
-        esp_err_t feed_audio_data(const uint8_t* stereo_data, size_t data_length);
+        esp_err_t feedAudioData(const uint8_t* stereo_data, size_t data_length);
 
         /**
          * @brief Set callback for wake word detection
          */
-        void set_wake_word_callback(WakeWordCallback callback);
+        void setWakeWordCallback(WakeWordCallback callback);
 
         /**
          * @brief Enable/disable wake word detection
          */
-        void set_enabled(bool enabled);
+        void setEnabled(bool enabled);
 
         /**
          * @brief Check if wake word detection is enabled
          */
-        bool is_enabled() const { return enabled_; }
+        [[nodiscard]] bool isEnabled() const { return enabled_; }
 
     private:
         static constexpr const char* TAG = "WakeWordDetector";
@@ -81,38 +80,33 @@ namespace btspeaker {
         
         // ESP-SR state
         std::atomic<bool> enabled_;
-        float threshold_;
-        
+
         // Task management
-        TaskHandle_t processing_task_handle_;
-        RingbufHandle_t audio_ring_buffer_;
-        SemaphoreHandle_t enable_mutex_;
-        std::atomic<bool> task_running_;
+        TaskHandle_t processingTaskHandle;
+        RingbufHandle_t audioRingBuffer;
+        SemaphoreHandle_t enableMutex;
+        std::atomic<bool> taskRunning;
         
         // ESP-SR AFE components
-        void* afe_handle_;        // esp_afe_sr_iface_t*
-        void* afe_data_;          // esp_afe_sr_data_t*
-        void* wake_word_models_;  // srmodel_list_t*
-        int feed_chunksize_;
-        int fetch_chunksize_;
-        
-        // Audio processing - removed mono conversion buffer
-        // ESP-SR AFE now processes dual microphone data directly
+        void* afeHandle;        // esp_afe_sr_iface_t*
+        void* afeData;          // esp_afe_sr_data_t*
+        int feedChunkSize;
+        int fetchChunkSize;
         
         // Callback
-        WakeWordCallback wake_word_callback_;
+        WakeWordCallback wakeWordCallback;
         
         // Internal methods
-        esp_err_t setup_esp_sr();
-        void cleanup_esp_sr();
+        esp_err_t setupEspSr();
+        void cleanupEspSr();
         
-        esp_err_t start_processing_task();
-        void stop_processing_task();
-        static void wake_word_task(void* arg);
-        void run_wake_word_processing();
+        esp_err_t startProcessingTask();
+        void stopProcessingTask();
+        static void wakeWordTask(void* arg);
+        void runWakeWordProcessing();
         
         // Audio processing methods - updated for dual microphone processing
-        bool process_stereo_audio_chunk(const int16_t* stereo_samples, size_t frame_count);
+        bool processStereoAudioChunk(const int16_t* stereoSamples, size_t frameCount);
     };
 
 } // namespace btspeaker 

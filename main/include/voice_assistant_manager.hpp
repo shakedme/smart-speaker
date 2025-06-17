@@ -76,35 +76,30 @@ public:
     /**
      * @brief Set callback for music playback commands
      */
-    void set_music_playback_callback(const MusicPlaybackCallback& callback);
-    
-    /**
-     * @brief Get current state
-     */
-    State get_state() const { return state_.load(); }
+    void setMusicPlaybackCallback(const MusicPlaybackCallback& callback);
 
 private:
     static constexpr const char* TAG = "VOICE_ASST";
     
     // Component coordination callbacks
-    void on_audio_data(const uint8_t* data, size_t length);
-    void on_wake_word_detected();
+    void onAudioData(const uint8_t* data, size_t length);
+    void onWakeWordDetected();
     
     // State management
-    void set_state(State new_state);
+    void setState(State new_state);
     
     // Member variables
-    std::atomic<State> state_;
-    SemaphoreHandle_t state_mutex_;
+    std::atomic<State> state;
+    SemaphoreHandle_t stateMutex;
     
     // Sub-components (using composition instead of inheritance)
-    std::unique_ptr<MicrophoneManager> microphone_manager_;
-    std::unique_ptr<WakeWordDetector> wake_word_detector_;
-    std::unique_ptr<VoiceCommandProcessor> command_processor_;
-    std::unique_ptr<WebSocketVoiceClient> websocket_client_;
+    std::unique_ptr<MicrophoneManager> microphoneManager;
+    std::unique_ptr<WakeWordDetector> wakeWordDetector;
+    std::unique_ptr<VoiceCommandProcessor> voiceCommandProcessor;
+    std::unique_ptr<WebSocketVoiceClient> websocketClient;
     // AudioSourceManager handles voice response playback
     
-    MusicPlaybackCallback music_callback_;
+    MusicPlaybackCallback musicCallback;
 };
 
 } // namespace btspeaker 

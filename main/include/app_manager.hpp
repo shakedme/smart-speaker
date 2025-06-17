@@ -38,12 +38,7 @@ public:
     /**
      * @brief Get current application state
      */
-    State get_state() const;
-
-    /**
-     * @brief Get singleton instance
-     */
-    static AppManager* get_instance() { return instance_; }
+    [[nodiscard]] State getState() const;
 
 private:
     static constexpr const char* TAG = "BT_AUDIO_APP";

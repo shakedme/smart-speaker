@@ -15,16 +15,14 @@ namespace btspeaker {
 
 WakeWordDetector::WakeWordDetector()
     : enabled_(false)
-    , threshold_(CONFIG_WAKE_WORD_THRESHOLD)
-    , processing_task_handle_(nullptr)
-    , audio_ring_buffer_(nullptr)
-    , enable_mutex_(nullptr)
-    , task_running_(false)
-    , afe_handle_(nullptr)
-    , afe_data_(nullptr)
-    , wake_word_models_(nullptr)
-    , feed_chunksize_(0)
-    , fetch_chunksize_(0)
+    , processingTaskHandle(nullptr)
+    , audioRingBuffer(nullptr)
+    , enableMutex(nullptr)
+    , taskRunning(false)
+    , afeHandle(nullptr)
+    , afeData(nullptr)
+    , feedChunkSize(0)
+    , fetchChunkSize(0)
 {
     ESP_LOGI(TAG, "WakeWordDetector created");
 }
@@ -37,8 +35,8 @@ esp_err_t WakeWordDetector::init() {
     ESP_LOGI(TAG, "Initializing wake word detector with dedicated processing task");
     
     // Create mutex for thread-safe enable/disable operations
-    enable_mutex_ = xSemaphoreCreateMutex();
-    if (!enable_mutex_) {
+    enableMutex = xSemaphoreCreateMutex();
+    if (!enableMutex) {
         ESP_LOGE(TAG, "Failed to create enable mutex");
         return ESP_ERR_NO_MEM;
     }
@@ -47,13 +45,13 @@ esp_err_t WakeWordDetector::init() {
     // No mono conversion buffer needed
     
     // Create ring buffer for audio data
-    audio_ring_buffer_ = xRingbufferCreate(RING_BUFFER_SIZE, RINGBUF_TYPE_BYTEBUF);
-    if (!audio_ring_buffer_) {
+    audioRingBuffer = xRingbufferCreate(RING_BUFFER_SIZE, RINGBUF_TYPE_BYTEBUF);
+    if (!audioRingBuffer) {
         ESP_LOGE(TAG, "Failed to create audio ring buffer");
         return ESP_ERR_NO_MEM;
     }
     
-    esp_err_t ret = setup_esp_sr();
+    esp_err_t ret = setupEspSr();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "ESP-SR setup failed: %s", esp_err_to_name(ret));
         ESP_LOGW(TAG, "Wake word detection will be disabled");
@@ -62,10 +60,10 @@ esp_err_t WakeWordDetector::init() {
     }
     
     // Start the processing task
-    ret = start_processing_task();
+    ret = startProcessingTask();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start wake word processing task");
-        cleanup_esp_sr();
+        cleanupEspSr();
         return ret;
     }
     
@@ -76,36 +74,36 @@ esp_err_t WakeWordDetector::init() {
 
 void WakeWordDetector::shutdown() {
     ESP_LOGI(TAG, "Shutting down wake word detector");
+
+    setEnabled(false);
+    stopProcessingTask();
+    cleanupEspSr();
     
-    set_enabled(false);
-    stop_processing_task();
-    cleanup_esp_sr();
-    
-    if (audio_ring_buffer_) {
-        vRingbufferDelete(audio_ring_buffer_);
-        audio_ring_buffer_ = nullptr;
+    if (audioRingBuffer) {
+        vRingbufferDelete(audioRingBuffer);
+        audioRingBuffer = nullptr;
     }
     
     // No mono conversion buffer to clean up
     
-    if (enable_mutex_) {
-        vSemaphoreDelete(enable_mutex_);
-        enable_mutex_ = nullptr;
+    if (enableMutex) {
+        vSemaphoreDelete(enableMutex);
+        enableMutex = nullptr;
     }
 }
 
-esp_err_t WakeWordDetector::feed_audio_data(const uint8_t* stereo_data, size_t data_length) {
+esp_err_t WakeWordDetector::feedAudioData(const uint8_t* stereo_data, size_t data_length) {
     if (!enabled_ || !stereo_data || data_length == 0) {
         return ESP_OK; // Silently ignore when disabled
     }
     
-    if (!audio_ring_buffer_) {
+    if (!audioRingBuffer) {
         return ESP_ERR_INVALID_STATE;
     }
     
     // Send stereo data to ring buffer for processing by the dedicated task
     // The processing task will handle stereo-to-mono conversion
-    BaseType_t result = xRingbufferSend(audio_ring_buffer_, stereo_data, data_length, 0);
+    BaseType_t result = xRingbufferSend(audioRingBuffer, stereo_data, data_length, 0);
     if (result != pdTRUE) {
         ESP_LOGD(TAG, "Ring buffer full, dropping audio data");
         return ESP_ERR_NO_MEM;
@@ -114,23 +112,23 @@ esp_err_t WakeWordDetector::feed_audio_data(const uint8_t* stereo_data, size_t d
     return ESP_OK;
 }
 
-void WakeWordDetector::set_enabled(bool enabled) {
-    if (enable_mutex_ && xSemaphoreTake(enable_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+void WakeWordDetector::setEnabled(bool enabled) {
+    if (enableMutex && xSemaphoreTake(enableMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         if (enabled_ != enabled) {
             enabled_ = enabled;
             ESP_LOGI(TAG, "Wake word detection %s", enabled ? "enabled" : "disabled");
             
-            if (!enabled && audio_ring_buffer_) {
+            if (!enabled && audioRingBuffer) {
                 // Clear ring buffer when disabling
                 size_t bytes_available;
-                void* data = xRingbufferReceive(audio_ring_buffer_, &bytes_available, 0);
+                void* data = xRingbufferReceive(audioRingBuffer, &bytes_available, 0);
                 while (data) {
-                    vRingbufferReturnItem(audio_ring_buffer_, data);
-                    data = xRingbufferReceive(audio_ring_buffer_, &bytes_available, 0);
+                    vRingbufferReturnItem(audioRingBuffer, data);
+                    data = xRingbufferReceive(audioRingBuffer, &bytes_available, 0);
                 }
             }
         }
-        xSemaphoreGive(enable_mutex_);
+        xSemaphoreGive(enableMutex);
     } else {
         // Fallback without mutex
         enabled_ = enabled;
@@ -138,25 +136,25 @@ void WakeWordDetector::set_enabled(bool enabled) {
     }
 }
 
-esp_err_t WakeWordDetector::start_processing_task() {
-    if (processing_task_handle_) {
+esp_err_t WakeWordDetector::startProcessingTask() {
+    if (processingTaskHandle) {
         ESP_LOGW(TAG, "Processing task already running");
         return ESP_OK;
     }
-    
-    task_running_ = true;
+
+    taskRunning = true;
     BaseType_t result = xTaskCreate(
-        wake_word_task,
-        "wakeword_task",
-        WAKE_WORD_TASK_STACK_SIZE,
-        this,
-        WAKE_WORD_TASK_PRIORITY,
-        &processing_task_handle_
+            wakeWordTask,
+            "wakeword_task",
+            WAKE_WORD_TASK_STACK_SIZE,
+            this,
+            WAKE_WORD_TASK_PRIORITY,
+            &processingTaskHandle
     );
     
     if (result != pdPASS) {
         ESP_LOGE(TAG, "Failed to create wake word processing task");
-        task_running_ = false;
+        taskRunning = false;
         return ESP_FAIL;
     }
     
@@ -164,41 +162,41 @@ esp_err_t WakeWordDetector::start_processing_task() {
     return ESP_OK;
 }
 
-void WakeWordDetector::stop_processing_task() {
-    if (!processing_task_handle_) {
+void WakeWordDetector::stopProcessingTask() {
+    if (!processingTaskHandle) {
         return;
     }
     
     ESP_LOGI(TAG, "Stopping wake word processing task");
-    task_running_ = false;
+    taskRunning = false;
     
     // Wait a bit for task to finish current processing
     vTaskDelay(pdMS_TO_TICKS(100));
     
-    vTaskDelete(processing_task_handle_);
-    processing_task_handle_ = nullptr;
+    vTaskDelete(processingTaskHandle);
+    processingTaskHandle = nullptr;
 
     ESP_LOGI(TAG, "Wake word processing task stopped");
 }
 
-void WakeWordDetector::wake_word_task(void* arg) {
+void WakeWordDetector::wakeWordTask(void* arg) {
     auto* detector = static_cast<WakeWordDetector*>(arg);
-    detector->run_wake_word_processing();
+    detector->runWakeWordProcessing();
     vTaskDelete(NULL);
 }
 
-void WakeWordDetector::run_wake_word_processing() {
+void WakeWordDetector::runWakeWordProcessing() {
     ESP_LOGI(TAG, "Wake word processing task started (dual microphone mode)");
     
-    while (task_running_) {
-        if (!enabled_ || !audio_ring_buffer_) {
+    while (taskRunning) {
+        if (!enabled_ || !audioRingBuffer) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
         
         // Receive stereo audio data from ring buffer
         size_t data_length;
-        auto* stereo_data = (uint8_t*)xRingbufferReceive(audio_ring_buffer_, &data_length, pdMS_TO_TICKS(50));
+        auto* stereo_data = (uint8_t*)xRingbufferReceive(audioRingBuffer, &data_length, pdMS_TO_TICKS(50));
         
         if (!stereo_data) {
             continue; // Timeout, check again
@@ -209,45 +207,45 @@ void WakeWordDetector::run_wake_word_processing() {
         size_t sample_count = data_length / sizeof(int16_t);
         
         if (sample_count > 0 && (sample_count % 2 == 0)) { // Ensure we have pairs of samples
-            bool wake_word_detected = process_stereo_audio_chunk(stereo_samples, sample_count / 2); // /2 because we want frame count, not sample count
+            bool wake_word_detected = processStereoAudioChunk(stereo_samples, sample_count / 2); // /2 because we want frame count, not sample count
             
-            if (wake_word_detected && wake_word_callback_) {
+            if (wake_word_detected && wakeWordCallback) {
                 ESP_LOGI(TAG, "Calling wake word callback");
-                wake_word_callback_();
+                wakeWordCallback();
             }
         }
         
         // Return the buffer
-        vRingbufferReturnItem(audio_ring_buffer_, stereo_data);
+        vRingbufferReturnItem(audioRingBuffer, stereo_data);
     }
     
     ESP_LOGI(TAG, "Wake word processing task ended");
 }
 
-bool WakeWordDetector::process_stereo_audio_chunk(const int16_t* stereo_samples, size_t frame_count) {
-    if (!enabled_ || !stereo_samples || frame_count == 0) {
+bool WakeWordDetector::processStereoAudioChunk(const int16_t* stereoSamples, size_t frameCount) {
+    if (!enabled_ || !stereoSamples || frameCount == 0) {
         return false;
     }
     
-    if (!afe_handle_ || !afe_data_) {
+    if (!afeHandle || !afeData) {
         return false;
     }
     
-    auto* iface = (esp_afe_sr_iface_t*)afe_handle_;
+    auto* iface = (esp_afe_sr_iface_t*)afeHandle;
     
     // Process audio in proper chunk sizes expected by AFE
     size_t frames_processed = 0;
-    while (frames_processed < frame_count) {
-        size_t frames_to_process = std::min(frame_count - frames_processed, 
-                                          static_cast<size_t>(feed_chunksize_));
+    while (frames_processed < frameCount) {
+        size_t frames_to_process = std::min(frameCount - frames_processed,
+                                            static_cast<size_t>(feedChunkSize));
         
         // Create temporary buffer for this chunk (2 channels * frames * sizeof(int16_t))
         // ESP-SR AFE expects interleaved stereo: L0,R0,L1,R1,L2,R2...
-        const int16_t* chunk_data = stereo_samples + (frames_processed * 2);
+        const int16_t* chunk_data = stereoSamples + (frames_processed * 2);
         
         // Feed stereo audio data to ESP-SR AFE
         // The AFE configured with "MM" format expects this exact dual-channel layout
-        int feed_result = iface->feed((esp_afe_sr_data_t*)afe_data_, (int16_t*)chunk_data);
+        int feed_result = iface->feed((esp_afe_sr_data_t*)afeData, (int16_t*)chunk_data);
         
         if (feed_result <= 0) {
             ESP_LOGD(TAG, "AFE feed failed: %d", feed_result);
@@ -256,7 +254,7 @@ bool WakeWordDetector::process_stereo_audio_chunk(const int16_t* stereo_samples,
         }
         
         // Fetch result from AFE
-        afe_fetch_result_t* fetch_result = iface->fetch((esp_afe_sr_data_t*)afe_data_);
+        afe_fetch_result_t* fetch_result = iface->fetch((esp_afe_sr_data_t*)afeData);
         if (!fetch_result) {
             frames_processed += frames_to_process;
             continue;
@@ -279,11 +277,11 @@ bool WakeWordDetector::process_stereo_audio_chunk(const int16_t* stereo_samples,
     return false;
 }
 
-void WakeWordDetector::set_wake_word_callback(WakeWordCallback callback) {
-    wake_word_callback_ = callback;
+void WakeWordDetector::setWakeWordCallback(WakeWordCallback callback) {
+    wakeWordCallback = std::move(callback);
 }
 
-esp_err_t WakeWordDetector::setup_esp_sr() {
+esp_err_t WakeWordDetector::setupEspSr() {
     ESP_LOGI(TAG, "Setting up ESP-SR with dual microphone configuration");
     
     // For compiled-in models (enabled via menuconfig), use NULL instead of partition name
@@ -298,7 +296,7 @@ esp_err_t WakeWordDetector::setup_esp_sr() {
     // Create AFE configuration for dual microphone processing
     // Format "MM": Two microphone channels (M=microphone), no reference channel
     // This enables beamforming and spatial processing with the two MEMS mics
-    afe_config_t *afe_config = afe_config_init("MM", models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
+    afe_config_t *afe_config = afe_config_init("MM", models, AFE_TYPE_SR, AFE_MODE_HIGH_PERF);
     if (!afe_config) {
         ESP_LOGE(TAG, "Failed to create AFE config");
         return ESP_FAIL;
@@ -337,7 +335,7 @@ esp_err_t WakeWordDetector::setup_esp_sr() {
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;  // Use PSRAM for dual-mic processing
     afe_config->afe_ringbuf_size = 6;   // Larger buffer for dual microphone processing
     afe_config->afe_linear_gain = 1.0f; // No additional digital gain
-    afe_config->afe_mode = AFE_MODE_LOW_COST;  // Low cost mode for ESP32
+    afe_config->afe_mode = AFE_MODE_HIGH_PERF;
     
     // Check and validate configuration
     afe_config = afe_config_check(afe_config);
@@ -366,27 +364,27 @@ esp_err_t WakeWordDetector::setup_esp_sr() {
         afe_config_free(afe_config);
         return ESP_FAIL;
     }
-    afe_handle_ = (void*)iface;
+    afeHandle = (void*)iface;
     
     // Create AFE data
-    afe_data_ = (void*)iface->create_from_config(afe_config);
-    if (!afe_data_) {
+    afeData = (void*)iface->create_from_config(afe_config);
+    if (!afeData) {
         ESP_LOGE(TAG, "Failed to create AFE data");
         afe_config_free(afe_config);
         return ESP_FAIL;
     }
     
     // Get proper chunk sizes for audio processing
-    feed_chunksize_ = iface->get_feed_chunksize((esp_afe_sr_data_t*)afe_data_);
-    fetch_chunksize_ = iface->get_fetch_chunksize((esp_afe_sr_data_t*)afe_data_);
+    feedChunkSize = iface->get_feed_chunksize((esp_afe_sr_data_t*)afeData);
+    fetchChunkSize = iface->get_fetch_chunksize((esp_afe_sr_data_t*)afeData);
     
     ESP_LOGI(TAG, "AFE Processing Configuration:");
-    ESP_LOGI(TAG, "  Feed Chunk Size: %d samples", feed_chunksize_);
-    ESP_LOGI(TAG, "  Fetch Chunk Size: %d samples", fetch_chunksize_);
+    ESP_LOGI(TAG, "  Feed Chunk Size: %d samples", feedChunkSize);
+    ESP_LOGI(TAG, "  Fetch Chunk Size: %d samples", fetchChunkSize);
     ESP_LOGI(TAG, "  Expected Input: %d channels, 16-bit samples", afe_config->pcm_config.total_ch_num);
     
     // Print the processing pipeline
-    iface->print_pipeline((esp_afe_sr_data_t*)afe_data_);
+    iface->print_pipeline((esp_afe_sr_data_t*)afeData);
     
     afe_config_free(afe_config);
     
@@ -394,21 +392,20 @@ esp_err_t WakeWordDetector::setup_esp_sr() {
     return ESP_OK;
 }
 
-void WakeWordDetector::cleanup_esp_sr() {
+void WakeWordDetector::cleanupEspSr() {
     ESP_LOGI(TAG, "Cleaning up ESP-SR");
     
-    if (afe_handle_ && afe_data_) {
-        auto* iface = (esp_afe_sr_iface_t*)afe_handle_;
-        if (iface && iface->destroy) {
-            iface->destroy((esp_afe_sr_data_t*)afe_data_);
+    if (afeHandle && afeData) {
+        auto* iface = (esp_afe_sr_iface_t*)afeHandle;
+        if (iface->destroy) {
+            iface->destroy((esp_afe_sr_data_t*)afeData);
         }
-        afe_data_ = nullptr;
+        afeData = nullptr;
     }
-    
-    afe_handle_ = nullptr;
-    wake_word_models_ = nullptr;
-    feed_chunksize_ = 0;
-    fetch_chunksize_ = 0;
+
+    afeHandle = nullptr;
+    feedChunkSize = 0;
+    fetchChunkSize = 0;
 }
 
 } // namespace btspeaker 

@@ -52,7 +52,6 @@ public:
 
 private:
     static constexpr const char* TAG = "LLM_PIPELINE";
-    static constexpr size_t AUDIO_CHUNK_SIZE = 1024;
     static constexpr int DEFAULT_SAMPLE_RATE = 24000; // Gemini typical output
     static constexpr int DEFAULT_CHANNELS = 1;
     static constexpr int DEFAULT_BITS = 16;

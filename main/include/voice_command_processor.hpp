@@ -33,7 +33,6 @@ class VoiceCommandProcessor {
 public:
     enum class State {
         IDLE,
-        RECORDING,
         PROCESSING,
         PLAYING_RESPONSE,
         ERROR
@@ -57,80 +56,36 @@ public:
     void shutdown();
     
     /**
-     * @brief Start recording a voice command
-     */
-    esp_err_t start_recording();
-    
-    /**
-     * @brief Process audio data during recording (streams to server)
-     */
-    esp_err_t process_audio_data(const uint8_t* data, size_t length);
-    
-    /**
-     * @brief Finish recording and process the command
-     */
-    esp_err_t finish_recording();
-    
-    /**
      * @brief Cancel current recording
      */
-    esp_err_t cancel_recording();
+    esp_err_t cancelRecording();
     
     /**
      * @brief Set callback for music playback commands
      */
-    void set_music_playback_callback(MusicPlaybackCallback callback);
-    
-    /**
-     * @brief Get current processing state
-     */
-    State get_state() const { return state_.load(); }
-    
-    /**
-     * @brief Check if currently recording
-     */
-    bool is_recording() const { return state_.load() == State::RECORDING; }
+    void setMusicPlaybackCallback(MusicPlaybackCallback callback);
+
 
 private:
     static constexpr const char* TAG = "VOICE_CMD";
-    static constexpr int MAX_RECORDING_DURATION_MS = 10000; // 10 seconds
-    static constexpr int SAMPLE_RATE = 16000;
-    static constexpr int BITS_PER_SAMPLE = 16;
-    static constexpr size_t STREAM_CHUNK_SIZE = 2048; // Reduced from 4096 to save memory (~2KB saved)
-    
-    // Command processing
-    bool check_music_command(const char* text);
-    esp_err_t send_to_websocket(const uint8_t* audio_data, size_t length);
-    
     // Audio response handling
-    void handle_websocket_response(const uint8_t* audio_data, size_t length, bool is_final, const char* message_json);
-    void handle_connection_state_change(int connection_state);
-    void handle_backend_state_change(const std::string& backend_state);
+    void handleWebsocketResponse(const uint8_t* audioData, size_t length, bool isFinal, const char* messageJson);
+    void handleConnectionStateChange(int connectionState);
+    void handleBackendStateChange(const std::string& backendState);
     
     // State management
-    void set_state(State new_state);
-    
-    // Fallback music command processing (when server unavailable)
-    esp_err_t handle_offline_command(const uint8_t* audio_data, size_t length);
-    
+    void setState(State newState);
+
     // Member variables
-    std::atomic<State> state_;
-    SemaphoreHandle_t state_mutex_;
+    std::atomic<State> state;
+    SemaphoreHandle_t stateMutex;
     
     // Streaming buffer (much smaller than previous implementation)
-    std::unique_ptr<uint8_t[]> stream_buffer_;
-    size_t stream_buffer_pos_;
-    
+    std::unique_ptr<uint8_t[]> streamBuffer;
+
     // External components
-    WebSocketVoiceClient* websocket_client_;
-    MusicPlaybackCallback music_callback_;
-    
-    // Connection state tracking
-    bool server_available_;
-    
-    // Music command keywords for offline processing
-    static const char* MUSIC_COMMANDS[];
-    static const size_t MUSIC_COMMANDS_COUNT;
+    WebSocketVoiceClient* websocketClient;
+    MusicPlaybackCallback musicCallback;
 };
 
 } // namespace btspeaker 

@@ -52,21 +52,12 @@ public:
 
     // Playback control
     esp_err_t playURI(const std::string& uri);
-    esp_err_t search(const std::string& query);
     esp_err_t skipNext();
     esp_err_t skipPrevious();
     void setVolume(uint8_t volume);
 
     // Authentication methods
-    esp_err_t startZeroconfDiscovery(); // For Spotify Connect pairing
-    esp_err_t loadStoredAuthentication();
-    esp_err_t saveAuthentication();
-    void clearAuthentication();
-
-    // Status
-    bool isAuthenticated() const { return is_authenticated_; }
-    bool isRunning() const { return isRunning_; }
-    bool isPlaying() const { return isPlaying_; }
+    esp_err_t startZeroconfDiscovery();
 
     // Callback for successful authentication
     esp_err_t onSpotifyConnected(const std::shared_ptr<cspot::LoginBlob>& blob);
@@ -76,25 +67,24 @@ public:
     static constexpr const char* NVS_AUTH_KEY = "auth_blob";
 
 private:
-    std::shared_ptr<cspot::Context> context_;
-    std::shared_ptr<cspot::LoginBlob> loginBlob_;
-    std::shared_ptr<cspot::DeviceStateHandler> deviceHandler_;
-    std::shared_ptr<bell::WrappedSemaphore> loginSemaphore_;
-    std::atomic<bool> isPlaying_;
-    std::atomic<bool> isInitialized_;
-    std::atomic<bool> isRunning_;
-    std::atomic<uint8_t> volume_;
+    std::shared_ptr<cspot::Context> context;
+    std::shared_ptr<cspot::LoginBlob> loginBlob;
+    std::shared_ptr<cspot::DeviceStateHandler> deviceStateHandler;
+    std::atomic<bool> isPlaying;
+    std::atomic<bool> isInitialized;
+    std::atomic<bool> isRunning;
+    std::atomic<uint8_t> volume;
 
     // Authentication state
-    std::atomic<bool> is_authenticated_;
-    std::string stored_username_;
+    std::atomic<bool> isAuthenticated;
+    std::string storedUsername;
 
     // Audio streaming components
-    std::shared_ptr<PCM5102AudioSink> audioSink_;
-    std::unique_ptr<EspPlayer> espPlayer_;
+    std::shared_ptr<PCM5102AudioSink> audioSink;
+    std::unique_ptr<EspPlayer> espPlayer;
 
     // HTTP server for Zeroconf authentication
-    httpd_handle_t http_server_;
+    httpd_handle_t httpServer;
 
     // Private methods
     esp_err_t initializeAudioComponents();
@@ -109,8 +99,8 @@ private:
     void handleSpotifyCommand(const cspot::DeviceStateHandler::Command& command);
 
     // HTTP handlers
-    static esp_err_t spotify_info_get_handler(httpd_req_t *req);
-    static esp_err_t spotify_info_post_handler(httpd_req_t *req);
+    static esp_err_t spotifyInfoGetHandler(httpd_req_t *req);
+    static esp_err_t spotifyInfoPostHandler(httpd_req_t *req);
     
     // Helper methods
     static SpotifyPipeline* getInstanceFromRequest(httpd_req_t* req);

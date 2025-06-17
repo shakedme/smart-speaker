@@ -18,11 +18,10 @@ Speaker Wire: 1.5mm² (15-16 AWG) speaker wire
 LM2587 Boost Converter: 5A, 9-12V to 15V (from Amazon - $8.55)
 Basic Wires/Breadboard: For prototyping
 
-ESP32-DevKitC-32E: ESP32-WROOM-32E module - ₪16.59
-PCM5102A I2S DAC Module: Purple board with 3.5mm jack - ₪3.58
-12V Power Adapter: Universal AC adapter (EU plug) - ₪3.58
-MAX9814 Microphone Module: With built-in electret microphone - ₪3.58
-Jumper Wire Kit: Male-to-male, male-to-female, female-to-female
+ESP32-DevKitC-VE: ESP32-WROVER with 8MB Flash and PSRAM
+PCM5102A I2S DAC Module: Purple board with 3.5mm jack
+12V Power Adapter: Universal AC adapter (EU plug) 
+Two SPH0645LM4H MEMS microphones
 
 🔌 Additional Connections Needed:
 

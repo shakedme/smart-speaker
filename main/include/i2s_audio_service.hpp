@@ -33,7 +33,6 @@ public:
     enum class AudioSource {
         NONE,
         BLUETOOTH,
-        SPOTIFY, 
         VOICE_RESPONSE
     };
 

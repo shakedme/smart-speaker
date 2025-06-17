@@ -118,8 +118,6 @@ i2s_stream_cfg_t I2SAudioService::createI2SConfig(AudioSource source,
                                                   int sampleRate,
                                                   int channels, 
                                                   int bitsPerSample) {
-    // This is called from within a locked context
-    
     // Determine source-specific configuration
     int taskPriority = 23; // Default
     int outRbSize = 12 * 1024; // Default
@@ -130,11 +128,6 @@ i2s_stream_cfg_t I2SAudioService::createI2SConfig(AudioSource source,
             taskPriority = 23;
             outRbSize = 12 * 1024;
             uninstallDrv = false; // Share with other sources
-            break;
-        case AudioSource::SPOTIFY:
-            taskPriority = 24;
-            outRbSize = 8 * 1024;
-            uninstallDrv = false;
             break;
         case AudioSource::VOICE_RESPONSE:
             taskPriority = 25; // Higher priority for voice

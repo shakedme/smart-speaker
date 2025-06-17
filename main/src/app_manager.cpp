@@ -29,7 +29,7 @@ namespace btspeaker {
     esp_err_t AppManager::init() {
         ESP_LOGI(TAG, "Initializing application");
 
-        if (get_state() != State::UNINITIALIZED) {
+        if (getState() != State::UNINITIALIZED) {
             ESP_LOGW(TAG, "Already initialized");
             return ESP_OK;
         }
@@ -63,7 +63,7 @@ namespace btspeaker {
         }
 
         // Initialize voice assistant manager
-        if (wifiManager->is_connected()) {
+        if (wifiManager->isConnected()) {
             voiceAssistant = std::make_unique<VoiceAssistantManager>();
             ret = voiceAssistant->init();  // AudioSourceManager handles audio internally
             if (ret != ESP_OK) {
@@ -72,7 +72,7 @@ namespace btspeaker {
                 voiceAssistant.reset();
             } else {
                 // Set music playback callback for voice commands
-                voiceAssistant->set_music_playback_callback(
+                voiceAssistant->setMusicPlaybackCallback(
                         [this](const char *command) {
                             this->musicPlaybackCmdCallback(command);
                         }
@@ -89,7 +89,7 @@ namespace btspeaker {
     }
 
     esp_err_t AppManager::run() {
-        if (get_state() != State::INITIALIZED) {
+        if (getState() != State::INITIALIZED) {
             ESP_LOGE(TAG, "Application not initialized");
             return ESP_ERR_INVALID_STATE;
         }
@@ -120,7 +120,7 @@ namespace btspeaker {
 
         ESP_LOGI(TAG, "Application running. Starting event loop...");
 
-        while (get_state() == State::RUNNING) {
+        while (getState() == State::RUNNING) {
             vTaskDelay(pdMS_TO_TICKS(1000));  // Simple event loop for now
         }
 
@@ -181,7 +181,7 @@ namespace btspeaker {
         AudioSourceManager::getInstance().onMusicCommand(command);
     }
 
-    AppManager::State AppManager::get_state() const {
+    AppManager::State AppManager::getState() const {
         return state_.load();
     }
 

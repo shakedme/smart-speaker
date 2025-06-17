@@ -107,7 +107,7 @@ void MicrophoneManager::shutdown() {
 }
 
 void MicrophoneManager::setAudioCallback(AudioDataCallback callback) {
-    audioCallback_ = callback;
+    audioCallback_ = std::move(callback);
 }
 
 void MicrophoneManager::audioTask(void* arg) {
@@ -120,8 +120,7 @@ void MicrophoneManager::runAudioProcessing() {
     ESP_LOGI(TAG, "Audio processing task started for stereo I2S microphones");
     
     auto* audio_buffer = new uint8_t[AUDIO_BUFFER_SIZE];
-    auto* mono_buffer = new uint8_t[AUDIO_BUFFER_SIZE / 2]; // For mono conversion if needed
-    
+
     while (recording_) {
         // Read stereo audio from I2S microphone pipeline
         if (rawMicStream_) {
@@ -130,34 +129,13 @@ void MicrophoneManager::runAudioProcessing() {
                                              AUDIO_BUFFER_SIZE);
             
             if (bytes_read > 0 && audioCallback_) {
-                // Process stereo I2S data
-                // SPH0645LM4H provides 16-bit samples in I2S format
-                
-                // Option 1: Pass stereo data directly to callback
                 audioCallback_(audio_buffer, bytes_read);
-                
-                // Option 2: Convert to mono by averaging channels (commented out)
-                // This can be useful for voice recognition that expects mono input
-                /*
-                int16_t* stereo_samples = (int16_t*)audio_buffer;
-                int16_t* mono_samples = (int16_t*)mono_buffer;
-                int sample_count = bytes_read / (2 * sizeof(int16_t)); // 2 channels
-                
-                for (int i = 0; i < sample_count; i++) {
-                    // Average left and right channels for mono output
-                    int32_t avg = ((int32_t)stereo_samples[i*2] + (int32_t)stereo_samples[i*2+1]) / 2;
-                    mono_samples[i] = (int16_t)avg;
-                }
-                
-                audio_callback_(mono_buffer, sample_count * sizeof(int16_t));
-                */
             }
         }
         
         vTaskDelay(pdMS_TO_TICKS(10)); // Small delay to prevent watchdog
     }
     
-    delete[] mono_buffer;
     delete[] audio_buffer;
     ESP_LOGI(TAG, "Audio processing task ended");
 }
@@ -175,7 +153,6 @@ esp_err_t MicrophoneManager::setupMicrophonePipeline() {
     micEvent_.reset(evt_handle, audioEventIfaceDeleter);
     
     // Create I2S microphone stream for SPH0645LM4H MEMS microphones
-    // Using I2S1 to avoid conflict with I2S0 used for audio output
     i2s_stream_cfg_t i2s_cfg = {
         .type = AUDIO_STREAM_READER,
         .transmit_mode = I2S_COMM_MODE_STD,
@@ -205,12 +182,7 @@ esp_err_t MicrophoneManager::setupMicrophonePipeline() {
                 },
             },
         },
-#if SOC_I2S_SUPPORTS_PDM_RX
         .pdm_rx_cfg = {},
-#endif
-#if SOC_I2S_SUPPORTS_PDM_TX
-        .pdm_tx_cfg = {},
-#endif
         .use_alc = false,
         .volume = 0,
         .out_rb_size = 4 * 1024,  // Ring buffer size for stereo I2S data
@@ -255,20 +227,20 @@ esp_err_t MicrophoneManager::setupMicrophonePipeline() {
     micPipeline_.reset(pipeline_handle, audioPipelineDeleter);
     
     // Register elements
-    esp_err_t ret = audio_pipeline_register(micPipeline_.get(), i2SMicStream_.get(), "mic_i2s");
+    esp_err_t ret = audio_pipeline_register(micPipeline_.get(), i2SMicStream_.get(), MIC_I2S);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register I2S mic stream: %s", esp_err_to_name(ret));
         return ret;
     }
     
-    ret = audio_pipeline_register(micPipeline_.get(), rawMicStream_.get(), "mic_raw");
+    ret = audio_pipeline_register(micPipeline_.get(), rawMicStream_.get(), MIC_RAW);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register raw mic stream: %s", esp_err_to_name(ret));
         return ret;
     }
     
     // Link elements
-    const char* link_tag[] = {"mic_i2s", "mic_raw"};
+    const char* link_tag[] = {MIC_I2S, MIC_RAW};
     ret = audio_pipeline_link(micPipeline_.get(), link_tag, 2);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to link microphone elements: %s", esp_err_to_name(ret));

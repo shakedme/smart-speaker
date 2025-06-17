@@ -16,26 +16,11 @@
 
 // Audio Configuration - Updated for SPH0645LM4H I2S MEMS microphones
 #define CONFIG_MIC_SAMPLE_RATE      16000
-#define CONFIG_MIC_CHANNELS         2        // Stereo input from two microphones
-#define CONFIG_MIC_BITS_PER_SAMPLE  16
-
-// Audio format definitions for I2S
-#define RESPONSE_SAMPLE_RATE        24000
-#define RESPONSE_CHANNELS           2
-#define RESPONSE_BITS               I2S_DATA_BIT_WIDTH_16BIT
 #define MIC_BITS                    I2S_DATA_BIT_WIDTH_16BIT
 
 // Wake Word Configuration
 #define CONFIG_WAKE_WORD_ENABLED    true
 #define CONFIG_WAKE_WORD_THRESHOLD  0.8f
-
-// Live Session Configuration (for streaming chunks)
-#define CONFIG_MAX_RECORDING_MS     10000  // 10 seconds max live session
-#define CONFIG_AUDIO_BUFFER_SIZE    CONFIG_WS_CHUNK_SIZE  // Use WebSocket chunk size
-
-// Network Configuration
-#define CONFIG_CONNECTION_TIMEOUT_MS 10000  // 10 seconds
-#define CONFIG_STREAM_TIMEOUT_MS     30000  // 30 seconds for streaming
 
 // WiFi Configuration (required for WebSocket connection)
 #ifndef CONFIG_WIFI_SSID
@@ -51,8 +36,3 @@
 #define CONFIG_MIC_I2S_BCK_GPIO     GPIO_NUM_32  // I2S1 Bit Clock for microphones
 #define CONFIG_MIC_I2S_WS_GPIO      GPIO_NUM_33  // I2S1 Word Select for microphones  
 #define CONFIG_MIC_I2S_DIN_GPIO     GPIO_NUM_34  // I2S1 Data In from microphones
-
-// Audio output pins (PCM5102A) - for reference, using I2S0
-#define CONFIG_I2S_BCK_GPIO         25  // Bit Clock (I2S0)
-#define CONFIG_I2S_WS_GPIO          22  // Word Select (I2S0)
-#define CONFIG_I2S_DO_GPIO          26  // Data Out (I2S0)

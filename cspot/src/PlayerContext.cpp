@@ -145,9 +145,25 @@ void PlayerContext::autoplayQuery(
     return resolveRadio(metadata_map, responseFunction, next_page_url);
   if (playerState->context_uri == NULL)
     secondTry = true;
+  
+  // Null pointer check to prevent crash
+  const char* uri_to_use = nullptr;
+  if (secondTry) {
+    if (tracks->empty() || tracks->at(0).uri == nullptr) {
+      CSPOT_LOG(error, "No valid track URI available for autoplay query");
+      return responseFunction((void*)radio_offset);
+    }
+    uri_to_use = tracks->at(0).uri;
+  } else {
+    if (playerState->context_uri == nullptr) {
+      CSPOT_LOG(error, "No valid context URI available for autoplay query");
+      return responseFunction((void*)radio_offset);
+    }
+    uri_to_use = playerState->context_uri;
+  }
+  
   std::string requestUrl =
-      string_format("hm://autoplay-enabled/query?uri=%s",
-                    secondTry ? tracks->at(0).uri : playerState->context_uri);
+      string_format("hm://autoplay-enabled/query?uri=%s", uri_to_use);
   CSPOT_LOG(debug, "Querying autoplay: %s", &requestUrl[0]);
   auto responseHandler = [this, metadata_map, responseFunction,
                           secondTry](MercurySession::Response res) {
@@ -168,6 +184,11 @@ void PlayerContext::autoplayQuery(
             "hm://radio-apollo/v3/stations/%s?autoplay=true",  //&offset=%i",
             &resolve_autoplay[0]);  //, tracks->back().original_index);
       else {
+        // Check for null pointer before casting to string
+        if (tracks->empty() || tracks->at(0).uri == nullptr) {
+          CSPOT_LOG(error, "No valid track URI for radio tracks query");
+          return responseFunction((void*)radio_offset);
+        }
         requestUrl = "hm://radio-apollo/v3/tracks/" +
                      (std::string)tracks->at(0).uri +
                      "?autoplay=true&count=50&isVideo=false&prev_tracks=";

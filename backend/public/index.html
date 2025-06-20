@@ -496,7 +496,7 @@
             }
 
             // Method to explicitly stop playback (called when backend state changes)
-            stopPlayback() {
+            stop() {
                 if (this.isPlaying) {
                     this.isPlaying = false;
                     this.log('info', 'Playback stopped by state change.');
@@ -551,11 +551,11 @@
                 if (state === 'WAITING_FOR_USER') {
                     this.elements.recordingText.textContent = 'Your turn to speak...';
                     // Stop playback when we know Gemini finished speaking
-                    this.stopPlayback();
+                    this.stop();
                 } else if (state === 'LISTENING') {
                     this.elements.recordingText.textContent = 'Listening for your command...';
                     // Also stop playback when going back to listening (conversation ended)
-                    this.stopPlayback();
+                    this.stop();
                 } else if (state === 'STREAMING_RESPONSE') {
                     this.elements.recordingText.textContent = 'Assistant is responding...';
                 } else if (state === 'PROCESSING_INTENT') {
@@ -563,7 +563,7 @@
                 } else if (state === 'HANDLING_COMMAND') {
                     this.elements.recordingText.textContent = 'Executing command...';
                     // Stop playback for non-conversational commands
-                    this.stopPlayback();
+                    this.stop();
                 }
             }
 

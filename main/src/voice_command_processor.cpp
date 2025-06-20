@@ -15,8 +15,11 @@ extern "C" {
 
 namespace btspeaker {
 
-    VoiceCommandProcessor::VoiceCommandProcessor()
-            : state(State::IDLE), stateMutex(nullptr), websocketClient(nullptr) {
+    VoiceCommandProcessor::VoiceCommandProcessor(AudioSourceManager &audioSourceManager)
+            : state(State::IDLE),
+              stateMutex(nullptr),
+              audioSourceManager(audioSourceManager),
+              websocketClient(nullptr) {
         ESP_LOGI(TAG, "VoiceCommandProcessor created");
     }
 
@@ -87,8 +90,7 @@ namespace btspeaker {
             ESP_LOGI(TAG, "Received TTS audio from backend (%zu bytes)", length);
             setState(State::PLAYING_RESPONSE);
             // Queue audio chunk for streaming playback via AudioSourceManager
-            auto &audio_source_mgr = AudioSourceManager::getInstance();
-            audio_source_mgr.queueVoiceResponseChunk(audioData, length, false);
+            audioSourceManager.queueVoiceResponseChunk(audioData, length, false);
             return;
         }
 
@@ -158,8 +160,7 @@ namespace btspeaker {
             ESP_LOGI(TAG, "Backend is listening for commands");
             setState(State::IDLE);
             // Stop any voice response playback
-            auto &audio_source_mgr = AudioSourceManager::getInstance();
-            audio_source_mgr.stopVoiceResponse();
+            audioSourceManager.stopVoiceResponse();
         } else if (backendState == "PROCESSING_INTENT") {
             ESP_LOGI(TAG, "Backend is processing intent");
             setState(State::PROCESSING);
@@ -169,8 +170,7 @@ namespace btspeaker {
         } else if (backendState == "WAITING_FOR_USER") {
             ESP_LOGI(TAG, "Backend is waiting for user response (conversation mode)");
             // Stop voice response playback but keep session active
-            auto &audio_source_mgr = AudioSourceManager::getInstance();
-            audio_source_mgr.queueVoiceResponseChunk(nullptr, 0, true);
+            audioSourceManager.queueVoiceResponseChunk(nullptr, 0, true);
             setState(State::IDLE);
         } else if (backendState == "HANDLING_COMMAND") {
             ESP_LOGI(TAG, "Backend is handling command");
@@ -196,16 +196,14 @@ namespace btspeaker {
             case WebSocketVoiceClient::ConnectionState::DISCONNECTED: {
                 ESP_LOGW(TAG, "WebSocket server disconnected - going idle");
                 // Finalize any audio that was playing
-                auto &audio_source_mgr = AudioSourceManager::getInstance();
-                audio_source_mgr.stopVoiceResponse();
+                audioSourceManager.stopVoiceResponse();
                 setState(State::IDLE);
                 break;
             }
 
             case WebSocketVoiceClient::ConnectionState::ERROR: {
                 ESP_LOGW(TAG, "WebSocket server unavailable - using offline mode");
-                auto &audio_source_mgr = AudioSourceManager::getInstance();
-                audio_source_mgr.stopVoiceResponse();
+                audioSourceManager.stopVoiceResponse();
                 setState(State::IDLE);
                 break;
             }

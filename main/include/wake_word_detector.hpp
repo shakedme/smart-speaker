@@ -3,6 +3,7 @@
 #include <memory>
 #include <functional>
 #include <atomic>
+#include "memory_utils.hpp"
 
 extern "C" {
 #include "esp_err.h"
@@ -84,6 +85,7 @@ namespace btspeaker {
         // Task management
         TaskHandle_t processingTaskHandle;
         RingbufHandle_t audioRingBuffer;
+        std::unique_ptr<PSRAMRingBuffer> psramRingBuffer_;
         SemaphoreHandle_t enableMutex;
         std::atomic<bool> taskRunning;
         

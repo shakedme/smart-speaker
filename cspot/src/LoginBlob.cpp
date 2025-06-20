@@ -18,6 +18,10 @@
 
 #include <mbedtls/sha1.h>  //(for generating unique device id)
 
+#ifdef ESP_PLATFORM
+#include "esp_log.h"  // for ESP_LOGI, ESP_LOGE
+#endif
+
 using namespace cspot;
 
 std::string sha1_digest(const std::vector<uint8_t>& message) {
@@ -40,15 +44,30 @@ std::string sha1_digest(const std::vector<uint8_t>& message) {
   return oss.str();  // Return the hex string
 }
 
-LoginBlob::LoginBlob(std::string name) {
+LoginBlob::LoginBlob(const std::string& name) {
+  ESP_LOGI(TAG, "Creating LoginBlob with name: %s", name.c_str());
+  
   std::string mac_string = bell::getMacAddress();
-  CSPOT_LOG(info, "Mac-address : %s", mac_string.c_str());
-  std::vector<uint8_t> mac(mac_string.begin(), mac_string.end());
-  this->deviceId = sha1_digest(mac);
-  this->crypto = std::make_unique<Crypto>();
-  this->name = name;
+  ESP_LOGI(TAG, "Mac-address : %s", mac_string.c_str());
+  
+  // Validate mac_string before using it
+  if (mac_string.empty()) {
+    ESP_LOGI(TAG, "MAC address is empty, using default");
+    mac_string = "00:11:22:33:44:77";
+  }
+  
+  try {
+    std::vector<uint8_t> mac(mac_string.begin(), mac_string.end());
+    this->deviceId = sha1_digest(mac);
+    this->crypto = std::make_unique<Crypto>();
+    this->name = name;
 
-  this->crypto->dhInit();
+    this->crypto->dhInit();
+    ESP_LOGI(TAG, "LoginBlob created successfully");
+  } catch (const std::exception& e) {
+    ESP_LOGI(TAG, "Exception in LoginBlob constructor: %s", e.what());
+    throw;
+  }
 }
 
 std::vector<uint8_t> LoginBlob::decodeBlob(
@@ -168,6 +187,17 @@ void LoginBlob::loadJson(const std::string& json) {
   std::string authDataObject =
       cJSON_GetObjectItem(root, "authData")->valuestring;
   this->authData = crypto->base64Decode(authDataObject);
+  
+  // Load device name and ID if present (for backward compatibility)
+  cJSON* deviceNameItem = cJSON_GetObjectItem(root, "deviceName");
+  if (deviceNameItem && cJSON_IsString(deviceNameItem)) {
+    this->name = deviceNameItem->valuestring;
+  }
+  cJSON* deviceIdItem = cJSON_GetObjectItem(root, "deviceId");
+  if (deviceIdItem && cJSON_IsString(deviceIdItem)) {
+    this->deviceId = deviceIdItem->valuestring;
+  }
+  
   cJSON_Delete(root);
 #else
   auto root = nlohmann::json::parse(json);
@@ -176,6 +206,14 @@ void LoginBlob::loadJson(const std::string& json) {
   std::string authDataObject = root["authData"];
 
   this->authData = crypto->base64Decode(authDataObject);
+  
+  // Load device name and ID if present (for backward compatibility)
+  if (root.contains("deviceName")) {
+    this->name = root["deviceName"];
+  }
+  if (root.contains("deviceId")) {
+    this->deviceId = root["deviceId"];
+  }
 #endif
 }
 
@@ -186,6 +224,8 @@ std::string LoginBlob::toJson() {
                           crypto->base64Encode(authData).c_str());
   cJSON_AddNumberToObject(json_obj, "authType", this->authType);
   cJSON_AddStringToObject(json_obj, "username", this->username.c_str());
+  cJSON_AddStringToObject(json_obj, "deviceName", this->name.c_str());
+  cJSON_AddStringToObject(json_obj, "deviceId", this->deviceId.c_str());
 
   char* str = cJSON_PrintUnformatted(json_obj);
   cJSON_Delete(json_obj);
@@ -198,6 +238,8 @@ std::string LoginBlob::toJson() {
   obj["authData"] = crypto->base64Encode(authData);
   obj["authType"] = this->authType;
   obj["username"] = this->username;
+  obj["deviceName"] = this->name;
+  obj["deviceId"] = this->deviceId;
 
   return obj.dump();
 #endif

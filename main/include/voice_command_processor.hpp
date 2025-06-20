@@ -4,6 +4,7 @@
 #include <functional>
 #include <vector>
 #include <atomic>
+#include "audio_source_manager.hpp"
 
 extern "C" {
 #include "esp_err.h"
@@ -38,7 +39,7 @@ public:
         ERROR
     };
 
-    VoiceCommandProcessor();
+    VoiceCommandProcessor(AudioSourceManager& audioSourceManager);
     ~VoiceCommandProcessor();
     
     // Delete copy operations
@@ -79,7 +80,8 @@ private:
     // Member variables
     std::atomic<State> state;
     SemaphoreHandle_t stateMutex;
-    
+    AudioSourceManager &audioSourceManager;
+
     // Streaming buffer (much smaller than previous implementation)
     std::unique_ptr<uint8_t[]> streamBuffer;
 

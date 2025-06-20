@@ -15,13 +15,13 @@ set(PROJECT_SRCS
         src/voice_command_processor.cpp
         src/wifi_manager.cpp
         src/spotify_pipeline.cpp
-        src/i2s_audio_service.cpp
+        src/audio_pipeline_util.cpp
         src/audio_source_manager.cpp
+        src/adf_audio_sink.cpp
+        src/base_audio_pipeline.cpp
         
         # ESP32-specific cspot files
         "../cspot/esp32/main/EspPlayer.cpp"
-        "../cspot/esp32/main/ESPFile.cpp"
-        "../cspot/esp32/main/ESPStatusLed.cpp"
 )
 
 # Register component with all sources

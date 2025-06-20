@@ -4,7 +4,7 @@
 
 // WebSocket Server Configuration
 #ifndef CONFIG_WEBSOCKET_SERVER_URL
-#define CONFIG_WEBSOCKET_SERVER_URL "ws://a8ca-2a00-a041-e530-c500-5dfb-2883-2eeb-557b.ngrok-free.app/voice"
+#define CONFIG_WEBSOCKET_SERVER_URL "ws://cc60-147-234-68-178.ngrok-free.app/voice"
 #endif
 
 // WebSocket Connection Settings
@@ -24,11 +24,11 @@
 
 // WiFi Configuration (required for WebSocket connection)
 #ifndef CONFIG_WIFI_SSID
-#define CONFIG_WIFI_SSID "Shaked"
+#define CONFIG_WIFI_SSID "nadav"
 #endif
 
 #ifndef CONFIG_WIFI_PASSWORD  
-#define CONFIG_WIFI_PASSWORD "0543512375"
+#define CONFIG_WIFI_PASSWORD "0542402269"
 #endif
 
 // Hardware Pin Configuration - Updated for SPH0645LM4H I2S MEMS microphones

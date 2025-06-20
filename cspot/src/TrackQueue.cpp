@@ -173,8 +173,8 @@ void QueuedTrack::stepParseMetadata(Track* pbTrack, Episode* pbEpisode) {
   const char* countryCode = ctx->session->getCountryCode().c_str();
 
   if (gid.first == SpotifyFileType::TRACK) {
-    CSPOT_LOG(info, "Track name: %s", pbTrack->name);
-    CSPOT_LOG(info, "Track duration: %d", pbTrack->duration);
+    ESP_LOGI("TrackQueue", "Track name: %s", pbTrack->name);
+//    ESP_LOGI("TrackQueue", "Track duration: %d", pbTrack->duration);
 
     // Check if we can play the track, if not, try alternatives
     if (TrackDataUtils::doRestrictionsApply(
@@ -203,8 +203,8 @@ void QueuedTrack::stepParseMetadata(Track* pbTrack, Episode* pbEpisode) {
     }
   } else {
     // Handle episodes
-    CSPOT_LOG(info, "Episode name: %s", pbEpisode->name);
-    CSPOT_LOG(info, "Episode duration: %d", pbEpisode->duration);
+//    ESP_LOGI("TrackQueue", "Episode name: %s", pbEpisode->name);
+//    ESP_LOGI("TrackQueue", "Episode duration: %d", pbEpisode->duration);
 
     // Check if we can play the episode
     if (!TrackDataUtils::doRestrictionsApply(pbEpisode->restriction,
@@ -231,13 +231,13 @@ void QueuedTrack::stepParseMetadata(Track* pbTrack, Episode* pbEpisode) {
     if (fileId.size() == 0 &&
         selectedFiles[x].format == AudioFormat_OGG_VORBIS_96) {
       fileId = pbArrayToVector(selectedFiles[x].file_id);
-      CSPOT_LOG(info, "Falling back to OGG Vorbis 96kbps");
+      ESP_LOGD("TrackQueue", "Falling back to OGG Vorbis 96kbps");
     }
   }
 
   // No viable files found for playback
   if (fileId.size() == 0) {
-    CSPOT_LOG(info, "File not available for playback");
+    ESP_LOGE("TrackQueue", "File not available for playback");
 
     // no alternatives for song
     state = State::FAILED;
@@ -259,14 +259,14 @@ void QueuedTrack::stepLoadAudioFile(
         std::scoped_lock lock(trackListMutex);
 
         if (success) {
-          CSPOT_LOG(info, "Got audio key");
+          ESP_LOGD("TrackQueue", "Got audio key");
           this->audioKey =
               std::vector<uint8_t>(audioKey.begin() + 4, audioKey.end());
 
           state = State::CDN_REQUIRED;
           updateSemaphore->give();
         } else {
-          CSPOT_LOG(error, "Failed to get audio key");
+          ESP_LOGE("TrackQueue", "Failed to get audio key");
           retries++;
           state = State::KEY_REQUIRED;
           if (retries > 10) {
@@ -286,12 +286,12 @@ void QueuedTrack::stepLoadAudioFile(
 
 void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
   if (accessKey.size() == 0) {
-    // Wait for access key
+    ESP_LOGD("TrackQueue", "Waiting for access key...");
     return;
   }
 
   // Request CDN URL
-  CSPOT_LOG(info, "Received access key, fetching CDN URL...");
+  ESP_LOGD("TrackQueue", "Received access key, fetching CDN URL...");
 
   try {
 
@@ -299,12 +299,16 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
         "https://api.spotify.com/v1/storage-resolve/files/audio/interactive/"
         "%s?alt=json",
         bytesToHexString(fileId).c_str());
+    
+    ESP_LOGD("TrackQueue", "Requesting CDN URL from: %s", requestUrl.c_str());
+    
     auto req = bell::HTTPClient::get(
         requestUrl, {bell::HTTPClient::ValueHeader(
                         {"Authorization", "Bearer " + accessKey})});
 
     // Wait for response
     std::string_view result = req->body();
+    ESP_LOGD("TrackQueue", "CDN response received, size: %d", result.size());
 
 #ifdef BELL_ONLY_CJSON
     cJSON* jsonResult = cJSON_Parse(result.data());
@@ -316,12 +320,18 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
     cdnUrl = jsonResult["cdnurl"][0];
 #endif
 
-    // CSPOT_LOG(info, "Received CDN URL, %s", cdnUrl.c_str());
+    ESP_LOGD("TrackQueue", "Successfully obtained CDN URL for track, setting state to READY");
     state = State::READY;
+  } catch (const std::exception& e) {
+    ESP_LOGE("TrackQueue", "Cannot fetch CDN URL: %s", e.what());
+    state = State::FAILED;
   } catch (...) {
-    CSPOT_LOG(error, "Cannot fetch CDN URL");
+    ESP_LOGE("TrackQueue", "Cannot fetch CDN URL: unknown error");
     state = State::FAILED;
   }
+  
+  ESP_LOGD("TrackQueue", "Signaling playableSemaphore (track state: %s)",
+           state == State::READY ? "READY" : "FAILED");
   playableSemaphore->give();
 }
 
@@ -339,7 +349,7 @@ void QueuedTrack::stepLoadMetadata(
     std::scoped_lock lock(trackListMutex);
 
     if (res.parts.size() == 0) {
-      CSPOT_LOG(info, "Invalid Metadata");
+      ESP_LOGE("TrackQueue", "Invalid Metadata");
       // Invalid metadata, cannot proceed
       state = State::FAILED;
       updateSemaphore->give();
@@ -428,7 +438,10 @@ std::shared_ptr<QueuedTrack> TrackQueue::consumeTrack(
     std::shared_ptr<QueuedTrack> prevTrack, int& offset) {
   std::scoped_lock lock(tracksMutex);
 
+  ESP_LOGD("TrackQueue", "consumeTrack called: preloadedTracks.size()=%d", preloadedTracks.size());
+  
   if (!preloadedTracks.size()) {
+    ESP_LOGE("TrackQueue", "No preloaded tracks available");
     offset = -1;
     return nullptr;
   }

@@ -10,12 +10,12 @@ PutStateRequest.callback_url type:FT_POINTER
 PutStateRequest.last_command_sent_by_device_id type:FT_POINTER
 Capabilities.supported_types type:FT_POINTER
 Capabilities.supported_typesEntry type:FT_POINTER
-Cluster.device         max_count:10 fixed_count:false
+Cluster.device         max_count:50 fixed_count:false
 Cluster.DeviceEntry.key type:FT_POINTER
 Cluster.active_device_id type:FT_POINTER
 ProvidedTrack.uri type:FT_POINTER
 ProvidedTrack.uid type:FT_POINTER
-ProvidedTrack.metadata max_count:30, fixed_count:false
+ProvidedTrack.metadata max_count:100, fixed_count:false
 ProvidedTrack.MetadataEntry type:FT_POINTER
 ProvidedTrack.removed type:FT_POINTER
 ProvidedTrack.blocked type:FT_POINTER
@@ -33,7 +33,7 @@ PlayOrigin.device_identifier type:FT_POINTER
 PlayOrigin.feature_classes type:FT_POINTER
 PlayerState.playback_id type:FT_POINTER
 
-ContextPlayerOptions.context_enhancement max_count:2, fixed_count:false
+ContextPlayerOptions.context_enhancement max_count:20, fixed_count:false
 ContextPlayerOptions.ContextEnhancementEntry type:FT_POINTER
 
 Restrictions type:FT_POINTER

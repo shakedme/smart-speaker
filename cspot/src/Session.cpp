@@ -11,7 +11,7 @@
 #include "ApResolve.h"          // for ApResolve, cspot
 #include "AuthChallenges.h"     // for AuthChallenges
 #include "BellLogger.h"         // for AbstractLogger
-#include "Logger.h"             // for CSPOT_LOG
+#include "Logger.h"             // for ESP_LOGI
 #include "LoginBlob.h"          // for LoginBlob
 #include "Packet.h"             // for Packet
 #include "PlainConnection.h"    // for PlainConnection, timeoutCallback
@@ -20,6 +20,7 @@
 #include "NanoPBHelper.h"  // for pbPutString, pbEncode, pbDecode
 #include "pb_decode.h"
 #include "protobuf/authentication.pb.h"
+#include <esp_log.h>
 
 using random_bytes_engine =
     std::independent_bits_engine<std::default_random_engine, CHAR_BIT, uint8_t>;
@@ -40,12 +41,10 @@ void Session::connect(std::unique_ptr<cspot::PlainConnection> connection) {
   auto helloPacket = this->conn->sendPrefixPacket(
       {0x00, 0x04}, this->challenges->prepareClientHello());
   auto apResponse = this->conn->recvPacket();
-  CSPOT_LOG(info, "Received APHello response");
 
   auto solvedHello = this->challenges->solveApHello(helloPacket, apResponse);
 
   conn->sendPrefixPacket({}, solvedHello);
-  CSPOT_LOG(debug, "Received shannon keys");
 
   // Generates the public and priv key
   this->shanConn = std::make_shared<ShannonConnection>();
@@ -62,9 +61,9 @@ void Session::connectWithRandomAp() {
     return this->triggerTimeout();
   };
 
-  auto apAddr = apResolver->fetchFirstApAddress();
+  std::string apAddr = apResolver->fetchFirstApAddress();
 
-  CSPOT_LOG(debug, "Connecting with AP <%s>", apAddr.c_str());
+//  ESP_LOGI("Session", Connecting with AP <%s>", apAddr.c_str());
   conn->connect(apAddr);
 
   this->connect(std::move(conn));
@@ -84,7 +83,7 @@ std::vector<uint8_t> Session::authenticate(std::shared_ptr<LoginBlob> blob) {
   switch (packet.command) {
     case AUTH_SUCCESSFUL_COMMAND: {
       APWelcome welcome;
-      CSPOT_LOG(debug, "Authorization successful");
+      ESP_LOGD("Session", "Authorization successful");
       pbDecode(welcome, APWelcome_fields, packet.data);
       return std::vector<uint8_t>(welcome.reusable_auth_credentials.bytes,
                                   welcome.reusable_auth_credentials.bytes +
@@ -92,11 +91,11 @@ std::vector<uint8_t> Session::authenticate(std::shared_ptr<LoginBlob> blob) {
       break;
     }
     case AUTH_DECLINED_COMMAND: {
-      CSPOT_LOG(error, "Authorization declined");
+      ESP_LOGI("Session", "Authorization declined");
       break;
     }
     default:
-      CSPOT_LOG(error, "Unknown auth fail code %d", packet.command);
+      ESP_LOGI("Session", "Unknown auth fail code %d", packet.command);
   }
 
   return std::vector<uint8_t>(0);

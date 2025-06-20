@@ -5,6 +5,7 @@
 #include "../include/websocket_voice_client.hpp"
 #include "../include/llm_pipeline.hpp"
 #include "../include/voice_config.hpp"
+#include <stdexcept>
 
 extern "C" {
 #include "esp_log.h"
@@ -12,21 +13,16 @@ extern "C" {
 
 namespace btspeaker {
 
-    VoiceAssistantManager::VoiceAssistantManager()
-            : state(State::UNINITIALIZED), stateMutex(nullptr) {
-        ESP_LOGI(TAG, "VoiceAssistantManager created");
-    }
-
-    VoiceAssistantManager::~VoiceAssistantManager() {
-        shutdown();
-    }
-
-    esp_err_t VoiceAssistantManager::init() {
+    VoiceAssistantManager::VoiceAssistantManager(AudioSourceManager& audioSourceManager)
+            :
+            state(State::UNINITIALIZED),
+            stateMutex(nullptr),
+            audioSourceManager(audioSourceManager){
         // Create state mutex
         stateMutex = xSemaphoreCreateMutex();
         if (!stateMutex) {
             ESP_LOGE(TAG, "Failed to create state mutex");
-            return ESP_ERR_NO_MEM;
+            throw std::runtime_error("Failed to create state mutex");
         }
 
         // Initialize WebSocket voice client
@@ -42,22 +38,22 @@ namespace btspeaker {
         esp_err_t ret = websocketClient->init();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize WebSocket client: %s", esp_err_to_name(ret));
-            return ret;
+            throw std::runtime_error("Failed to initialize WebSocket client");
         }
 
         // Attempt to connect to WebSocket server
         ret = websocketClient->connect();
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "Failed to connect to WebSocket server: %s", esp_err_to_name(ret));
-            ESP_LOGW(TAG, "Will operate in offline mode until connection is established");
+            throw std::runtime_error("Failed to connect to WebSocket server");
         }
 
         // Initialize voice command processor
-        voiceCommandProcessor = std::make_unique<VoiceCommandProcessor>();
+        voiceCommandProcessor = std::make_unique<VoiceCommandProcessor>(audioSourceManager);
         ret = voiceCommandProcessor->init(websocketClient.get());  // AudioSourceManager handles audio
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize command processor: %s", esp_err_to_name(ret));
-            return ret;
+            throw std::runtime_error("Failed to initialize command processor");
         }
 
         // Initialize wake word detector
@@ -65,7 +61,7 @@ namespace btspeaker {
         ret = wakeWordDetector->init();
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "Wake word detector initialization failed: %s", esp_err_to_name(ret));
-            ESP_LOGW(TAG, "Continuing without wake word detection");
+            throw std::runtime_error("Failed to initialize wake word detector");
         }
 
         // Initialize microphone manager
@@ -73,7 +69,7 @@ namespace btspeaker {
         ret = microphoneManager->init();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize microphone manager: %s", esp_err_to_name(ret));
-            return ret;
+            throw std::runtime_error("Failed to initialize microphone manager");
         }
 
         microphoneManager->setAudioCallback(
@@ -89,8 +85,11 @@ namespace btspeaker {
         );
 
         setState(State::LISTENING);
-        ESP_LOGI(TAG, "Voice assistant manager initialized successfully");
-        return ESP_OK;
+        ESP_LOGI(TAG, "VoiceAssistantManager initialized successfully");
+    }
+
+    VoiceAssistantManager::~VoiceAssistantManager() {
+        shutdown();
     }
 
     esp_err_t VoiceAssistantManager::start() {
@@ -228,19 +227,19 @@ namespace btspeaker {
                                 ESP_LOGI(TAG, "Wake word detection enabled for listening state");
                             }
                             break;
-                        
+
                         case State::RECORDING_COMMAND:
                         case State::PROCESSING_COMMAND:
                         case State::PLAYING_RESPONSE:
                             // Disable wake word detection during other states to save CPU
                             if (wakeWordDetector->isEnabled()) {
                                 wakeWordDetector->setEnabled(false);
-                                ESP_LOGI(TAG, "Wake word detection disabled during %s state", 
-                                        new_state == State::RECORDING_COMMAND ? "recording" :
-                                        new_state == State::PROCESSING_COMMAND ? "processing" : "playback");
+                                ESP_LOGI(TAG, "Wake word detection disabled during %s state",
+                                         new_state == State::RECORDING_COMMAND ? "recording" :
+                                         new_state == State::PROCESSING_COMMAND ? "processing" : "playback");
                             }
                             break;
-                        
+
                         default:
                             break;
                     }

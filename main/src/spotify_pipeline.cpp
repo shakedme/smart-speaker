@@ -1,23 +1,33 @@
 #include "../include/spotify_pipeline.hpp"
 #include "../include/spotify_config.hpp"
+#include "../include/adf_audio_sink.hpp"
+
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "mdns.h"
 #include "esp_log.h"
 #include "esp_http_server.h"
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "cJSON.h"
 #include <algorithm>
+#include <sstream>
+#include <string>
+#include <cstring>
 
 // cspot includes  
 #include "Utils.h"
 #include "BellUtils.h"
 #include "Logger.h"
 #include "CSpotContext.h"
+#include "MercurySession.h"
+#include "Session.h"
 #include "DeviceStateHandler.h"
 #include "LoginBlob.h"
 #include "WrappedSemaphore.h"
-#include "PCM5102AudioSink.h"
 #include "../../cspot/esp32/main/EspPlayer.h"
+#include "include/memory_utils.hpp"
 
 static const char *TAG = "SpotifyPipeline";
 
@@ -26,43 +36,114 @@ namespace btspeaker {
     SpotifyPipeline::SpotifyPipeline()
             : isPlaying(false),
               isInitialized(false),
-              isRunning(false),
+              isRunning_(false),
               volume(100),
               isAuthenticated(false),
               httpServer(nullptr) {
-        ESP_LOGI(TAG, "SpotifyPipeline created");
-    }
+        ESP_LOGI(TAG, "Initializing Spotify pipeline");
 
-    SpotifyPipeline::~SpotifyPipeline() {
-        stop();
-        ESP_LOGI(TAG, "SpotifyPipeline destroyed");
-    }
+        audioSink = std::make_shared<ADFAudioSink>();
 
-    esp_err_t SpotifyPipeline::initialize() {
-        if (isInitialized) {
-            return ESP_OK;
-        }
+        clearStoredAuth();
 
-        ESP_LOGI(TAG, "Initializing Spotify pipeline with persistent authentication");
-
-        // Try to load existing authentication
-        esp_err_t auth_ret = loadStoredAuth();
-        if (auth_ret == ESP_OK) {
-            ESP_LOGI(TAG, "Loaded stored authentication for user: %s", storedUsername.c_str());
-            isAuthenticated = true;
-        } else {
-            ESP_LOGI(TAG, "No stored authentication found, will need to authenticate");
-        }
-
-        // Initialize audio components
-        esp_err_t ret = initializeAudioComponents();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to initialize audio components: %s", esp_err_to_name(ret));
-            return ret;
+        // No authentication or authentication failed - start Zeroconf discovery
+        if (!isAuthenticated) {
+            ESP_LOGI(TAG, "Starting Zeroconf discovery for initial pairing");
+            esp_err_t ret = startZeroconfDiscovery();
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to start Zeroconf discovery: %s", esp_err_to_name(ret));
+                throw std::runtime_error("Failed to start Zeroconf discovery");
+            }
         }
 
         isInitialized = true;
         ESP_LOGI(TAG, "Spotify pipeline initialized successfully");
+    }
+
+    SpotifyPipeline::~SpotifyPipeline() {
+        stop();
+
+        // Ensure packet handler task is fully cleaned up
+        if (packetHandlerTaskHandle != NULL) {
+            ESP_LOGW(TAG, "Force cleaning up packet handler task in destructor");
+            vTaskDelete(packetHandlerTaskHandle);
+            packetHandlerTaskHandle = NULL;
+        }
+
+        // Clean up any allocated memory
+        if (taskStack) {
+            heap_caps_free(taskStack);
+            taskStack = nullptr;
+        }
+        if (taskBuffer) {
+            heap_caps_free(taskBuffer);
+            taskBuffer = nullptr;
+        }
+
+        ESP_LOGI(TAG, "SpotifyPipeline destroyed");
+    }
+
+        esp_err_t SpotifyPipeline::start() {
+        if (!isInitialized) {
+            ESP_LOGE(TAG, "Not initialized");
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        if (isRunning_) {
+            ESP_LOGW(TAG, "Already running");
+            return ESP_OK;
+        }
+
+        ESP_LOGI(TAG, "Starting Spotify pipeline in dedicated task (like official example)");
+        
+        const size_t stackSizeWords = 8192 * 4;  // 32KB stack
+        taskStack = (StackType_t *) heap_caps_malloc(
+            stackSizeWords * sizeof(StackType_t),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+        );
+        
+        taskBuffer = (StaticTask_t *) heap_caps_malloc(
+            sizeof(StaticTask_t),
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
+        );
+        
+        if (!taskStack || !taskBuffer) {
+            ESP_LOGE(TAG, "Failed to allocate memory for Spotify task");
+            if (taskStack) {
+                heap_caps_free(taskStack);
+                taskStack = nullptr;
+            }
+            if (taskBuffer) {
+                heap_caps_free(taskBuffer);
+                taskBuffer = nullptr;
+            }
+            return ESP_FAIL;
+        }
+        
+        ESP_LOGI(TAG, "Allocated 2MB Spotify task stack in PSRAM: %p, buffer in IRAM: %p", taskStack, taskBuffer);
+        
+        packetHandlerTaskHandle = xTaskCreateStaticPinnedToCore(
+            spotifyMainTask,  // Main Spotify task (like CSpotTask::runTask)
+            "spotify_main",
+            stackSizeWords,   // 2MB stack for entire workflow
+            this,
+            3,                // Priority
+            taskStack,
+            taskBuffer,
+            0                 // Core 0
+        );
+        
+        if (packetHandlerTaskHandle == NULL) {
+            ESP_LOGE(TAG, "Failed to create Spotify main task");
+            heap_caps_free(taskStack);
+            heap_caps_free(taskBuffer);
+            taskStack = nullptr;
+            taskBuffer = nullptr;
+            return ESP_FAIL;
+        }
+
+        isRunning_ = true;
+        ESP_LOGI(TAG, "Spotify main task started");
         return ESP_OK;
     }
 
@@ -97,7 +178,7 @@ namespace btspeaker {
 
         try {
             // Create login blob and load from JSON
-            loginBlob = std::make_shared<cspot::LoginBlob>(SPOTIFY_DEVICE_NAME);
+            loginBlob = std::make_shared<cspot::LoginBlob>(std::string(btspeaker::SPOTIFY_DEVICE_NAME));
             loginBlob->loadJson(std::string(auth_json.data()));
             storedUsername = loginBlob->getUserName();
 
@@ -160,15 +241,11 @@ namespace btspeaker {
     }
 
     esp_err_t SpotifyPipeline::startZeroconfDiscovery() {
-        if (!isInitialized) {
-            return ESP_ERR_INVALID_STATE;
-        }
-
         ESP_LOGI(TAG, "Starting Spotify Connect Zeroconf discovery...");
-        ESP_LOGI(TAG, "Open Spotify app and look \"for Rupert's Revenge\" in Connect devices");
+        ESP_LOGI(TAG, "Open Spotify app and look ESP32_SPEAKER in Connect devices");
 
         // Create fresh login blob for pairing
-        loginBlob = std::make_shared<cspot::LoginBlob>(SPOTIFY_DEVICE_NAME);
+        loginBlob = std::make_shared<cspot::LoginBlob>(std::string(btspeaker::SPOTIFY_DEVICE_NAME));
 
         // Start HTTP server first
         esp_err_t ret = startHttpServer();
@@ -179,6 +256,8 @@ namespace btspeaker {
         }
 
         // Set up mDNS service for Spotify discovery
+        mdns_init();
+        mdns_hostname_set("cspot");
         ret = mdns_service_add(NULL, SPOTIFY_SERVICE_TYPE, SPOTIFY_PROTOCOL, SPOTIFY_CONNECT_PORT, NULL, 0);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to add mDNS service: %s", esp_err_to_name(ret));
@@ -214,7 +293,7 @@ namespace btspeaker {
         config.ctrl_port = SPOTIFY_CONNECT_PORT + 1;
         config.max_uri_handlers = 8;
         config.max_resp_headers = 8;
-        config.stack_size = 8192;
+        config.stack_size = 16384;  // Increased for TLS operations
 
         ESP_LOGI(TAG, "Starting HTTP server on port %d", SPOTIFY_CONNECT_PORT);
 
@@ -243,7 +322,7 @@ namespace btspeaker {
         httpd_uri_t close_uri = {
                 .uri = "/close",
                 .method = HTTP_GET,
-                .handler = spotifyInfoGetHandler, // Reuse the get handler for close
+                .handler = closeHandler,
                 .user_ctx = this
         };
 
@@ -264,7 +343,6 @@ namespace btspeaker {
         }
     }
 
-// Static HTTP handlers
     esp_err_t SpotifyPipeline::spotifyInfoGetHandler(httpd_req_t *req) {
         SpotifyPipeline *pipeline = getInstanceFromRequest(req);
         if (!pipeline || !pipeline->loginBlob) {
@@ -329,23 +407,45 @@ namespace btspeaker {
                 // Parse the form data and load into login blob
                 std::map<std::string, std::string> queryMap;
 
-                // Simple form parsing (for production, use a proper parser)
-                char *token = strtok(content, "&");
-                while (token != nullptr) {
-                    char *eq = strchr(token, '=');
-                    if (eq != nullptr) {
-                        *eq = '\0';
-                        std::string key = token;
-                        std::string value = eq + 1;
-                        queryMap[key] = value;
+                // Use std::string for safer parsing without modifying original buffer
+                std::string content_str(content);
+                size_t start = 0;
+
+                while (start < content_str.length()) {
+                    size_t amp_pos = content_str.find('&', start);
+                    if (amp_pos == std::string::npos) {
+                        amp_pos = content_str.length();
                     }
-                    token = strtok(nullptr, "&");
+
+                    std::string param = content_str.substr(start, amp_pos - start);
+                    size_t eq_pos = param.find('=');
+
+                    if (eq_pos != std::string::npos) {
+                        std::string key = param.substr(0, eq_pos);
+                        std::string value = urlDecode(param.substr(eq_pos + 1));
+                        queryMap[key] = value;
+                        ESP_LOGD(TAG, "Parsed param: %s = %s", key.c_str(), value.c_str());
+                    }
+
+                    start = amp_pos + 1;
                 }
+
+                // Validate critical parameters before processing
+                if (queryMap.find("blob") == queryMap.end() || queryMap.find("clientKey") == queryMap.end()) {
+                    ESP_LOGE(TAG, "Missing critical authentication parameters");
+                    free(content);
+                    httpd_resp_send_500(req);
+                    return ESP_FAIL;
+                }
+
+                ESP_LOGI(TAG, "Authentication parameters validated, loading into LoginBlob...");
 
                 // Load the Zeroconf query into the login blob
                 pipeline->loginBlob->loadZeroconfQuery(queryMap);
 
-                // Send success response to Spotify app
+                ESP_LOGI(TAG, "LoginBlob loaded successfully");
+
+                // Send success response to Spotify app IMMEDIATELY
                 cJSON *response = cJSON_CreateObject();
                 cJSON_AddNumberToObject(response, "status", 101);
                 cJSON_AddNumberToObject(response, "spotifyError", 0);
@@ -359,9 +459,25 @@ namespace btspeaker {
                 cJSON_Delete(response);
                 free(content);
 
-                // Notify the pipeline that authentication is complete
-                ESP_LOGI(TAG, "Authentication data received, processing...");
-                pipeline->onSpotifyConnected(pipeline->loginBlob);
+                ESP_LOGI(TAG, "Authentication data received, deferring processing to separate task...");
+
+                // Validate that the LoginBlob is still valid
+                if (!pipeline->loginBlob || pipeline->loginBlob->authData.empty()) {
+                    ESP_LOGE(TAG, "LoginBlob became invalid during processing");
+                    return ESP_OK; // Response already sent
+                }
+
+                // Defer authentication to a separate task to avoid TLS operations in HTTP server context
+                xTaskCreate([](void *param) {
+                    SpotifyPipeline *pipeline = static_cast<SpotifyPipeline *>(param);
+                    esp_err_t auth_result = pipeline->onSpotifyConnected(pipeline->loginBlob);
+                    if (auth_result != ESP_OK) {
+                        ESP_LOGW(TAG, "Authentication processing failed");
+                    } else {
+                        pipeline->authenticatedCallback();
+                    }
+                    vTaskDelete(NULL);
+                }, "spotify_auth", 16384, pipeline, 5, NULL);
 
                 return ESP_OK;
 
@@ -377,59 +493,17 @@ namespace btspeaker {
         return ESP_FAIL;
     }
 
-    SpotifyPipeline *SpotifyPipeline::getInstanceFromRequest(httpd_req_t *req) {
-        return static_cast<SpotifyPipeline *>(req->user_ctx);
+    esp_err_t SpotifyPipeline::closeHandler(httpd_req_t *req) {
+        ESP_LOGI(TAG, "GET /close request received");
+
+        // Send empty response as per Spotify Connect protocol
+        httpd_resp_send(req, "", 0);
+
+        return ESP_OK;
     }
 
-    esp_err_t SpotifyPipeline::start() {
-        if (!isInitialized) {
-            ESP_LOGE(TAG, "Not initialized");
-            return ESP_ERR_INVALID_STATE;
-        }
-
-        if (isRunning) {
-            ESP_LOGW(TAG, "Already running");
-            return ESP_OK;
-        }
-
-        ESP_LOGI(TAG, "Starting Spotify pipeline");
-
-        // If we have stored authentication, try to use it
-        if (isAuthenticated && loginBlob) {
-            ESP_LOGI(TAG, "Using stored authentication for user: %s", storedUsername.c_str());
-            esp_err_t ret = startAuthentication();
-            if (ret == ESP_OK) {
-                isRunning = true;
-                return ESP_OK;
-            } else {
-                ESP_LOGW(TAG, "Stored authentication failed, clearing and starting discovery");
-                clearStoredAuth();
-            }
-        }
-
-        // No authentication or authentication failed - start Zeroconf discovery
-        if (!isAuthenticated || !loginBlob) {
-            ESP_LOGI(TAG, "Starting Zeroconf discovery for initial pairing");
-            esp_err_t ret = startZeroconfDiscovery();
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to start Zeroconf discovery: %s", esp_err_to_name(ret));
-                return ret;
-            }
-
-            // Wait for authentication via Spotify app
-            ESP_LOGI(TAG, "Waiting for Spotify app pairing...");
-            ESP_LOGI(TAG, "Instructions:");
-            ESP_LOGI(TAG, "1. Open Spotify app on your phone");
-            ESP_LOGI(TAG, "2. Start playing music");
-            ESP_LOGI(TAG, "3. Tap the Connect icon");
-            ESP_LOGI(TAG, "4. Select 'ESP32_SPEAKER' from the list");
-
-            // Set up a task to handle the authentication when it comes
-            isRunning = true;
-            return ESP_OK;
-        }
-
-        return ESP_ERR_INVALID_STATE;
+    SpotifyPipeline *SpotifyPipeline::getInstanceFromRequest(httpd_req_t *req) {
+        return static_cast<SpotifyPipeline *>(req->user_ctx);
     }
 
     esp_err_t SpotifyPipeline::startAuthentication() {
@@ -447,26 +521,28 @@ namespace btspeaker {
                 return ESP_FAIL;
             }
 
-            // Set up device state handler with disconnect callback
-            deviceStateHandler = std::make_shared<cspot::DeviceStateHandler>(context, [this]() {
-                ESP_LOGI(TAG, "Spotify session disconnected");
-                isRunning = false;
-            });
+            ESP_LOGI(TAG, "Connecting to Spotify servers...");
 
-            // Note: EspPlayer will set the critical stateCallback in its constructor
-            // so we don't set it here to avoid override conflicts
+            vTaskDelay(pdMS_TO_TICKS(1000));
 
-            // Start audio streaming now that we have a device handler
-            esp_err_t audio_ret = startAudioStreaming();
-            if (audio_ret != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to start audio streaming: %s", esp_err_to_name(audio_ret));
-                return audio_ret;
+            context->session->connectWithRandomAp();
+            context->config.authData = context->session->authenticate(loginBlob);
+
+            if (context->config.authData.size() == 0) {
+                ESP_LOGE(TAG, "Authentication failed - no auth data received");
+                return ESP_FAIL;
             }
 
-            ESP_LOGI(TAG, "Successfully authenticated with Spotify and started audio streaming");
-            isAuthenticated = true;
-            return ESP_OK;
+            // Create DeviceStateHandler AFTER authentication completes (like official example)
+            deviceStateHandler = std::make_shared<cspot::DeviceStateHandler>(context, [this]() {
+                ESP_LOGI(TAG, "Spotify session disconnected");
+                isRunning_ = false;
+            });
 
+            isAuthenticated = true;
+            ESP_LOGI(TAG, "Successfully authenticated with Spotify servers");
+
+            return ESP_OK;
         } catch (const std::exception &e) {
             ESP_LOGE(TAG, "Authentication failed: %s", e.what());
             return ESP_FAIL;
@@ -479,18 +555,42 @@ namespace btspeaker {
         }
 
         ESP_LOGI(TAG, "Stopping Spotify pipeline");
-        isRunning = false;
+        isRunning_ = false;
         isPlaying = false;
 
-        // Stop audio streaming first
-        stopAudioStreaming();
+        // Wait for packet handler task to finish (if we created one)
+        if (packetHandlerTaskHandle != NULL) {
+            ESP_LOGI(TAG, "Waiting for packet handler task to finish...");
 
-        // Stop HTTP server and mDNS service
-        stopHttpServer();
+            // Give the task some time to exit gracefully
+            vTaskDelay(pdMS_TO_TICKS(500));
+
+            // Check if task is still running and force delete if necessary
+            if (eTaskGetState(packetHandlerTaskHandle) != eDeleted) {
+                ESP_LOGW(TAG, "Force deleting packet handler task");
+                vTaskDelete(packetHandlerTaskHandle);
+            }
+
+            packetHandlerTaskHandle = NULL;
+        } else {
+            ESP_LOGI(TAG, "No separate packet handler task to clean up");
+        }
+
+        // Clean up allocated memory
+        if (taskStack) {
+            heap_caps_free(taskStack);
+            taskStack = nullptr;
+        }
+        if (taskBuffer) {
+            heap_caps_free(taskBuffer);
+            taskBuffer = nullptr;
+        }
 
         if (deviceStateHandler) {
             deviceStateHandler->disconnect();
         }
+        audioSink->stop();
+
         return ESP_OK;
     }
 
@@ -503,18 +603,27 @@ namespace btspeaker {
         if (deviceStateHandler) {
             deviceStateHandler->sendCommand(cspot::DeviceStateHandler::CommandType::PAUSE);
         }
+        audioSink->pause();
         return ESP_OK;
     }
 
     esp_err_t SpotifyPipeline::resume() {
-        if (!isInitialized || isPlaying) {
+        if (!isInitialized) {
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        if (isPlaying) {
             return ESP_OK;
         }
 
         ESP_LOGI(TAG, "Resuming Spotify playback");
+
+        audioSink->resume();
         if (deviceStateHandler) {
             deviceStateHandler->sendCommand(cspot::DeviceStateHandler::CommandType::PLAY);
+            isPlaying = true;
         }
+
         return ESP_OK;
     }
 
@@ -587,62 +696,155 @@ namespace btspeaker {
             return ESP_FAIL;
         }
 
-        ESP_LOGI(TAG, "Spotify app connected! Saving authentication...");
+        ESP_LOGI(TAG, "Spotify app connected! Processing authentication...");
 
         loginBlob = blob;
         storedUsername = blob->getUserName();
 
-        // Save authentication for future use
-        esp_err_t ret = saveAuthBlob();
+//        // Save authentication for future use
+//        esp_err_t ret = saveAuthBlob();
+//        if (ret != ESP_OK) {
+//            ESP_LOGW(TAG, "Failed to save authentication: %s", esp_err_to_name(ret));
+//        }
+
+        // Now actually connect to Spotify servers and authenticate
+        esp_err_t ret = startAuthentication();
         if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to save authentication: %s", esp_err_to_name(ret));
+            ESP_LOGE(TAG, "Failed to start Spotify authentication: %s", esp_err_to_name(ret));
+            return ret;
         }
 
-        ESP_LOGI(TAG, "Spotify authentication successful for user: %s", storedUsername.c_str());
-        isAuthenticated = true;
+        ESP_LOGI(TAG, "Spotify authentication complete for user: %s", storedUsername.c_str());
+
+        // Clean up HTTP server and mDNS after successful authentication
+        stopHttpServer();
+        mdns_free();
+        ESP_LOGI(TAG, "Cleaned up HTTP server and mDNS after authentication");
 
         return ESP_OK;
     }
 
-    esp_err_t SpotifyPipeline::initializeAudioComponents() {
-        ESP_LOGI(TAG, "Initializing audio streaming components");
 
-        // Create PCM5102A audio sink
-        audioSink = std::make_shared<PCM5102AudioSink>();
-        if (!audioSink) {
-            ESP_LOGE(TAG, "Failed to create PCM5102AudioSink");
-            return ESP_ERR_NO_MEM;
+    std::string SpotifyPipeline::urlDecode(const std::string &encoded) {
+        std::string decoded;
+        decoded.reserve(encoded.length());
+
+        for (size_t i = 0; i < encoded.length(); ++i) {
+            if (encoded[i] == '%') {
+                // Handle percent-encoded characters
+                if (i + 2 < encoded.length()) {
+                    std::string hex = encoded.substr(i + 1, 2);
+                    try {
+                        int charValue = std::stoi(hex, nullptr, 16);
+                        decoded += static_cast<char>(charValue);
+                        i += 2; // Skip the two hex digits
+                    } catch (const std::invalid_argument &e) {
+                        // Handle invalid hex sequence, keep the '%' as-is
+                        decoded += '%';
+                        ESP_LOGW(TAG, "Invalid hex sequence in URL decode: %s", hex.c_str());
+                    } catch (const std::out_of_range &e) {
+                        // Handle out of range values, keep the '%' as-is
+                        decoded += '%';
+                        ESP_LOGW(TAG, "Out of range hex value in URL decode: %s", hex.c_str());
+                    }
+                } else {
+                    // Incomplete percent-encoding, keep the '%' as-is
+                    decoded += '%';
+                }
+            } else if (encoded[i] == '+') {
+                // Convert '+' to space
+                decoded += ' ';
+            } else {
+                // Keep other characters as they are
+                decoded += encoded[i];
+            }
         }
-
-        ESP_LOGI(TAG, "PCM5102AudioSink created successfully");
-        return ESP_OK;
+        return decoded;
     }
 
-    esp_err_t SpotifyPipeline::startAudioStreaming() {
-        if (!audioSink || !deviceStateHandler) {
-            ESP_LOGE(TAG, "Audio components not initialized");
-            return ESP_ERR_INVALID_STATE;
+    void SpotifyPipeline::spotifyMainTask(void *parameter) {
+        SpotifyPipeline *pipeline = static_cast<SpotifyPipeline *>(parameter);
+
+        ESP_LOGI(TAG, "Spotify main task started (like official CSpotTask)");
+
+        if (!pipeline) {
+            ESP_LOGE(TAG, "Invalid pipeline parameter in task");
+            vTaskDelete(NULL);
+            return;
         }
 
-        ESP_LOGI(TAG, "Starting audio streaming with EspPlayer");
+        try {
+            // Wait for authentication to complete
+            while (!pipeline->isAuthenticated && pipeline->isRunning()) {
+                ESP_LOGD(TAG, "Waiting for authentication to complete...");
+                vTaskDelay(pdMS_TO_TICKS(500));
+            }
 
-        // Create EspPlayer to handle audio streaming from cspot to PCM5102A
-        espPlayer = std::make_unique<EspPlayer>(audioSink, deviceStateHandler);
-        if (!espPlayer) {
-            ESP_LOGE(TAG, "Failed to create EspPlayer");
-            return ESP_ERR_NO_MEM;
+            if (!pipeline->isAuthenticated || !pipeline->isRunning()) {
+                ESP_LOGW(TAG, "Authentication not completed or pipeline stopped");
+                vTaskDelete(NULL);
+                return;
+            }
+
+            // Now do the authenticated workflow (like official example)
+            ESP_LOGI(TAG, "Authentication complete, starting Spotify session");
+
+            // Start session task AFTER authentication (like official example)
+            pipeline->context->session->startTask();
+
+            // Start audio sink
+            ESP_LOGI(TAG, "Starting audio sink...");
+            pipeline->audioSink->start();
+            ESP_LOGI(TAG, "Audio sink started successfully");
+            
+            // Create EspPlayer AFTER session task starts (like official example)
+            ESP_LOGI(TAG, "Creating EspPlayer...");
+            pipeline->espPlayer = std::make_unique<EspPlayer>(pipeline->audioSink, pipeline->deviceStateHandler);
+            ESP_LOGI(TAG, "EspPlayer created successfully");
+
+            MemoryUtils::logMemoryStats("SpotifyPipeline::mainTask");
+            
+            ESP_LOGI(TAG, "Starting packet handling loop");
+
+            // Main packet handling loop (like official example)
+            while (pipeline->isRunning()) {
+                if (pipeline->context && pipeline->context->session) {
+                    try {
+                        pipeline->context->session->handlePacket();
+                    } catch (const std::exception &e) {
+                        ESP_LOGE(TAG, "Exception processing packet: %s", e.what());
+                        // Check if this is a critical error that should stop the task
+                        std::string error_msg = e.what();
+                        if (error_msg.find("Connection failed") != std::string::npos ||
+                            error_msg.find("SSL handshake failed") != std::string::npos ||
+                            error_msg.find("network") != std::string::npos) {
+                            ESP_LOGE(TAG, "Critical network error detected, restarting session...");
+                            vTaskDelay(pdMS_TO_TICKS(5000)); // Wait 5 seconds before retry
+                        } else {
+                            ESP_LOGE(TAG, "Non-critical error, continuing...");
+                            vTaskDelay(pdMS_TO_TICKS(100));
+                        }
+                    } catch (...) {
+                        ESP_LOGE(TAG, "Unknown exception processing packet");
+                        ESP_LOGE(TAG, "Continuing with next packet...");
+                        vTaskDelay(pdMS_TO_TICKS(100));
+                    }
+                } else {
+                    ESP_LOGW(TAG, "Context or session not available, waiting...");
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                }
+            }
+
+        } catch (const std::exception &e) {
+            ESP_LOGE(TAG, "Exception in Spotify main task: %s", e.what());
+        } catch (...) {
+            ESP_LOGE(TAG, "Unknown exception in Spotify main task");
         }
 
-        ESP_LOGI(TAG, "Audio streaming started successfully");
-        return ESP_OK;
+        ESP_LOGI(TAG, "Spotify main task exiting");
+        pipeline->isRunning_ = false;
+        vTaskDelete(NULL);
     }
 
-    esp_err_t SpotifyPipeline::stopAudioStreaming() {
-        if (espPlayer) {
-            ESP_LOGI(TAG, "Stopping audio streaming");
-            espPlayer.reset();
-        }
-        return ESP_OK;
-    }
 
-} // namespace btspeaker 
+} // namespace btspeaker

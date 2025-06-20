@@ -32,8 +32,6 @@ namespace btspeaker {
 
         WiFiManager &operator=(const WiFiManager &) = delete;
 
-        esp_err_t init();
-
         esp_err_t connect(const std::string &ssid, const std::string &password);
 
         esp_err_t disconnect();
@@ -44,8 +42,8 @@ namespace btspeaker {
 
     private:
         static constexpr const char *TAG = "WIFI_MGR";
-        static constexpr int WIFI_CONNECTED_BIT = BIT0;
-        static constexpr int WIFI_FAIL_BIT = BIT1;
+        static constexpr int WIFI_MGR_CONNECTED_BIT = BIT0;
+        static constexpr int WIFI_MGR_FAIL_BIT = BIT1;
         static constexpr int MAX_RETRY = 5;
 
         static void wifiEventHandler(void *arg, esp_event_base_t eventBase,

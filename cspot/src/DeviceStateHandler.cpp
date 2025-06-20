@@ -42,24 +42,63 @@ char* strndup(const char* str, size_t n) {
 static DeviceStateHandler* handler;
 
 void DeviceStateHandler::reloadTrackList(void* data) {
+  ESP_LOGI("DST", "reloadTrackList called");
+  ESP_LOGI("DST", "Memory at start of reloadTrackList: %d", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  
   if (data == NULL) {
+    ESP_LOGI("DST", "reloadTrackList: data is NULL, checking reloadPreloadedTracks=%d", handler->reloadPreloadedTracks);
     if (handler->reloadPreloadedTracks) {
+      ESP_LOGI("DST", "Starting TrackPlayer and setting up first track");
       handler->needsToBeSkipped = true;
       while (!handler->trackQueue->playableSemaphore->twait(1)) {};
-      handler->trackPlayer->start();
+      ESP_LOGI("DST", "Starting TrackPlayer task...");
+      
+      bool trackPlayerStarted = false;
+      try {
+        handler->trackPlayer->start();
+        trackPlayerStarted = true;
+        ESP_LOGI("DST", "TrackPlayer started successfully");
+      } catch (const std::exception& e) {
+        ESP_LOGE("DST", "Exception starting TrackPlayer: %s", e.what());
+      } catch (...) {
+        ESP_LOGE("DST", "Unknown exception starting TrackPlayer");
+      }
+      
+      // If TrackPlayer failed to start, clean up and abort
+      if (!trackPlayerStarted) {
+        ESP_LOGE("DST", "TrackPlayer failed to start, cleaning up and aborting reloadTrackList");
+        handler->reloadPreloadedTracks = false;
+        handler->trackQueue->preloadedTracks.clear();
+        ESP_LOGI("DST", "Memory after cleanup: %d", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        return;
+      }
+      
+      ESP_LOGI("DST", "Resetting TrackPlayer state...");
       handler->trackPlayer->resetState();
       handler->reloadPreloadedTracks = false;
+      ESP_LOGI("DST", "Sending PLAYBACK_START command");
       handler->sendCommand(CommandType::PLAYBACK_START);
       handler->device.player_state.track = handler->currentTracks[0];
+      ESP_LOGI("DST", "TrackPlayer setup complete");
+    } else {
+      ESP_LOGI("DST", "reloadPreloadedTracks is false, skipping TrackPlayer start");
     }
+    
+    ESP_LOGI("DST", "Memory before QueuedTrack creation: %d", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    
     if (!handler->offset) {
-      if (handler->trackQueue->preloadedTracks.size())
+      ESP_LOGI("DST", "Adding first track to preloadedTracks (offset=0)");
+      if (handler->trackQueue->preloadedTracks.size()) {
+        ESP_LOGI("DST", "Clearing existing %d preloaded tracks", handler->trackQueue->preloadedTracks.size());
         handler->trackQueue->preloadedTracks.clear();
+      }
       handler->trackQueue->preloadedTracks.push_back(
           std::make_shared<cspot::QueuedTrack>(
               handler->currentTracks[handler->offset], handler->ctx,
               handler->trackQueue->playableSemaphore,
               handler->offsetFromStartInMillis));
+      ESP_LOGI("DST", "Added first track: %s", handler->currentTracks[handler->offset].uri);
+      ESP_LOGI("DST", "Memory after first QueuedTrack: %d", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       handler->device.player_state.track =
           handler->currentTracks[handler->offset];
       handler->offsetFromStartInMillis = 0;
@@ -72,6 +111,7 @@ void DeviceStateHandler::reloadTrackList(void* data) {
               handler->trackQueue->playableSemaphore,
               handler->offsetFromStartInMillis));
       handler->offsetFromStartInMillis = 0;
+      ESP_LOGI("DST", "Memory after backup QueuedTrack: %d", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     }
     if (handler->currentTracks.size() >
         handler->trackQueue->preloadedTracks.size() + handler->offset) {
@@ -85,6 +125,8 @@ void DeviceStateHandler::reloadTrackList(void* data) {
                     [handler->offset +
                      handler->trackQueue->preloadedTracks.size() - 1],
                 handler->ctx, handler->trackQueue->playableSemaphore));
+        ESP_LOGI("DST", "Memory after additional QueuedTrack #%d: %d", 
+                 handler->trackQueue->preloadedTracks.size(), heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       }
     }
     if (handler->playerStateChanged) {
@@ -93,6 +135,9 @@ void DeviceStateHandler::reloadTrackList(void* data) {
       handler->playerStateChanged = false;
     }
   }
+  
+  ESP_LOGI("DST", "Memory at end of reloadTrackList: %d", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  
   if (strcmp(handler->currentTracks[handler->offset - 1].uri,
              "spotify:delimiter") == 0 &&
       handler->device.player_state.is_playing &&
@@ -117,7 +162,7 @@ void DeviceStateHandler::reloadTrackList(void* data) {
     return;
   }
   handler->resolvingContext.store(false);
-  //CSPOT_LOG(info,"heap_memory_check-safe = %i",heap_caps_check_integrity_all(true));
+  //ESP_LOGI("DST",heap_memory_check-safe = %i",heap_caps_check_integrity_all(true));
 }
 DeviceStateHandler::DeviceStateHandler(std::shared_ptr<cspot::Context> ctx,
                                        std::function<void()> onClose) {
@@ -130,7 +175,7 @@ DeviceStateHandler::DeviceStateHandler(std::shared_ptr<cspot::Context> ctx,
 
   auto onTrackEnd = [this](bool loaded) {
     if (!loaded) {}
-    CSPOT_LOG(debug, "Ended track");
+    ESP_LOGI("DST", "Ended track");
     if (needsToBeSkipped) {
       if (this->device.player_state.options.repeating_track)
         this->trackQueue->preloadedTracks[0]->requestedPosition = 0;
@@ -167,7 +212,7 @@ DeviceStateHandler::DeviceStateHandler(std::shared_ptr<cspot::Context> ctx,
   this->trackPlayer = std::make_shared<TrackPlayer>(
       ctx, trackQueue, onTrackEnd, onTrackChanged,
       &device.player_state.options.repeating_track);
-  CSPOT_LOG(info, "Started player");
+  ESP_LOGI("DST", "Started player");
 
   auto connectStateSubscription = [this](MercurySession::Response res) {
     if (res.fail || !res.parts.size())
@@ -192,13 +237,13 @@ DeviceStateHandler::DeviceStateHandler(std::shared_ptr<cspot::Context> ctx,
         putPlayerState();
       }
     } else
-      CSPOT_LOG(debug, "Unknown connect_state, uri : %s",
+      ESP_LOGI("DST", "Unknown connect_state, uri : %s",
                 res.mercuryHeader.uri);
   };
 
   this->ctx->session->addSubscriptionListener("hm://connect-state/",
                                               connectStateSubscription);
-  CSPOT_LOG(info, "Added connect-state subscription");
+  ESP_LOGI("DST", "Added connect-state subscription");
 
   // the device connection status gets reported trough "hm://social-connect",if active
   auto socialConnectSubscription = [this](MercurySession::Response res) {
@@ -229,7 +274,7 @@ DeviceStateHandler::DeviceStateHandler(std::shared_ptr<cspot::Context> ctx,
         device.player_state.restrictions = Restrictions_init_zero;
         device.player_state.has_restrictions = false;
         this->putDeviceState(PutStateReason::PutStateReason_BECAME_INACTIVE);
-        CSPOT_LOG(debug, "Device changed");
+        ESP_LOGI("DST", "Device changed");
         sendCommand(CommandType::DISC);
 #ifndef CONFIG_CSPOT_STAY_CONNECTED_ON_TRANSFER
         this->disconnect();
@@ -240,10 +285,10 @@ DeviceStateHandler::DeviceStateHandler(std::shared_ptr<cspot::Context> ctx,
 
   this->ctx->session->addSubscriptionListener("social-connect",
                                               socialConnectSubscription);
-  CSPOT_LOG(info, "Added social-connect supscription");
+  ESP_LOGI("DST", "Added social-connect supscription");
 
   ctx->session->setConnectedHandler([this]() {
-    CSPOT_LOG(info, "Registered new device");
+    ESP_LOGI("DST", "Registered new device");
     this->putDeviceState(
         PutStateReason_SPIRC_HELLO);  // : PutStateReason::PutStateReason_NEW_DEVICE);
     // Assign country code
@@ -553,7 +598,7 @@ void DeviceStateHandler::disconnect() {
     device.player_state.restrictions = Restrictions_init_zero;
     device.player_state.has_restrictions = false;
     this->putDeviceState(PutStateReason::PutStateReason_BECAME_INACTIVE);
-    CSPOT_LOG(debug, "Device changed");
+    ESP_LOGI("DST", "Device changed");
     sendCommand(CommandType::DISC);
   }
   this->trackQueue->preloadedTracks.clear();
@@ -613,7 +658,7 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t>& data) {
   try {
     jsonResult = nlohmann::json::parse(data);
   } catch (const nlohmann::json::parse_error&) {
-    CSPOT_LOG(error, "Failed to parse command");
+    ESP_LOGE("DST", "Failed to parse command");
     return;  // Parsing failed
   }
   last_message_id = jsonResult.value("message_id", last_message_id);
@@ -622,7 +667,7 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t>& data) {
   if (command != jsonResult.end()) {
     if (command->find("endpoint") == command->end())
       return;
-    CSPOT_LOG(debug, "Parsing new command, endpoint : %s",
+    ESP_LOGI("DST", "Parsing new command, endpoint : %s",
               command->at("endpoint").get<std::string>().c_str());
 
     auto options = command->find("options");
@@ -945,7 +990,7 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t>& data) {
         offset = 0;
         this->playerContext->resolveTracklist(metadata_map, reloadTrackList,
                                               true, true);
-        CSPOT_LOG(info, "Tracklist reloaded");
+        ESP_LOGI("DST", "Tracklist reloaded");
       } else if (command->at("endpoint") == "pause") {
         device.player_state.is_paused = true;
         device.player_state.has_is_paused = true;
@@ -1274,7 +1319,7 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t>& data) {
                             : this->device.player_state.options
                                   .repeating_track));
       } else
-        CSPOT_LOG(error, "Unknown command: %s",
+        ESP_LOGI("DST", "Unknown command: %s",
                   &command->at("endpoint").get<std::string>()[0]);
       return;
     }

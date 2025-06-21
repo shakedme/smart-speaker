@@ -166,7 +166,6 @@ void EspPlayer::runTask() {
 void EspPlayer::disconnect() {
     ESP_LOGI("EspPlayer", "EspPlayer disconnecting");
     isRunning = false;
-
     // Clean up any remaining tracks
     std::scoped_lock lock(trackMutex);
     tracks.clear();

@@ -4,6 +4,7 @@
 #include "audio_pipeline_util.hpp"
 #include "base_audio_pipeline.hpp"
 #include <cstring>
+#include <esp_avrc_api.h>
 
 extern "C" {
 #include "esp_err.h"
@@ -14,13 +15,22 @@ extern "C" {
 
 namespace btspeaker {
 
+    using ConnectedCallback = std::function<void()>;
+
     class BluetoothPipeline : public BaseAudioPipeline {
     public:
         BluetoothPipeline();
 
         ~BluetoothPipeline() override = default;
 
+        static void bt_app_avrc_ct_cb(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *p_param);
+
+        void setConnectedCallback(ConnectedCallback callback) {
+            this->connectedCallback = std::move(callback);
+        }
+
         void setupPipeline() override;
+
         void cleanupPipeline() override;
 
     private:
@@ -29,6 +39,9 @@ namespace btspeaker {
         static constexpr const int CHANNELS = 2;
         static constexpr const int BITS_PER_SAMPLE = 16;
         bool btServiceStarted = false;
+        ConnectedCallback connectedCallback;
+        static BluetoothPipeline* instance;
+
     };
 
 } // namespace btspeaker 

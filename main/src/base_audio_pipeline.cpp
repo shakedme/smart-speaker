@@ -53,6 +53,7 @@ namespace btspeaker {
                 ESP_LOGE(TAG, "Failed to stop pipeline: %s", esp_err_to_name(ret));
             } else {
                 audio_pipeline_wait_for_stop(audioPipeline->pipeline.get());
+                running = false;
                 ESP_LOGI(TAG, "Pipeline stopped");
             }
         }

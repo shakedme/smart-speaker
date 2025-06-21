@@ -33,31 +33,26 @@ namespace btspeaker {
             return;
         }
 
-        // pointer into the buffer
+
         size_t offset = 0;
         const size_t chunkSize = 1024;
-
-        // get the raw_stream handle once
+nce
         auto raw = audioPipeline->i2SStreamReader.get();
         while (offset < bytes) {
-            // determine how much we're going to write this iteration
             size_t toWrite = std::min(chunkSize, bytes - offset);
 
-            // check free space in ADF ringbuf
+in ADF ringbuf
             size_t free_bytes = rb_bytes_available(audio_element_get_output_ringbuf(raw));
             if (free_bytes < toWrite) {
-//                ESP_LOGW(TAG, "[RAW STREAM] Not enough space to write %zu bytes! Free: %zu",
-//                         toWrite, free_bytes);
-                // wait a bit for the pipeline to drain
                 BELL_SLEEP_MS(5);
                 continue;
             }
 
-            // perform the write
+
             int written = raw_stream_write(raw, (char *) (buffer + offset), toWrite);
             if (written < 0) {
                 ESP_LOGE(TAG, "[RAW STREAM] Error writing to pipeline: %d", written);
-                break;  // bail out on error
+                break; 
             }
             if ((size_t) written != toWrite) {
                 ESP_LOGW(TAG, "[RAW STREAM] Partial write: %d/%zu bytes", written, toWrite);
@@ -122,7 +117,7 @@ namespace btspeaker {
             audio_pipeline_wait_for_stop(audioPipeline->pipeline.get());
             pipelineRunning_ = false;
             isPlaying_.store(false);
-            ESP_LOGI(TAG, "ADF audio pipeline stopped");
+            ESP_LOGI(TAG, "Spotify (ADFSink) audio pipeline stopped");
         }
     }
 

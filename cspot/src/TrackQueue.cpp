@@ -371,7 +371,7 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
     retries++;
     
     // Record retry time for exponential backoff
-    lastRetryTime = bell::Utils::getSteadyTime();
+    lastRetryTime = esp_log_timestamp();
     
     // Exponential backoff: 1s, 2s, 4s, 8s, 16s
     int backoffMs = 1000 * (1 << (retries - 1));
@@ -388,7 +388,7 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
     retries++;
     
     // Record retry time for exponential backoff
-    lastRetryTime = bell::Utils::getSteadyTime();
+    lastRetryTime = esp_log_timestamp();
     
     // Exponential backoff for unknown errors too
     int backoffMs = 1000 * (1 << (retries - 1));
@@ -542,7 +542,7 @@ bool TrackQueue::processTrack(std::shared_ptr<QueuedTrack> track) {
     case QueuedTrack::State::CDN_REQUIRED: {
       // Check if we need to wait for exponential backoff
       if (track->retries > 0 && track->lastRetryTime > 0) {
-        uint64_t currentTime = bell::Utils::getSteadyTime();
+        uint64_t currentTime = esp_log_timestamp();
         uint64_t timeSinceLastRetry = currentTime - track->lastRetryTime;
         
         // Calculate required backoff time: 1s, 2s, 4s, 8s, 16s

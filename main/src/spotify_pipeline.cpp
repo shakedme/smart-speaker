@@ -62,28 +62,10 @@ namespace btspeaker {
 
     SpotifyPipeline::~SpotifyPipeline() {
         stop();
-
-        // Ensure packet handler task is fully cleaned up
-        if (packetHandlerTaskHandle != NULL) {
-            ESP_LOGW(TAG, "Force cleaning up packet handler task in destructor");
-            vTaskDelete(packetHandlerTaskHandle);
-            packetHandlerTaskHandle = NULL;
-        }
-
-        // Clean up any allocated memory
-        if (taskStack) {
-            heap_caps_free(taskStack);
-            taskStack = nullptr;
-        }
-        if (taskBuffer) {
-            heap_caps_free(taskBuffer);
-            taskBuffer = nullptr;
-        }
-
         ESP_LOGI(TAG, "SpotifyPipeline destroyed");
     }
 
-        esp_err_t SpotifyPipeline::start() {
+    esp_err_t SpotifyPipeline::start() {
         if (!isInitialized) {
             ESP_LOGE(TAG, "Not initialized");
             return ESP_ERR_INVALID_STATE;
@@ -95,18 +77,18 @@ namespace btspeaker {
         }
 
         ESP_LOGI(TAG, "Starting Spotify pipeline in dedicated task (like official example)");
-        
+
         const size_t stackSizeWords = 8192 * 4;  // 32KB stack
         taskStack = (StackType_t *) heap_caps_malloc(
-            stackSizeWords * sizeof(StackType_t),
-            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+                stackSizeWords * sizeof(StackType_t),
+                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
         );
-        
+
         taskBuffer = (StaticTask_t *) heap_caps_malloc(
-            sizeof(StaticTask_t),
-            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
+                sizeof(StaticTask_t),
+                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
         );
-        
+
         if (!taskStack || !taskBuffer) {
             ESP_LOGE(TAG, "Failed to allocate memory for Spotify task");
             if (taskStack) {
@@ -119,20 +101,18 @@ namespace btspeaker {
             }
             return ESP_FAIL;
         }
-        
-        ESP_LOGI(TAG, "Allocated 2MB Spotify task stack in PSRAM: %p, buffer in IRAM: %p", taskStack, taskBuffer);
-        
+
         packetHandlerTaskHandle = xTaskCreateStaticPinnedToCore(
-            spotifyMainTask,  // Main Spotify task (like CSpotTask::runTask)
-            "spotify_main",
-            stackSizeWords,   // 2MB stack for entire workflow
-            this,
-            3,                // Priority
-            taskStack,
-            taskBuffer,
-            0                 // Core 0
+                spotifyMainTask,
+                "spotify_main",
+                stackSizeWords,
+                this,
+                3,
+                taskStack,
+                taskBuffer,
+                0                 // Core 0
         );
-        
+
         if (packetHandlerTaskHandle == NULL) {
             ESP_LOGE(TAG, "Failed to create Spotify main task");
             heap_caps_free(taskStack);
@@ -558,25 +538,11 @@ namespace btspeaker {
         isRunning_ = false;
         isPlaying = false;
 
-        // Wait for packet handler task to finish (if we created one)
         if (packetHandlerTaskHandle != NULL) {
-            ESP_LOGI(TAG, "Waiting for packet handler task to finish...");
-
-            // Give the task some time to exit gracefully
-            vTaskDelay(pdMS_TO_TICKS(500));
-
-            // Check if task is still running and force delete if necessary
-            if (eTaskGetState(packetHandlerTaskHandle) != eDeleted) {
-                ESP_LOGW(TAG, "Force deleting packet handler task");
-                vTaskDelete(packetHandlerTaskHandle);
-            }
-
+            vTaskDelete(packetHandlerTaskHandle);
             packetHandlerTaskHandle = NULL;
-        } else {
-            ESP_LOGI(TAG, "No separate packet handler task to clean up");
         }
 
-        // Clean up allocated memory
         if (taskStack) {
             heap_caps_free(taskStack);
             taskStack = nullptr;
@@ -586,9 +552,15 @@ namespace btspeaker {
             taskBuffer = nullptr;
         }
 
+        audioSink->pause();
+
         if (deviceStateHandler) {
             deviceStateHandler->disconnect();
         }
+        if (espPlayer) {
+            espPlayer->disconnect();
+        }
+
         audioSink->stop();
 
         return ESP_OK;
@@ -689,7 +661,6 @@ namespace btspeaker {
         }
     }
 
-// This is called when the Spotify app connects to our device via Zeroconf
     esp_err_t SpotifyPipeline::onSpotifyConnected(const std::shared_ptr<cspot::LoginBlob> &blob) {
         if (!blob) {
             ESP_LOGE(TAG, "Invalid login blob received");
@@ -723,7 +694,6 @@ namespace btspeaker {
 
         return ESP_OK;
     }
-
 
     std::string SpotifyPipeline::urlDecode(const std::string &encoded) {
         std::string decoded;
@@ -796,14 +766,14 @@ namespace btspeaker {
             ESP_LOGI(TAG, "Starting audio sink...");
             pipeline->audioSink->start();
             ESP_LOGI(TAG, "Audio sink started successfully");
-            
+
             // Create EspPlayer AFTER session task starts (like official example)
             ESP_LOGI(TAG, "Creating EspPlayer...");
             pipeline->espPlayer = std::make_unique<EspPlayer>(pipeline->audioSink, pipeline->deviceStateHandler);
             ESP_LOGI(TAG, "EspPlayer created successfully");
 
             MemoryUtils::logMemoryStats("SpotifyPipeline::mainTask");
-            
+
             ESP_LOGI(TAG, "Starting packet handling loop");
 
             // Main packet handling loop (like official example)

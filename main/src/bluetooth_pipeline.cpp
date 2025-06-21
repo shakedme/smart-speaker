@@ -12,7 +12,32 @@ extern "C" {
 
 namespace btspeaker {
 
-    BluetoothPipeline::BluetoothPipeline() : BaseAudioPipeline(TAG) {}
+    BluetoothPipeline *BluetoothPipeline::instance = nullptr;
+
+    BluetoothPipeline::BluetoothPipeline() : BaseAudioPipeline(TAG) {
+        instance = this;
+    }
+
+    void BluetoothPipeline::bt_app_avrc_ct_cb(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *p_param) {
+        esp_avrc_ct_cb_param_t *rc = p_param;
+        auto *self = instance;
+        switch (event) {
+            case ESP_AVRC_CT_CONNECTION_STATE_EVT: {
+                if (rc->conn_stat.connected) {
+                    ESP_LOGI("BluetoothService", "Bluetooth connected - available mem: %d bytes",
+                             heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                    if (self->connectedCallback) {
+                        self->connectedCallback();
+                    }
+                } else {
+                    ESP_LOGI("BluetoothService", "Bluetooth disconnected");
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
 
     void BluetoothPipeline::setupPipeline() {
         ESP_LOGI(TAG, "Setting up BT pipeline");
@@ -21,7 +46,9 @@ namespace btspeaker {
                 .device_name = "ESP32_SPEAKER",
                 .remote_name = nullptr,
                 .mode = BLUETOOTH_A2DP_SINK,
-                .user_callback = {}
+                .user_callback = {
+                        .user_avrc_ct_cb = bt_app_avrc_ct_cb,
+                }
         };
         esp_err_t ret = bluetooth_service_start(&btCfg);
         if (ret != ESP_OK) {
@@ -55,5 +82,6 @@ namespace btspeaker {
 
         ESP_LOGI(TAG, "Bluetooth pipeline cleanup complete");
     }
+
 
 } // namespace btspeaker 

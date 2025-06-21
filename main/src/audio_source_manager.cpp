@@ -13,24 +13,17 @@ namespace btspeaker {
             isInitialized(false) {
         ESP_LOGI(TAG, "Initializing AudioSourceManager");
 
-        // Initialize Bluetooth pipeline
-        ESP_LOGI(TAG, "pre BT: Available internal memory: %d",
-                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         btPipeline = std::make_unique<BluetoothPipeline>();
-        ESP_LOGI(TAG, "BT INIT: Available internal memory: %d",
-                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         btPipeline->setupPipeline();
-        ESP_LOGI(TAG, "BT PIPELINE INIT: Available internal memory: %d",
-                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        btPipeline->setConnectedCallback([this]() {
+            ESP_LOGI(TAG, "Bluetooth connected");
+            this->switchToSource(AudioSource::BLUETOOTH);
+        });
 
         if (wifiManager.isConnected()) {
             spotifyPipeline = std::make_unique<SpotifyPipeline>();
-            ESP_LOGI(TAG, "SPOTIFY INIT: Available internal memory: %d",
-                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
             spotifyPipeline->setAuthenticatedCallback([this]() {
                 this->switchToSource(AudioSource::SPOTIFY);
-                ESP_LOGI(TAG, "SPOTIFY POST AUTH: Available internal memory: %d",
-                         heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
             });
 //            ESP_LOGI(TAG, "LLM PIPELINE PRE INIT: Available internal memory: %d",
 //                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));

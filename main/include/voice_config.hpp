@@ -4,7 +4,7 @@
 
 // WebSocket Server Configuration
 #ifndef CONFIG_WEBSOCKET_SERVER_URL
-#define CONFIG_WEBSOCKET_SERVER_URL "ws://cc60-147-234-68-178.ngrok-free.app/voice"
+#define CONFIG_WEBSOCKET_SERVER_URL "wss://e7f4-147-234-68-178.ngrok-free.app/voice"
 #endif
 
 // WebSocket Connection Settings

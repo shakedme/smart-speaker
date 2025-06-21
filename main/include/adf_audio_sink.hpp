@@ -37,11 +37,19 @@ namespace btspeaker {
 
         void start();
 
-        void resume();
+        void resume() override;
 
-        void pause();
+        void pause() override;
 
         void stop();
+
+        void flush() override;
+
+        bool isPlaying() override {
+            return isPlaying_.load();
+        }
+
+        size_t getBufferFillLevel() override;
 
     private:
         static constexpr const char *TAG = "ADF_AUDIO_SINK";
@@ -51,6 +59,8 @@ namespace btspeaker {
         // Pipeline state
         std::atomic<bool> pipelineRunning_;
         std::atomic<bool> initialized_;
+        std::atomic<bool> isPlaying_ = false;
+
     };
 
 } // namespace btspeaker

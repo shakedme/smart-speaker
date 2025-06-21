@@ -61,6 +61,7 @@ class QueuedTrack {
   AudioFormat audioFormat;
   bool loading = false;
   uint8_t retries = 0;
+  uint64_t lastRetryTime = 0; // Timestamp of last retry attempt (in milliseconds)
 
   // PB data
   Track pbTrack = Track_init_zero;

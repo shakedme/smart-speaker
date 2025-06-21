@@ -87,7 +87,6 @@ namespace btspeaker {
             return ESP_ERR_INVALID_STATE;
         }
 
-        ESP_LOGI(TAG, "Feeding %zu bytes of stereo audio data to ring buffer", data_length);
         BaseType_t result = xRingbufferSend(audioRingBuffer, stereo_data, data_length, 0);
         if (result != pdTRUE) {
             ESP_LOGD(TAG, "Ring buffer full, dropping audio data");

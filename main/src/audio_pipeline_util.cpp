@@ -130,13 +130,13 @@ namespace btspeaker {
 
         switch (source) {
             case AudioSource::BLUETOOTH:
-                taskPriority = 23; // Lower priority for Bluetooth
+                taskPriority = 25; // Lower priority for Bluetooth
                 break;
             case AudioSource::SPOTIFY:
-                taskPriority = 24; // Lower priority for Spotify
+                taskPriority = 26; // Lower priority for Spotify
                 break;
             case AudioSource::VOICE_RESPONSE:
-                taskPriority = 25; // Higher priority for voice
+                taskPriority = 27; // Higher priority for voice
                 break;
             default:
                 ESP_LOGE(TAG, "Unknown audio source %d", static_cast<int>(source));
@@ -150,8 +150,8 @@ namespace btspeaker {
                 .chan_cfg = {
                         .id = static_cast<i2s_port_t>(I2S_PORT),
                         .role = I2S_ROLE_MASTER,
-                        .dma_desc_num = 4,
-                        .dma_frame_num = 160,
+                        .dma_desc_num = 16,
+                        .dma_frame_num = 512,
                         .auto_clear = true,
                         .auto_clear_before_cb = false,
                         .allow_pd = false,
@@ -179,8 +179,8 @@ namespace btspeaker {
                 .pdm_rx_cfg = {},
                 .use_alc = false,
                 .volume = DEFAULT_VOLUME,
-                .out_rb_size = 8 * 1024,
-                .task_stack = 2048,
+                .out_rb_size = 64 * 1024,
+                .task_stack = 4096,
                 .task_core = 0,
                 .task_prio = taskPriority,
                 .stack_in_ext = true,
@@ -188,7 +188,7 @@ namespace btspeaker {
                 .uninstall_drv = false,
                 .need_expand = false,
                 .expand_src_bits = static_cast<i2s_data_bit_width_t>(bitsPerSample),
-                .buffer_len = 2400
+                .buffer_len = 12000
         };
 
         ESP_LOGD(TAG, "Created I2S config for source %d: %dHz, %dch, %dbit, prio=%d",

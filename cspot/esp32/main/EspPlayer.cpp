@@ -1,30 +1,23 @@
 #include "EspPlayer.h"
 
 #include <cstdint>      // for uint8_t
-#include <functional>   // for __base
-#include <iostream>     // for operator<<, basic_ostream, endl, cout
 #include <memory>       // for shared_ptr, make_shared, make_unique
 #include <mutex>        // for scoped_lock
-#include <string_view>  // for hash, string_view
-#include <type_traits>  // for remove_extent_t
 #include <utility>      // for move
 #include <variant>      // for get
 #include <vector>       // for vector
+#include <esp_log.h>
 
 #include "BellUtils.h"  // for BELL_SLEEP_MS
-#include "CircularBuffer.h"
 #include "DeviceStateHandler.h"  // for SpircHandler, DeviceStateHandler::CommandType
 #include "Logger.h"
-#include "StreamInfo.h"   // for BitWidth, BitWidth::BW_16
 #include "TrackPlayer.h"  // for TrackPlayer
 
 EspPlayer::EspPlayer(std::shared_ptr<AudioSink> sink,
                      std::shared_ptr<cspot::DeviceStateHandler> handler)
-        : bell::Task("player", 12 * 1024, 0, 1) {
+        : bell::Task("esp_player", 24 * 1024, 0, 1) {
     this->handler = std::move(handler);
     this->audioSink = std::move(sink);
-
-    this->circularBuffer = std::make_shared<bell::CircularBuffer>(1024 * 128);
 
     this->handler->trackPlayer->setDataCallback(
             [this](uint8_t *data, size_t bytes, size_t trackId,
@@ -39,130 +32,142 @@ EspPlayer::EspPlayer(std::shared_ptr<AudioSink> sink,
             [this](cspot::DeviceStateHandler::Command event) {
                 switch (event.commandType) {
                     case cspot::DeviceStateHandler::CommandType::PAUSE:
-                        this->pauseRequested = true;
+                        this->isPaused = true;
+                        this->audioSink->pause();
                         break;
                     case cspot::DeviceStateHandler::CommandType::PLAY:
                         this->isPaused = false;
-                        this->pauseRequested = false;
+                        this->audioSink->resume();
                         break;
                     case cspot::DeviceStateHandler::CommandType::DISC:
-                        this->circularBuffer->emptyBuffer();
-                        tracks.at(0)->trackMetrics->endTrack();
-                        this->handler->ctx->playbackMetrics->sendEvent(tracks[0]);
-                        tracks.clear();
+                        this->audioSink->flush();
+                        this->isPreBuffered = false;
+                        {
+                            std::scoped_lock lock(trackMutex);
+                            if (tracks.size() > 0) {
+                                tracks.at(0)->trackMetrics->endTrack();
+                                this->handler->ctx->playbackMetrics->sendEvent(tracks[0]);
+                                tracks.clear();
+                            }
+                        }
                         this->playlistEnd = true;
                         break;
                     case cspot::DeviceStateHandler::CommandType::FLUSH:
-                        this->circularBuffer->emptyBuffer();
+                        this->audioSink->flush();
+                        this->isPreBuffered = false;
                         break;
                     case cspot::DeviceStateHandler::CommandType::SEEK:
-                        this->circularBuffer->emptyBuffer();
+                        this->audioSink->flush();
+                        this->isPreBuffered = false;
                         break;
                     case cspot::DeviceStateHandler::CommandType::SKIP_NEXT:
                     case cspot::DeviceStateHandler::CommandType::SKIP_PREV:
-                        this->circularBuffer->emptyBuffer();
+                        this->audioSink->flush();
+                        this->isPreBuffered = false;
                         break;
                     case cspot::DeviceStateHandler::CommandType::PLAYBACK_START:
-                        this->circularBuffer->emptyBuffer();
+                        this->audioSink->flush();
+                        this->isPreBuffered = false;
+                        {
+                            std::scoped_lock lock(trackMutex);
+                            if (tracks.size())
+                                tracks.clear();
+                        }
                         this->isPaused = false;
                         this->playlistEnd = false;
-                        if (tracks.size())
-                            tracks.clear();
                         break;
-                    case cspot::DeviceStateHandler::CommandType::PLAYBACK:
+                    case cspot::DeviceStateHandler::CommandType::PLAYBACK: {
+                        std::scoped_lock lock(trackMutex);
                         tracks.push_back(
                                 std::get<std::shared_ptr<cspot::QueuedTrack>>(event.data));
+                    }
                         this->isPaused = false;
                         this->playlistEnd = false;
                         break;
                     case cspot::DeviceStateHandler::CommandType::DEPLETED:
-                        this->circularBuffer->emptyBuffer();
+                        this->audioSink->flush();
+                        this->isPreBuffered = false;
                         this->playlistEnd = true;
                         break;
                     case cspot::DeviceStateHandler::CommandType::VOLUME: {
                         int volume = std::get<int32_t>(event.data);
+                        // Handle volume if needed
                         break;
                     }
                     default:
                         break;
                 }
             };
-    startTask();
+    startTask(); // Start the keepalive task
 }
 
 void EspPlayer::feedData(uint8_t *data, size_t len, size_t trackId) {
-    size_t toWrite = len;
+    if (isPaused) {
+        BELL_SLEEP_MS(100);
+        return;
+    }
 
-    while (toWrite > 0) {
-        this->current_hash = trackId;
-        size_t written =
-                this->circularBuffer->write(data + (len - toWrite), toWrite);
-        if (written == 0) {
-            BELL_SLEEP_MS(10);
+    if (!this->isPreBuffered && this->audioSink->isPlaying()) {
+        audioSink->pause();
+    }
+
+    this->audioSink->feedPCMFrames(data, len);
+
+    if (this->audioSink->getBufferFillLevel() > (1024 * 1512) && !this->isPreBuffered) {
+        audioSink->resume();
+        this->isPreBuffered = true;
+    }
+
+    // Track management and metrics
+    {
+        std::scoped_lock lock(trackMutex);
+        this->currentTrackHash = trackId;
+
+        // Handle track changes
+        if (lastTrackHash != currentTrackHash && lastTrackHash != 0) {
+            if (tracks.size() > 0) {
+                tracks.at(0)->trackMetrics->endTrack();
+                this->handler->ctx->playbackMetrics->sendEvent(tracks[0]);
+                CSPOT_LOG(info, "TRACK ENDED, new track %zu", currentTrackHash);
+
+                tracks.pop_front();
+                if (this->playlistEnd) {
+                    tracks.clear();
+                }
+            }
+            this->handler->trackPlayer->onTrackEnd(true);
         }
 
-        toWrite -= written;
+        // Start new track metrics
+        if (lastTrackHash != currentTrackHash) {
+            if (tracks.size() > 0) {
+                tracks.at(0)->trackMetrics->startTrackPlaying(
+                        tracks.at(0)->requestedPosition);
+            }
+            lastTrackHash = currentTrackHash;
+        }
     }
 }
 
 void EspPlayer::runTask() {
-    std::vector<uint8_t> outBuf = std::vector<uint8_t>(1024);
-
-    std::scoped_lock lock(runningMutex);
-
-    size_t lastHash = 0;
-    uint64_t lastPositionUpdate = 0;
-    const uint64_t POSITION_UPDATE_INTERVAL_MS = 5000; // Update position every 5 seconds
+    ESP_LOGI("EspPlayer", "Starting EspPlayer keepalive task");
 
     while (isRunning) {
-        if (!this->isPaused) {
-            size_t read = this->circularBuffer->read(outBuf.data(), outBuf.size());
-            if (this->pauseRequested) {
-                this->pauseRequested = false;
-                this->isPaused = true;
-            }
-
-            this->audioSink->feedPCMFrames(outBuf.data(), read);
-
-            if (read == 0) {
-                BELL_SLEEP_MS(10);
-                continue;
-            } else {
-                if (lastHash != current_hash) {
-                    if (lastHash) {
-                        tracks.at(0)->trackMetrics->endTrack();
-                        this->handler->ctx->playbackMetrics->sendEvent(tracks[0]);
-                        CSPOT_LOG(info, "TRACK ENDED, new track %i", current_hash);
-                        if (tracks.size()) {
-                            tracks.pop_front();
-                            if (this->playlistEnd) {
-                                tracks.clear();
-                            }
-                        }
-                        this->handler->trackPlayer->onTrackEnd(true);
-                    }
-                    lastHash = current_hash;
-                    tracks.at(0)->trackMetrics->startTrackPlaying(
-                            tracks.at(0)->requestedPosition);
-                    this->handler->putPlayerState();
-                    lastPositionUpdate = this->handler->ctx->timeProvider->getSyncedTimestamp();
-                } else if (tracks.size() > 0) {
-                    // Send periodic position updates during playback to keep Spotify UI synced
-                    uint64_t currentTime = this->handler->ctx->timeProvider->getSyncedTimestamp();
-                    if (currentTime - lastPositionUpdate >= POSITION_UPDATE_INTERVAL_MS) {
-                        ESP_LOGD("EspPlayer", "Sending periodic position update to Spotify UI");
-                        this->handler->putPlayerState();
-                        lastPositionUpdate = currentTime;
-                    }
-                }
-            }
-        } else {
-            BELL_SLEEP_MS(100);
+        ESP_LOGI("EspPlayer", "Read buffer size: %d", this->audioSink->getBufferFillLevel());
+        if (this->audioSink->isPlaying()) {
+            this->handler->putPlayerState();
         }
+        BELL_SLEEP_MS(1000);
     }
+
+    ESP_LOGI("EspPlayer", "EspPlayer keepalive task exiting");
 }
 
 void EspPlayer::disconnect() {
+    ESP_LOGI("EspPlayer", "EspPlayer disconnecting");
     isRunning = false;
-    std::scoped_lock lock(runningMutex);
+
+    // Clean up any remaining tracks
+    std::scoped_lock lock(trackMutex);
+    tracks.clear();
 }

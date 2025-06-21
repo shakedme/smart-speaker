@@ -77,6 +77,9 @@ private:
     esp_err_t setupMicrophonePipeline();
     esp_err_t cleanupPipeline();
     
+    // Audio validation
+    bool hasValidAudioData(const uint8_t* audio_buffer, size_t bytes_read);
+    
     // Member variables
     bool recording_;
     TaskHandle_t audioTaskHandle_;

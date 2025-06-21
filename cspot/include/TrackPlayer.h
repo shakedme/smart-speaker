@@ -96,7 +96,7 @@ class TrackPlayer : bell::Task {
   int currentSection;
 #endif
 
-  std::vector<uint8_t> pcmBuffer = std::vector<uint8_t>(1024);
+  std::vector<uint8_t> pcmBuffer = std::vector<uint8_t>(1024 * 8);
 
   bool autoStart = false;
 

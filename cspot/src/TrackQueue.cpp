@@ -290,11 +290,19 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
     return;
   }
 
-  // Request CDN URL
-  ESP_LOGD("TrackQueue", "Received access key, fetching CDN URL...");
+  // Request CDN URL with retry logic
+  ESP_LOGD("TrackQueue", "Received access key, fetching CDN URL... (attempt %d/5)", retries + 1);
+
+  // Check retry limit
+  if (retries >= 5) {
+    ESP_LOGE("TrackQueue", "Max retries reached for CDN URL, failing track: %s", 
+             trackInfo.name.c_str());
+    state = State::FAILED;
+    playableSemaphore->give();
+    return;
+  }
 
   try {
-
     std::string requestUrl = string_format(
         "https://api.spotify.com/v1/storage-resolve/files/audio/interactive/"
         "%s?alt=json",
@@ -302,32 +310,92 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
     
     ESP_LOGD("TrackQueue", "Requesting CDN URL from: %s", requestUrl.c_str());
     
+    // Add timeout and retry-friendly headers
     auto req = bell::HTTPClient::get(
-        requestUrl, {bell::HTTPClient::ValueHeader(
-                        {"Authorization", "Bearer " + accessKey})});
+        requestUrl, {
+          bell::HTTPClient::ValueHeader({"Authorization", "Bearer " + accessKey}),
+          bell::HTTPClient::ValueHeader({"Connection", "close"}), // Force connection close
+          bell::HTTPClient::ValueHeader({"User-Agent", "Spotify/8.8.0"})
+        }, 10000); // 10 second timeout
+
+    if (!req) {
+      throw std::runtime_error("HTTP request failed - null response");
+    }
 
     // Wait for response
     std::string_view result = req->body();
+    if (result.empty()) {
+      throw std::runtime_error("Empty response from Spotify API");
+    }
+    
     ESP_LOGD("TrackQueue", "CDN response received, size: %d", result.size());
 
 #ifdef BELL_ONLY_CJSON
     cJSON* jsonResult = cJSON_Parse(result.data());
-    cdnUrl = cJSON_GetArrayItem(cJSON_GetObjectItem(jsonResult, "cdnurl"), 0)
-                 ->valuestring;
+    if (!jsonResult) {
+      throw std::runtime_error("Failed to parse JSON response");
+    }
+    
+    cJSON* cdnurlArray = cJSON_GetObjectItem(jsonResult, "cdnurl");
+    if (!cdnurlArray || !cJSON_IsArray(cdnurlArray) || cJSON_GetArraySize(cdnurlArray) == 0) {
+      cJSON_Delete(jsonResult);
+      throw std::runtime_error("Invalid JSON structure - missing cdnurl array");
+    }
+    
+    cJSON* firstUrl = cJSON_GetArrayItem(cdnurlArray, 0);
+    if (!firstUrl || !cJSON_IsString(firstUrl)) {
+      cJSON_Delete(jsonResult);
+      throw std::runtime_error("Invalid JSON structure - cdnurl not a string");
+    }
+    
+    cdnUrl = std::string(firstUrl->valuestring);
     cJSON_Delete(jsonResult);
 #else
     auto jsonResult = nlohmann::json::parse(result);
+    if (!jsonResult.contains("cdnurl") || !jsonResult["cdnurl"].is_array() || jsonResult["cdnurl"].empty()) {
+      throw std::runtime_error("Invalid JSON structure - missing cdnurl array");
+    }
     cdnUrl = jsonResult["cdnurl"][0];
 #endif
 
-    ESP_LOGD("TrackQueue", "Successfully obtained CDN URL for track, setting state to READY");
+    if (cdnUrl.empty()) {
+      throw std::runtime_error("Empty CDN URL received");
+    }
+
+    ESP_LOGI("TrackQueue", "Successfully obtained CDN URL for track, setting state to READY");
     state = State::READY;
+    retries = 0; // Reset retry count on success
+    
   } catch (const std::exception& e) {
-    ESP_LOGE("TrackQueue", "Cannot fetch CDN URL: %s", e.what());
-    state = State::FAILED;
+    ESP_LOGW("TrackQueue", "Network error fetching CDN URL (attempt %d/5): %s", retries + 1, e.what());
+    retries++;
+    
+    // Record retry time for exponential backoff
+    lastRetryTime = bell::Utils::getSteadyTime();
+    
+    // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+    int backoffMs = 1000 * (1 << (retries - 1));
+    ESP_LOGI("TrackQueue", "Retrying CDN request in %d ms...", backoffMs);
+    
+    // Don't block the TrackQueue task - set state to retry and let the main loop handle it
+    state = State::CDN_REQUIRED;
+    
+    // Schedule retry (don't call playableSemaphore->give() yet)
+    return;
+    
   } catch (...) {
-    ESP_LOGE("TrackQueue", "Cannot fetch CDN URL: unknown error");
-    state = State::FAILED;
+    ESP_LOGW("TrackQueue", "Unknown error fetching CDN URL (attempt %d/5)", retries + 1);
+    retries++;
+    
+    // Record retry time for exponential backoff
+    lastRetryTime = bell::Utils::getSteadyTime();
+    
+    // Exponential backoff for unknown errors too
+    int backoffMs = 1000 * (1 << (retries - 1));
+    ESP_LOGI("TrackQueue", "Retrying CDN request in %d ms...", backoffMs);
+    
+    state = State::CDN_REQUIRED;
+    return;
   }
   
   ESP_LOGD("TrackQueue", "Signaling playableSemaphore (track state: %s)",
@@ -471,8 +539,26 @@ bool TrackQueue::processTrack(std::shared_ptr<QueuedTrack> track) {
     case QueuedTrack::State::KEY_REQUIRED:
       track->stepLoadAudioFile(tracksMutex, processSemaphore);
       break;
-    case QueuedTrack::State::CDN_REQUIRED:
+    case QueuedTrack::State::CDN_REQUIRED: {
+      // Check if we need to wait for exponential backoff
+      if (track->retries > 0 && track->lastRetryTime > 0) {
+        uint64_t currentTime = bell::Utils::getSteadyTime();
+        uint64_t timeSinceLastRetry = currentTime - track->lastRetryTime;
+        
+        // Calculate required backoff time: 1s, 2s, 4s, 8s, 16s
+        uint64_t backoffMs = 1000 * (1 << (track->retries - 1));
+        
+        if (timeSinceLastRetry < backoffMs) {
+          // Not enough time has passed, don't retry yet
+          ESP_LOGD("TrackQueue", "CDN retry backoff: waiting %llu more ms", 
+                   backoffMs - timeSinceLastRetry);
+          return false;
+        }
+      }
+      
       track->stepLoadCDNUrl(accessKey);
+      break;
+    }
     default:
       return false;
       // Do not perform any action

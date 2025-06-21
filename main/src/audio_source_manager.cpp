@@ -32,7 +32,11 @@ namespace btspeaker {
                 ESP_LOGI(TAG, "SPOTIFY POST AUTH: Available internal memory: %d",
                          heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
             });
+//            ESP_LOGI(TAG, "LLM PIPELINE PRE INIT: Available internal memory: %d",
+//                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 //            llmPipeline = std::make_unique<LLMPipeline>();
+//            ESP_LOGI(TAG, "LLM PIPELINE POST INIT: Available internal memory: %d",
+//                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         }
 
         // Initialize state

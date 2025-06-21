@@ -1,6 +1,7 @@
 #include "../include/microphone_manager.hpp"
 #include "../include/voice_config.hpp"
 #include "../include/memory_utils.hpp"
+#include <cmath>
 
 extern "C" {
 #include "esp_log.h"
@@ -137,7 +138,11 @@ namespace btspeaker {
                                                  AUDIO_BUFFER_SIZE);
 
                 if (bytes_read > 0 && audioCallback_) {
-                    audioCallback_(audio_buffer, bytes_read);
+                    // Validate that we have actual audio data, not just silence or uninitialized buffer
+                    if (hasValidAudioData(audio_buffer, bytes_read)) {
+                        audioCallback_(audio_buffer, bytes_read);
+                    }
+                    // If no valid audio, we still continue the loop but don't feed to wake word detector
                 }
             }
 
@@ -276,6 +281,69 @@ namespace btspeaker {
         micEvent_.reset();
 
         return ESP_OK;
+    }
+
+    bool MicrophoneManager::hasValidAudioData(const uint8_t* audio_buffer, size_t bytes_read) {
+        if (!audio_buffer || bytes_read == 0) {
+            return false;
+        }
+
+        // Convert to 16-bit samples for analysis (stereo data)
+        const auto* samples = reinterpret_cast<const int16_t*>(audio_buffer);
+        size_t sample_count = bytes_read / sizeof(int16_t);
+        
+        if (sample_count == 0) {
+            return false;
+        }
+
+        // Method 1: Check for all-zero buffer (complete silence)
+        bool all_zero = true;
+        for (size_t i = 0; i < sample_count; i++) {
+            if (samples[i] != 0) {
+                all_zero = false;
+                break;
+            }
+        }
+        
+        if (all_zero) {
+            return false; // Buffer is completely silent
+        }
+
+        // Method 2: Calculate RMS energy to detect meaningful audio activity
+        uint64_t energy_sum = 0;
+        for (size_t i = 0; i < sample_count; i++) {
+            int32_t sample = samples[i];
+            energy_sum += (sample * sample);
+        }
+        
+        // Calculate RMS
+        double rms = sqrt(static_cast<double>(energy_sum) / sample_count);
+        
+        // Set threshold for minimum audio activity
+        // Adjust this value based on your microphone sensitivity and noise floor
+        const double MIN_AUDIO_THRESHOLD = 50.0; // Empirically determined threshold
+        
+        if (rms < MIN_AUDIO_THRESHOLD) {
+            return false; // Audio level too low, likely just noise or silence
+        }
+
+        // Method 3: Check for signal variance (ensure it's not a constant value)
+        int16_t min_sample = samples[0];
+        int16_t max_sample = samples[0];
+        
+        for (size_t i = 1; i < sample_count; i++) {
+            if (samples[i] < min_sample) min_sample = samples[i];
+            if (samples[i] > max_sample) max_sample = samples[i];
+        }
+        
+        // If dynamic range is too small, it might be a constant signal or very quiet
+        const int16_t MIN_DYNAMIC_RANGE = 20;
+        if ((max_sample - min_sample) < MIN_DYNAMIC_RANGE) {
+            return false;
+        }
+
+        // If we pass all checks, we have valid audio data
+        return true;
     }
 
 } // namespace btspeaker 

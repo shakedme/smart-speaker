@@ -42,3 +42,4 @@ backend/node_modules
 venv/
 hey_rufus/.venv
 hey_rufus/dataset
+hey_rufus/model_data

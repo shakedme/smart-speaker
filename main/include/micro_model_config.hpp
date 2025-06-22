@@ -1,0 +1,8 @@
+//
+// Created by Shaked Melman on 22/06/2025.
+//
+
+#ifndef BT_SPEAKER_MICRO_MODEL_CONFIG_HPP
+#define BT_SPEAKER_MICRO_MODEL_CONFIG_HPP
+
+#endif //BT_SPEAKER_MICRO_MODEL_CONFIG_HPP

@@ -37,3 +37,8 @@ cmake-build-debug*
 *.o
 managed_components
 backend/node_modules
+
+# Python virtual environments
+venv/
+hey_rufus/.venv
+hey_rufus/dataset

@@ -1,0 +1,8 @@
+//
+// Created by Shaked Melman on 22/06/2025.
+//
+
+#ifndef BT_SPEAKER_RUFUS_MODEL_DATA_HPP
+#define BT_SPEAKER_RUFUS_MODEL_DATA_HPP
+
+#endif //BT_SPEAKER_RUFUS_MODEL_DATA_HPP

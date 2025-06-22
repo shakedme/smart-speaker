@@ -4,6 +4,10 @@
 #include <functional>
 #include <atomic>
 #include "memory_utils.hpp"
+#include "micro_model_config.hpp"
+#include "tensorflow/lite/micro/micro_interpreter.h"
+#include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
+#include "tensorflow/lite/micro/tflite_bridge/micro_error_reporter.h"
 
 extern "C" {
 #include "esp_err.h"
@@ -17,16 +21,6 @@ namespace btspeaker {
 
     using WakeWordCallback = std::function<void()>;
 
-/**
- * @brief Manages wake word detection using ESP-SR
- * 
- * Responsible for:
- * - ESP-SR initialization and configuration
- * - Wake word model loading
- * - Audio processing for wake word detection via dedicated task
- * - Callback notification when wake word is detected
- * - Ring buffer management for continuous audio processing
- */
     class WakeWordDetector {
     public:
         WakeWordDetector();
@@ -54,7 +48,7 @@ namespace btspeaker {
          * @param data_length Length of data in bytes
          * @return ESP_OK on success
          */
-        esp_err_t feedAudioData(const uint8_t* stereo_data, size_t data_length);
+        esp_err_t feedAudioData(const uint8_t *stereo_data, size_t data_length);
 
         /**
          * @brief Set callback for wake word detection
@@ -72,43 +66,41 @@ namespace btspeaker {
         [[nodiscard]] bool isEnabled() const { return enabled_; }
 
     private:
-        static constexpr const char* TAG = "WakeWordDetector";
-        
-        // Task configuration
-        static constexpr size_t WAKE_WORD_TASK_STACK_SIZE = 4096;
-        static constexpr UBaseType_t WAKE_WORD_TASK_PRIORITY = 5;
-        static constexpr size_t RING_BUFFER_SIZE = 8192;  // 8KB ring buffer for audio data
-        
-        // ESP-SR state
-        std::atomic<bool> enabled_;
+        static constexpr const char *TAG = "WAKE_WORD_DETECTOR";
 
-        // Task management
+        esp_err_t startProcessingTask();
+
+        void stopProcessingTask();
+
+        void processWindow(const int16_t *audio_window);
+
+        tflite::MicroMutableOpResolver<6> micro_op_resolver;
+        tflite::MicroErrorReporter error_reporter_;
+        tflite::MicroInterpreter *interpreter_;
+        TfLiteTensor *input_tensor_;
+        TfLiteTensor *output_tensor_;
+
+        static tflite::MicroErrorReporter micro_error_reporter;
+        static constexpr int kTensorArenaSize = 100 * 1024;
+        static uint8_t tensor_arena[kTensorArenaSize];
+
+        static QueueHandle_t audio_queue;
+
+        // Detection logic
+        float detection_threshold_ = 0.30f;
+        int detection_hits_required_ = 1;
+        int detection_hit_count_ = 0;
+
+        // Threading
+        std::atomic<bool> enabled_;
         TaskHandle_t processingTaskHandle;
-        RingbufHandle_t audioRingBuffer;
+
+        // Audio processing
         std::unique_ptr<PSRAMRingBuffer> psramRingBuffer_;
-        SemaphoreHandle_t enableMutex;
-        std::atomic<bool> taskRunning;
-        
-        // ESP-SR AFE components
-        void* afeHandle;        // esp_afe_sr_iface_t*
-        void* afeData;          // esp_afe_sr_data_t*
-        int feedChunkSize;
-        int fetchChunkSize;
-        
+        RingbufHandle_t audioRingBuffer;
+
         // Callback
         WakeWordCallback wakeWordCallback;
-        
-        // Internal methods
-        esp_err_t setupEspSr();
-        void cleanupEspSr();
-        
-        esp_err_t startProcessingTask();
-        void stopProcessingTask();
-        static void wakeWordTask(void* arg);
-        void runWakeWordProcessing();
-        
-        // Audio processing methods - updated for dual microphone processing
-        bool processStereoAudioChunk(const int16_t* stereoSamples, size_t frameCount);
     };
 
 } // namespace btspeaker 

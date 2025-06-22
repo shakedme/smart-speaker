@@ -37,7 +37,7 @@ public:
         int maxReconnectAttempts = 5;
     };
 
-    explicit WebSocketVoiceClient(Config  config);
+    explicit WebSocketVoiceClient();
     ~WebSocketVoiceClient();
     
     // Delete copy operations

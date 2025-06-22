@@ -19,7 +19,9 @@ set(PROJECT_SRCS
         src/audio_source_manager.cpp
         src/adf_audio_sink.cpp
         src/base_audio_pipeline.cpp
-        
+        src/rufus_model_data.cc
+        src/micro_features_generator.cpp
+
         # ESP32-specific cspot files
         "../cspot/esp32/main/EspPlayer.cpp"
 )
@@ -50,6 +52,7 @@ idf_component_register(
         esp_adc
         esp-sr
         json
+        esp-tflite-micro
 
         # Additional for cspot
         esp_http_client
@@ -64,6 +67,7 @@ idf_component_register(
         freertos
         heap
         soc
+
 )
 
 add_subdirectory(${CSPOT_ROOT} ${CMAKE_CURRENT_BINARY_DIR}/cspot)

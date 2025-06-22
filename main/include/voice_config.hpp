@@ -4,7 +4,7 @@
 
 // WebSocket Server Configuration
 #ifndef CONFIG_WEBSOCKET_SERVER_URL
-#define CONFIG_WEBSOCKET_SERVER_URL "wss://e7f4-147-234-68-178.ngrok-free.app/voice"
+#define CONFIG_WEBSOCKET_SERVER_URL "ws://192.168.1.191:8080/voice"
 #endif
 
 // WebSocket Connection Settings
@@ -15,12 +15,15 @@
 #define CONFIG_WS_MAX_RECONNECT_ATTEMPTS 5
 
 // Audio Configuration - Updated for SPH0645LM4H I2S MEMS microphones
-#define CONFIG_MIC_SAMPLE_RATE      16000
-#define MIC_BITS                    I2S_DATA_BIT_WIDTH_16BIT
+#define CONFIG_MIC_SAMPLE_RATE      48000
+#define MIC_BITS                    I2S_DATA_BIT_WIDTH_24BIT
 
 // Wake Word Configuration
 #define CONFIG_WAKE_WORD_ENABLED    true
 #define CONFIG_WAKE_WORD_THRESHOLD  0.8f
+
+// Debug Configuration
+#define CONFIG_MICROPHONE_DEBUG_MODE true  // Enable detailed microphone debugging
 
 // WiFi Configuration (required for WebSocket connection)
 #ifndef CONFIG_WIFI_SSID
@@ -31,8 +34,9 @@
 #define CONFIG_WIFI_PASSWORD "0542402269"
 #endif
 
-// Hardware Pin Configuration - Updated for SPH0645LM4H I2S MEMS microphones
-// Note: Using I2S1 for microphones to avoid conflict with I2S0 used for audio output (PCM5102A)
-#define CONFIG_MIC_I2S_BCK_GPIO     GPIO_NUM_32  // I2S1 Bit Clock for microphones
-#define CONFIG_MIC_I2S_WS_GPIO      GPIO_NUM_33  // I2S1 Word Select for microphones  
-#define CONFIG_MIC_I2S_DIN_GPIO     GPIO_NUM_34  // I2S1 Data In from microphones
+// Hardware Pin Configuration - Updated for single SPH0645LM4H I2S MEMS microphone
+// Note: Using I2S1 for microphone to avoid conflict with I2S0 used for audio output (PCM5102A)
+// Wire SPH0645LM4H: SEL->GND, LRCL->GPIO33, DOUT->GPIO34, BCLK->GPIO32, 3V->3.3V, GND->GND
+#define CONFIG_MIC_I2S_BCK_GPIO     GPIO_NUM_32  // I2S1 Bit Clock for microphone
+#define CONFIG_MIC_I2S_WS_GPIO      GPIO_NUM_33  // I2S1 Word Select for microphone  
+#define CONFIG_MIC_I2S_DIN_GPIO     GPIO_NUM_34  // I2S1 Data In from microphone

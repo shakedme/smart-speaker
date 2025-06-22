@@ -21,16 +21,16 @@ namespace btspeaker {
 
         audioSourceManager = std::make_unique<AudioSourceManager>(*wifiManager);
 
-//        if (wifiManager->isConnected()) {
-//            voiceAssistant = std::make_unique<VoiceAssistantManager>(*audioSourceManager);
-//            voiceAssistant->setMusicPlaybackCallback(
-//                    [this](const char *command) {
-//                        this->musicPlaybackCmdCallback(command);
-//                    }
-//            );
-//        } else {
-//            ESP_LOGW(TAG, "WiFi not connected, voice assistant disabled");
-//        }
+        if (wifiManager->isConnected()) {
+            voiceAssistant = std::make_unique<VoiceAssistantManager>(*audioSourceManager);
+            voiceAssistant->setMusicPlaybackCallback(
+                    [this](const char *command) {
+                        this->musicPlaybackCmdCallback(command);
+                    }
+            );
+        } else {
+            ESP_LOGW(TAG, "WiFi not connected, voice assistant disabled");
+        }
 
         ESP_LOGI(TAG, "Application initialized successfully");
     }

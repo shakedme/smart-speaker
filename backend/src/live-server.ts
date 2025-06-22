@@ -64,7 +64,7 @@ wss.on('connection', (ws, request) => {
 });
 
 // Start server
-server.listen(port, () => {
+server.listen(Number(port), '0.0.0.0', () => {
     console.log(`🚀 Server running on http://localhost:${port}`);
     console.log(`📡 WebSocket endpoint: ws://localhost:${port}/voice`);
     console.log(`🌐 Frontend: http://localhost:${port}`);

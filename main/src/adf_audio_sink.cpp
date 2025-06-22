@@ -36,18 +36,15 @@ namespace btspeaker {
 
         size_t offset = 0;
         const size_t chunkSize = 1024;
-nce
         auto raw = audioPipeline->i2SStreamReader.get();
         while (offset < bytes) {
             size_t toWrite = std::min(chunkSize, bytes - offset);
 
-in ADF ringbuf
             size_t free_bytes = rb_bytes_available(audio_element_get_output_ringbuf(raw));
             if (free_bytes < toWrite) {
                 BELL_SLEEP_MS(5);
                 continue;
             }
-
 
             int written = raw_stream_write(raw, (char *) (buffer + offset), toWrite);
             if (written < 0) {

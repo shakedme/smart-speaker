@@ -25,16 +25,7 @@ namespace btspeaker {
             throw std::runtime_error("Failed to create state mutex");
         }
 
-        // Initialize WebSocket voice client
-        WebSocketVoiceClient::Config websocket_config;
-        websocket_config.serverUrl = CONFIG_WEBSOCKET_SERVER_URL;
-        websocket_config.keepaliveIntervalS = CONFIG_WS_KEEPALIVE_INTERVAL_S;
-        websocket_config.pingIntervalS = CONFIG_WS_PING_INTERVAL_S;
-        websocket_config.chunkSize = CONFIG_WS_CHUNK_SIZE;
-        websocket_config.reconnectTimeoutMs = CONFIG_WS_RECONNECT_TIMEOUT_MS;
-        websocket_config.maxReconnectAttempts = CONFIG_WS_MAX_RECONNECT_ATTEMPTS;
-
-        websocketClient = std::make_unique<WebSocketVoiceClient>(websocket_config);
+        websocketClient = std::make_unique<WebSocketVoiceClient>();
         esp_err_t ret = websocketClient->init();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize WebSocket client: %s", esp_err_to_name(ret));

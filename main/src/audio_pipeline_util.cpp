@@ -36,7 +36,7 @@ namespace btspeaker {
 
         // Create I2S writer
         auto i2SHandle = createI2SWriter(
-                AudioSource::BLUETOOTH,
+                source,
                 sampleRate,
                 channels,
                 bitsPerSample

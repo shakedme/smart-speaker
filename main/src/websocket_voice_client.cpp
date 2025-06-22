@@ -13,9 +13,17 @@ extern "C" {
 
 namespace btspeaker {
 
-    WebSocketVoiceClient::WebSocketVoiceClient(Config config)
-            : config(std::move(config)), state(ConnectionState::DISCONNECTED), websocketClient(nullptr),
+    WebSocketVoiceClient::WebSocketVoiceClient()
+            : state(ConnectionState::DISCONNECTED), websocketClient(nullptr),
               stateMutex(nullptr), reconnectTaskHandle(nullptr), initialized(false), reconnectAttempts(0) {
+
+        // Initialize WebSocket voice client
+        config.serverUrl = CONFIG_WEBSOCKET_SERVER_URL;
+        config.keepaliveIntervalS = CONFIG_WS_KEEPALIVE_INTERVAL_S;
+        config.pingIntervalS = CONFIG_WS_PING_INTERVAL_S;
+        config.chunkSize = CONFIG_WS_CHUNK_SIZE;
+        config.reconnectTimeoutMs = CONFIG_WS_RECONNECT_TIMEOUT_MS;
+        config.maxReconnectAttempts = CONFIG_WS_MAX_RECONNECT_ATTEMPTS;
         ESP_LOGI(TAG, "WebSocketVoiceClient created");
     }
 

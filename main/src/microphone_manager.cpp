@@ -8,6 +8,8 @@ extern "C" {
 #include "board.h"
 #include "i2s_stream.h"
 #include "audio_common.h"
+#include "soc/i2s_reg.h"  // Add this for SPH0645 timing fixes
+#include "driver/i2s_std.h"   // New I2S standard driver (compatible with ESP-ADF)
 }
 
 namespace btspeaker {
@@ -19,6 +21,14 @@ namespace btspeaker {
 
     MicrophoneManager::~MicrophoneManager() {
         shutdown();
+    }
+
+    void MicrophoneManager::applySPH0645Fix(i2s_port_t i2s_num) {
+        // Critical timing adjustments for SPH0645LM4H - same as working test
+        REG_SET_BIT(I2S_TIMING_REG(i2s_num), BIT(9));        // I2S_RX_SD_IN_DELAY
+        REG_SET_BIT(I2S_CONF_REG(i2s_num), I2S_RX_MSB_SHIFT); // Phillips I2S - WS changes a cycle earlier
+        
+        ESP_LOGI(TAG, "Applied SPH0645LM4H timing fixes to I2S%d", i2s_num);
     }
 
     esp_err_t MicrophoneManager::init() {
@@ -38,11 +48,6 @@ namespace btspeaker {
         if (recording_) {
             ESP_LOGW(TAG, "Already recording");
             return ESP_OK;
-        }
-
-        if (!micPipeline_) {
-            ESP_LOGE(TAG, "Microphone pipeline not initialized");
-            return ESP_ERR_INVALID_STATE;
         }
 
         // Log memory stats before task creation
@@ -66,15 +71,6 @@ namespace btspeaker {
             return ESP_FAIL;
         }
 
-        // Start pipeline
-        esp_err_t ret = audio_pipeline_run(micPipeline_.get());
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to start microphone pipeline: %s", esp_err_to_name(ret));
-            vTaskDelete(audioTaskHandle_);
-            audioTaskHandle_ = nullptr;
-            return ret;
-        }
-
         ESP_LOGI(TAG, "Microphone recording started");
         return ESP_OK;
     }
@@ -86,15 +82,6 @@ namespace btspeaker {
 
         recording_ = false;
 
-        // Stop pipeline
-        if (micPipeline_) {
-            esp_err_t ret = audio_pipeline_stop(micPipeline_.get());
-            if (ret != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to stop microphone pipeline: %s", esp_err_to_name(ret));
-            }
-        }
-
-        // Stop task
         if (audioTaskHandle_) {
             vTaskDelete(audioTaskHandle_);
             audioTaskHandle_ = nullptr;
@@ -122,227 +109,255 @@ namespace btspeaker {
     }
 
     void MicrophoneManager::runAudioProcessing() {
-        ESP_LOGI(TAG, "Audio processing task started for stereo I2S microphones");
+        ESP_LOGI(TAG, "Audio processing task started with direct I2S channel reading");
 
-        auto *audio_buffer = static_cast<uint8_t *>(heap_caps_malloc(AUDIO_BUFFER_SIZE, MALLOC_CAP_SPIRAM));
-        if (!audio_buffer) {
-            ESP_LOGE(TAG, "Failed to allocate audio buffer");
+        auto *raw_buffer = static_cast<uint8_t *>(heap_caps_malloc(AUDIO_BUFFER_SIZE, MALLOC_CAP_SPIRAM));
+        auto *stereo_buffer = static_cast<uint8_t *>(heap_caps_malloc(AUDIO_BUFFER_SIZE * 2, MALLOC_CAP_SPIRAM));
+        
+        if (!raw_buffer || !stereo_buffer) {
+            ESP_LOGE(TAG, "Failed to allocate audio buffers");
+            if (raw_buffer) free(raw_buffer);
+            if (stereo_buffer) free(stereo_buffer);
             return;
         }
 
-        while (recording_) {
-            // Read stereo audio from I2S microphone pipeline
-            if (rawMicStream_) {
-                int bytes_read = raw_stream_read(rawMicStream_.get(),
-                                                 (char *) audio_buffer,
-                                                 AUDIO_BUFFER_SIZE);
+        // Wait for microphone to stabilize
+        vTaskDelay(pdMS_TO_TICKS(1000));
 
-                if (bytes_read > 0 && audioCallback_) {
-                    // Validate that we have actual audio data, not just silence or uninitialized buffer
-                    if (hasValidAudioData(audio_buffer, bytes_read)) {
-                        audioCallback_(audio_buffer, bytes_read);
+        // Read and discard initial samples
+        for (int i = 0; i < 100; i++) {
+            size_t bytes_read;
+            i2s_channel_read(i2s_rx_handle_, raw_buffer, AUDIO_BUFFER_SIZE, &bytes_read, pdMS_TO_TICKS(10));
+        }
+
+        ESP_LOGI(TAG, "Microphone stabilized, starting audio processing with VAD pre-filter");
+
+        while (recording_) {
+            // Read audio directly from I2S channel
+            size_t bytes_read;
+            esp_err_t ret = i2s_channel_read(i2s_rx_handle_, raw_buffer, AUDIO_BUFFER_SIZE, &bytes_read, pdMS_TO_TICKS(100));
+            
+            if (ret == ESP_OK && bytes_read > 0) {
+                if (audioCallback_) {
+                    // VAD pre-filter re-enabled after switching to WakeNet9s (ESP32-compatible)
+                    if (hasVoiceActivity(raw_buffer, bytes_read)) {
+                        // Convert mono to stereo and feed to wake word detector
+                        size_t stereo_bytes = convertMonoToStereo(raw_buffer, stereo_buffer, bytes_read);
+                        audioCallback_(stereo_buffer, stereo_bytes);
                     }
-                    // If no valid audio, we still continue the loop but don't feed to wake word detector
+                    // Skip ESP-SR processing during silence - saves CPU and prevents buffer overflow
                 }
             }
 
-            vTaskDelay(pdMS_TO_TICKS(10)); // Small delay to prevent watchdog
+            vTaskDelay(pdMS_TO_TICKS(5)); // Reduced delay for more responsive audio processing
         }
 
-        free(audio_buffer);
+        free(raw_buffer);
+        free(stereo_buffer);
         ESP_LOGI(TAG, "Audio processing task ended");
     }
 
     esp_err_t MicrophoneManager::setupMicrophonePipeline() {
-        ESP_LOGI(TAG, "Setting up I2S microphone pipeline for SPH0645LM4H MEMS microphones");
+        ESP_LOGI(TAG, "Setting up direct I2S STD driver for SPH0645LM4H (new API, compatible with ESP-ADF)");
 
-        // Create event interface
-        audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
-        audio_event_iface_handle_t evt_handle = audio_event_iface_init(&evt_cfg);
-        if (!evt_handle) {
-            ESP_LOGE(TAG, "Failed to create microphone event interface");
-            return ESP_FAIL;
+        // Create I2S channel handle (new API)
+        i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+        chan_cfg.dma_desc_num = 4;
+        chan_cfg.dma_frame_num = 128;  // Same as working test
+
+        esp_err_t ret = i2s_new_channel(&chan_cfg, NULL, &i2s_rx_handle_);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to create I2S RX channel: %s", esp_err_to_name(ret));
+            return ret;
         }
-        micEvent_.reset(evt_handle, audioEventIfaceDeleter);
 
-        // Create I2S microphone stream for SPH0645LM4H MEMS microphones
-        i2s_stream_cfg_t i2s_cfg = {
-                .type = AUDIO_STREAM_READER,
-                .transmit_mode = I2S_COMM_MODE_STD,
-                .chan_cfg = {
-                        .id = I2S_NUM_1, // Use I2S1 for microphones
-                        .role = I2S_ROLE_MASTER,
-                        .dma_desc_num = 3,    // Increased for better I2S performance
-                        .dma_frame_num = 240, // Standard frame size for I2S
-                        .auto_clear = true,
-                        .auto_clear_before_cb = false,
-                        .allow_pd = false,
-                        .intr_priority = 0,
+        // Configure I2S standard mode (based on working test)
+        i2s_std_config_t std_cfg = {
+            .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(44100),  // Back to 44.1kHz like working test
+            .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
+            .gpio_cfg = {
+                .mclk = GPIO_NUM_NC,                    // MCLK not needed for SPH0645LM4H
+                .bclk = CONFIG_MIC_I2S_BCK_GPIO,        // GPIO32 - Bit Clock
+                .ws = CONFIG_MIC_I2S_WS_GPIO,           // GPIO33 - Word Select (L/R)
+                .dout = GPIO_NUM_NC,                    // Not used for input
+                .din = CONFIG_MIC_I2S_DIN_GPIO,         // GPIO34 - Data Input
+                .invert_flags = {
+                    .mclk_inv = false,
+                    .bclk_inv = false,
+                    .ws_inv = false,
                 },
-                .std_cfg = {
-                        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
-                        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(MIC_BITS,
-                                                                    I2S_SLOT_MODE_STEREO), // Stereo for two mics
-                        .gpio_cfg = {
-                                .mclk = GPIO_NUM_NC,                    // MCLK not needed for SPH0645LM4H
-                                .bclk = CONFIG_MIC_I2S_BCK_GPIO,        // GPIO32 - Bit Clock
-                                .ws = CONFIG_MIC_I2S_WS_GPIO,           // GPIO33 - Word Select (L/R)
-                                .dout = GPIO_NUM_NC,                    // Not used for input
-                                .din = CONFIG_MIC_I2S_DIN_GPIO,         // GPIO34 - Data Input
-                                .invert_flags = {
-                                        .mclk_inv = false,
-                                        .bclk_inv = false,
-                                        .ws_inv = false,
-                                },
-                        },
-                },
-                .pdm_rx_cfg = {},
-                .use_alc = false,
-                .volume = 0,
-                .out_rb_size = 4 * 1024,  // Ring buffer size for stereo I2S data
-                .task_stack = 2048,       // Standard stack size for I2S processing
-                .task_core = 1,
-                .task_prio = 23,
-                .stack_in_ext = true,     // Put I2S task stack in PSRAM
-                .multi_out_num = 0,
-                .uninstall_drv = false,
-                .need_expand = false,
-                .expand_src_bits = I2S_DATA_BIT_WIDTH_16BIT,
-                .buffer_len = AUDIO_BUFFER_SIZE * 2, // Double buffer for stereo
+            },
         };
 
-        audio_element_handle_t i2s_handle = i2s_stream_init(&i2s_cfg);
-        if (!i2s_handle) {
-            ESP_LOGE(TAG, "Failed to create I2S microphone stream");
-            return ESP_FAIL;
-        }
-        i2SMicStream_.reset(i2s_handle, audioElementDeleter);
-
-        // Create raw stream for audio processing
-        raw_stream_cfg_t raw_cfg = {
-                .type = AUDIO_STREAM_WRITER,
-                .out_rb_size = 8 * 1024,  // Larger buffer for stereo I2S data
-        };
-
-        audio_element_handle_t raw_handle = raw_stream_init(&raw_cfg);
-        if (!raw_handle) {
-            ESP_LOGE(TAG, "Failed to create raw microphone stream");
-            return ESP_FAIL;
-        }
-        rawMicStream_.reset(raw_handle, audioElementDeleter);
-
-        // Create microphone pipeline
-        audio_pipeline_cfg_t pipeline_cfg = {.rb_size = 4 * 1024};  // Ring buffer for pipeline
-        audio_pipeline_handle_t pipeline_handle = audio_pipeline_init(&pipeline_cfg);
-        if (!pipeline_handle) {
-            ESP_LOGE(TAG, "Failed to create microphone pipeline");
-            return ESP_FAIL;
-        }
-        micPipeline_.reset(pipeline_handle, audioPipelineDeleter);
-
-        // Register elements
-        esp_err_t ret = audio_pipeline_register(micPipeline_.get(), i2SMicStream_.get(), MIC_I2S);
+        // Initialize I2S channel
+        ESP_LOGI(TAG, "Initializing I2S STD channel...");
+        ret = i2s_channel_init_std_mode(i2s_rx_handle_, &std_cfg);
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to register I2S mic stream: %s", esp_err_to_name(ret));
+            ESP_LOGE(TAG, "Failed to initialize I2S STD channel: %s", esp_err_to_name(ret));
+            i2s_del_channel(i2s_rx_handle_);
             return ret;
         }
 
-        ret = audio_pipeline_register(micPipeline_.get(), rawMicStream_.get(), MIC_RAW);
+        // Apply SPH0645 timing fixes (critical! Must be after channel init)
+        applySPH0645Fix(I2S_NUM_1);
+
+        // Enable I2S channel
+        ESP_LOGI(TAG, "Enabling I2S channel...");
+        ret = i2s_channel_enable(i2s_rx_handle_);
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to register raw mic stream: %s", esp_err_to_name(ret));
+            ESP_LOGE(TAG, "Failed to enable I2S channel: %s", esp_err_to_name(ret));
+            i2s_del_channel(i2s_rx_handle_);
             return ret;
         }
 
-        // Link elements
-        const char *link_tag[] = {MIC_I2S, MIC_RAW};
-        ret = audio_pipeline_link(micPipeline_.get(), link_tag, 2);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to link microphone elements: %s", esp_err_to_name(ret));
-            return ret;
-        }
-
-        // Set event listener
-        ret = audio_pipeline_set_listener(micPipeline_.get(), micEvent_.get());
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to set microphone listener: %s", esp_err_to_name(ret));
-            return ret;
-        }
-
-        ESP_LOGI(TAG, "I2S microphone pipeline setup completed for SPH0645LM4H");
+        ESP_LOGI(TAG, "Direct I2S STD driver initialized successfully for SPH0645!");
         return ESP_OK;
     }
 
     esp_err_t MicrophoneManager::cleanupPipeline() {
-        ESP_LOGI(TAG, "Cleaning up microphone pipeline");
+        ESP_LOGI(TAG, "Cleaning up direct I2S driver");
 
-        rawMicStream_.reset();
-        i2SMicStream_.reset();
-        micPipeline_.reset();
-        micEvent_.reset();
+        if (i2s_rx_handle_) {
+            i2s_channel_disable(i2s_rx_handle_);
+            i2s_del_channel(i2s_rx_handle_);
+            i2s_rx_handle_ = nullptr;
+        }
 
         return ESP_OK;
     }
 
-    bool MicrophoneManager::hasValidAudioData(const uint8_t* audio_buffer, size_t bytes_read) {
+    size_t MicrophoneManager::convertMonoToStereo(const uint8_t* mono_data, uint8_t* stereo_data, size_t mono_bytes) {
+        if (!mono_data || !stereo_data || mono_bytes == 0) {
+            return 0;
+        }
+
+        // SPH0645 gives us 32-bit samples that need 14-bit right shift
+        const auto* raw_samples = reinterpret_cast<const int32_t*>(mono_data);
+        auto* stereo_samples = reinterpret_cast<int16_t*>(stereo_data);
+        
+        size_t raw_sample_count = mono_bytes / sizeof(int32_t);
+        const int SHIFT_VALUE = 14;  // SPH0645 specific shift
+        
+        // Better downsampling: 44100 Hz to 16000 Hz
+        // Ratio = 44100/16000 = 2.75625, so we'll use 2.75 (11:4 ratio)
+        // This gives us 44100/2.75 = 16036 Hz (very close to 16000 Hz)
+        static size_t downsample_counter = 0;
+        size_t output_sample_pairs = 0;
+        
+        // Convert 32-bit SPH0645 samples to 16-bit stereo with precise downsampling
+        for (size_t i = 0; i < raw_sample_count; i++) {
+            // Apply SPH0645 14-bit shift to get the actual audio data
+            int32_t shifted_sample = raw_samples[i] >> SHIFT_VALUE;
+            
+            // Convert to 16-bit range (shifted_sample is roughly -8000 to +8000)
+            // Scale to use more of the 16-bit range for better SNR
+            int32_t scaled_sample = shifted_sample * 4;  // Scale up by 4x
+            
+            // Clamp to 16-bit range
+            if (scaled_sample > 32767) scaled_sample = 32767;
+            if (scaled_sample < -32768) scaled_sample = -32768;
+            
+            int16_t final_sample = (int16_t)scaled_sample;
+            
+            // Downsampling logic: keep 4 out of every 11 samples (approximately 2.75:1)
+            // This pattern: keep, keep, skip, keep, skip, keep, skip, skip, skip, skip, skip
+            downsample_counter++;
+            bool keep_sample = false;
+            
+            switch (downsample_counter % 11) {
+                case 1: case 2: case 4: case 6:  // Keep these positions
+                    keep_sample = true;
+                    break;
+                default:  // Skip others
+                    keep_sample = false;
+                    break;
+            }
+            
+            if (keep_sample) {
+                // Create stereo by duplicating the mono channel
+                stereo_samples[output_sample_pairs * 2] = final_sample;     // Left channel
+                stereo_samples[output_sample_pairs * 2 + 1] = final_sample; // Right channel (duplicate)
+                output_sample_pairs++;
+            }
+        }
+        
+        // Return stereo byte count (16-bit samples, 2 channels, downsampled)
+        return output_sample_pairs * 2 * sizeof(int16_t);
+    }
+
+    bool MicrophoneManager::hasVoiceActivity(const uint8_t* audio_buffer, size_t bytes_read) {
         if (!audio_buffer || bytes_read == 0) {
             return false;
         }
 
-        // Convert to 16-bit samples for analysis (stereo data)
-        const auto* samples = reinterpret_cast<const int16_t*>(audio_buffer);
-        size_t sample_count = bytes_read / sizeof(int16_t);
+        // Handle 32-bit samples from SPH0645 and apply proper shift
+        const auto* raw_samples = reinterpret_cast<const int32_t*>(audio_buffer);
+        size_t raw_sample_count = bytes_read / sizeof(int32_t);
         
-        if (sample_count == 0) {
+        if (raw_sample_count < 10) {  // Need minimum samples for analysis
             return false;
         }
 
-        // Method 1: Check for all-zero buffer (complete silence)
-        bool all_zero = true;
-        for (size_t i = 0; i < sample_count; i++) {
-            if (samples[i] != 0) {
-                all_zero = false;
-                break;
+        const int SHIFT_VALUE = 14;  // SPH0645 specific shift
+        
+        // SIMPLIFIED VAD: Much more permissive, only block obvious issues
+        int64_t dc_sum = 0;
+        int64_t energy_sum = 0;
+        bool has_non_zero = false;
+        
+        for (size_t i = 0; i < raw_sample_count; i++) {
+            int32_t shifted_sample = raw_samples[i] >> SHIFT_VALUE;
+            dc_sum += shifted_sample;
+            energy_sum += (int64_t)shifted_sample * shifted_sample;
+            
+            if (shifted_sample != 0) {
+                has_non_zero = true;
             }
         }
         
-        if (all_zero) {
-            return false; // Buffer is completely silent
-        }
-
-        // Method 2: Calculate RMS energy to detect meaningful audio activity
-        uint64_t energy_sum = 0;
-        for (size_t i = 0; i < sample_count; i++) {
-            int32_t sample = samples[i];
-            energy_sum += (sample * sample);
-        }
-        
-        // Calculate RMS
-        double rms = sqrt(static_cast<double>(energy_sum) / sample_count);
-        
-        // Set threshold for minimum audio activity
-        // Adjust this value based on your microphone sensitivity and noise floor
-        const double MIN_AUDIO_THRESHOLD = 50.0; // Empirically determined threshold
-        
-        if (rms < MIN_AUDIO_THRESHOLD) {
-            return false; // Audio level too low, likely just noise or silence
-        }
-
-        // Method 3: Check for signal variance (ensure it's not a constant value)
-        int16_t min_sample = samples[0];
-        int16_t max_sample = samples[0];
-        
-        for (size_t i = 1; i < sample_count; i++) {
-            if (samples[i] < min_sample) min_sample = samples[i];
-            if (samples[i] > max_sample) max_sample = samples[i];
-        }
-        
-        // If dynamic range is too small, it might be a constant signal or very quiet
-        const int16_t MIN_DYNAMIC_RANGE = 20;
-        if ((max_sample - min_sample) < MIN_DYNAMIC_RANGE) {
+        // Check 1: Ensure we have non-zero data (not a completely silent buffer)
+        if (!has_non_zero) {
+            static int silent_count = 0;
+            silent_count++;
+            if (silent_count % 100 == 0) {
+                ESP_LOGD(TAG, "VAD: Blocking silent buffer (count=%d)", silent_count);
+            }
             return false;
         }
-
-        // If we pass all checks, we have valid audio data
+        
+        // Check 2: Basic DC bias sanity check (very wide range)
+        double dc_bias = (double)dc_sum / raw_sample_count;
+        if (dc_bias > -1000 || dc_bias < -15000) {
+            static int bias_fail_count = 0;
+            bias_fail_count++;
+            if (bias_fail_count % 100 == 0) {
+                ESP_LOGD(TAG, "VAD: Unusual DC bias %.1f (count=%d)", dc_bias, bias_fail_count);
+            }
+            // Still allow through - just log the issue
+        }
+        
+        // Check 3: Very low energy threshold (much more permissive)
+        double total_rms = sqrt((double)energy_sum / raw_sample_count);
+        const double MIN_ENERGY_THRESHOLD = 5.0;  // Very low threshold
+        
+        if (total_rms < MIN_ENERGY_THRESHOLD) {
+            static int low_energy_count = 0;
+            low_energy_count++;
+            if (low_energy_count % 200 == 0) {
+                ESP_LOGD(TAG, "VAD: Very low energy %.1f (count=%d)", total_rms, low_energy_count);
+            }
+            return false;  // Only block extremely quiet audio
+        }
+        
+        // Debug logging (very infrequent)
+        static int pass_count = 0;
+        pass_count++;
+        if (pass_count % 500 == 0) {
+            ESP_LOGD(TAG, "VAD: Passing audio - DC=%.1f, RMS=%.1f (pass_count=%d)", 
+                     dc_bias, total_rms, pass_count);
+        }
+        
+        // MUCH MORE PERMISSIVE: Allow almost all audio through
         return true;
     }
 

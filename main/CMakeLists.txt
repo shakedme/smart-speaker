@@ -45,11 +45,7 @@ idf_component_register(
         bluetooth_service
         esp_wifi
         esp_websocket_client
-        esp_adc
-        esp-sr
         json
-        esp-tflite-micro
-        esp-dsp
 
         # Additional for cspot
         esp_http_client

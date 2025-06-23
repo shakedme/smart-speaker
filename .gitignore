@@ -40,6 +40,4 @@ backend/node_modules
 
 # Python virtual environments
 venv/
-hey_rufus/.venv
-hey_rufus/dataset
-hey_rufus/model_data
+hey_rufus/

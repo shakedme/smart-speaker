@@ -19,14 +19,6 @@ namespace btspeaker {
         SPOTIFY
     };
 
-    enum class PlaybackState {
-        STOPPED,
-        PLAYING,
-        PAUSED,
-        PREPARING,
-        ERROR
-    };
-
     struct I2SAudioPipeline {
         PipelineHandle pipeline;
         ElementHandle i2SStreamWriter;

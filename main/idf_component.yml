@@ -3,3 +3,4 @@ dependencies:
     version: '>=5.0.0'
   espressif/mdns: '*'
   espressif/esp-tflite-micro: '*'
+  espressif/esp-dsp: '*'

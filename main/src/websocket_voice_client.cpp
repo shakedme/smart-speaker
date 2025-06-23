@@ -6,18 +6,21 @@ extern "C" {
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "cJSON.h"
-#include <string.h>
 }
 
-#include <utility>
 
 namespace btspeaker {
 
-    WebSocketVoiceClient::WebSocketVoiceClient()
-            : state(ConnectionState::DISCONNECTED), websocketClient(nullptr),
-              stateMutex(nullptr), reconnectTaskHandle(nullptr), initialized(false), reconnectAttempts(0) {
+    WebSocketVoiceClient::WebSocketVoiceClient(VoiceAssistantManager &voiceAssistantManager)
+            : config(),
+              state(ConnectionState::DISCONNECTED),
+              websocketClient(nullptr),
+              stateMutex(nullptr),
+              reconnectTaskHandle(nullptr),
+              voiceAssistantManager(voiceAssistantManager),
+              initialized(false),
+              reconnectAttempts(0) {
 
-        // Initialize WebSocket voice client
         config.serverUrl = CONFIG_WEBSOCKET_SERVER_URL;
         config.keepaliveIntervalS = CONFIG_WS_KEEPALIVE_INTERVAL_S;
         config.pingIntervalS = CONFIG_WS_PING_INTERVAL_S;
@@ -31,22 +34,16 @@ namespace btspeaker {
         shutdown();
     }
 
-    esp_err_t WebSocketVoiceClient::init() {
-        if (initialized) {
-            ESP_LOGW(TAG, "Already initialized");
-            return ESP_OK;
-        }
-
-        // Create state mutex
+    void WebSocketVoiceClient::init() {
         stateMutex = xSemaphoreCreateMutex();
         if (!stateMutex) {
             ESP_LOGE(TAG, "Failed to create state mutex");
-            return ESP_ERR_NO_MEM;
+            throw std::runtime_error("Failed to initialize WebSocket client (state mutex creation failed)");
         }
 
-        initialized = true;
-        ESP_LOGI(TAG, "WebSocket voice client initialized");
-        return ESP_OK;
+        if (connect() != ESP_OK) {
+            xTaskCreate(reconnectTask, "ws_reconnect", 4096, this, 5, &reconnectTaskHandle);
+        }
     }
 
     void WebSocketVoiceClient::shutdown() {
@@ -63,23 +60,13 @@ namespace btspeaker {
     }
 
     esp_err_t WebSocketVoiceClient::connect() {
-        if (!initialized) {
-            ESP_LOGE(TAG, "Not initialized");
-            return ESP_ERR_INVALID_STATE;
-        }
-
-        if (state.load() == ConnectionState::CONNECTED) {
-            ESP_LOGW(TAG, "Already connected");
-            return ESP_OK;
-        }
-
         ESP_LOGI(TAG, "Connecting to WebSocket server: %s", config.serverUrl.c_str());
-        setState(ConnectionState::CONNECTING);
+        setConnectionState(ConnectionState::CONNECTING);
 
         esp_err_t ret = createWebsocketClient();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to create WebSocket client: %s", esp_err_to_name(ret));
-            setState(ConnectionState::ERROR);
+            setConnectionState(ConnectionState::ERROR);
             return ret;
         }
 
@@ -87,10 +74,11 @@ namespace btspeaker {
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start WebSocket client: %s", esp_err_to_name(ret));
             destroyWebsocketClient();
-            setState(ConnectionState::ERROR);
+            setConnectionState(ConnectionState::ERROR);
             return ret;
         }
 
+        ESP_LOGI(TAG, "WebSocket client connected successfully");
         return ESP_OK;
     }
 
@@ -106,7 +94,7 @@ namespace btspeaker {
             reconnectTaskHandle = nullptr;
         }
 
-        setState(ConnectionState::DISCONNECTED);
+        setConnectionState(ConnectionState::DISCONNECTED);
     }
 
     esp_err_t WebSocketVoiceClient::sendAudioChunk(const uint8_t *audioData, size_t length) {
@@ -119,34 +107,28 @@ namespace btspeaker {
             return ESP_ERR_INVALID_ARG;
         }
 
-        // Send binary frame with audio data
-        esp_err_t ret = esp_websocket_client_send_bin(websocketClient,
-                                                      reinterpret_cast<const char *>(audioData),
-                                                      length,
-                                                      portMAX_DELAY);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to send audio chunk: %s", esp_err_to_name(ret));
-            return ret;
+        if (!websocketClient) {
+            ESP_LOGE(TAG, "WebSocket client is null");
+            return ESP_ERR_INVALID_STATE;
         }
 
-        ESP_LOGD(TAG, "Sent audio chunk: %zu bytes", length);
+        // Send binary frame with audio data with shorter timeout
+        int ret = esp_websocket_client_send_bin(websocketClient,
+                                                      (const char *)(audioData),
+                                                      length,
+                                                      pdMS_TO_TICKS(1000));
+        if (ret < 0) {
+            ESP_LOGE(TAG, "Failed to send audio chunk");
+            return ESP_FAIL;
+        }
         return ESP_OK;
     }
 
-    void WebSocketVoiceClient::setAudioResponseCallback(AudioResponseCallback callback) {
-        audioCallback = std::move(callback);
-    }
-
-    void WebSocketVoiceClient::setStateChangeCallback(StateChangeCallback callback) {
-        stateChangeCallback = std::move(callback);
-    }
 
     void WebSocketVoiceClient::cancelOperations() {
-        // Disconnect will trigger cleanup.
         disconnect();
     }
 
-// Static WebSocket event handler
     void WebSocketVoiceClient::websocketEventHandler(void *handlerArgs, esp_event_base_t base,
                                                      int32_t eventId, void *eventData) {
         auto *client = static_cast<WebSocketVoiceClient *>(handlerArgs);
@@ -161,34 +143,33 @@ namespace btspeaker {
             case WEBSOCKET_EVENT_CONNECTED:
                 ESP_LOGI(TAG, "WebSocket connected");
                 reconnectAttempts = 0;
-                setState(ConnectionState::CONNECTED);
+                setConnectionState(ConnectionState::CONNECTED);
                 break;
 
             case WEBSOCKET_EVENT_DISCONNECTED:
                 ESP_LOGI(TAG, "WebSocket disconnected");
-                setState(ConnectionState::DISCONNECTED);
+                setConnectionState(ConnectionState::DISCONNECTED);
 
-                // Start reconnection task if configured
                 if (reconnectAttempts < config.maxReconnectAttempts) {
                     xTaskCreate(reconnectTask, "ws_reconnect", 4096, this, 5, &reconnectTaskHandle);
                 } else {
                     ESP_LOGE(TAG, "Max reconnection attempts reached");
-                    setState(ConnectionState::ERROR);
+                    setConnectionState(ConnectionState::ERROR);
                 }
                 break;
 
             case WEBSOCKET_EVENT_DATA:
                 if (eventData->op_code == 0x1) { // Text frame
-                    handleTextMessage(eventData->data_ptr, eventData->data_len);
+                    voiceAssistantManager.onTextData(reinterpret_cast<const char *>(eventData->data_ptr));
                 } else if (eventData->op_code == 0x2) { // Binary frame
-                    handleBinaryMessage(reinterpret_cast<const uint8_t *>(eventData->data_ptr),
-                                        eventData->data_len);
+                    voiceAssistantManager.onAudioResponse(reinterpret_cast<const uint8_t *>(eventData->data_ptr),
+                                                          eventData->data_len);
                 }
                 break;
 
             case WEBSOCKET_EVENT_ERROR:
                 ESP_LOGE(TAG, "WebSocket error");
-                setState(ConnectionState::ERROR);
+                setConnectionState(ConnectionState::ERROR);
                 break;
 
             default:
@@ -201,6 +182,10 @@ namespace btspeaker {
         websocket_cfg.uri = config.serverUrl.c_str();
         websocket_cfg.keep_alive_idle = config.keepaliveIntervalS;
         websocket_cfg.ping_interval_sec = config.pingIntervalS;
+        websocket_cfg.reconnect_timeout_ms = config.reconnectTimeoutMs;
+        websocket_cfg.keep_alive_enable = true;
+        websocket_cfg.network_timeout_ms = 10000;
+        websocket_cfg.task_stack = 4096;
 
         websocketClient = esp_websocket_client_init(&websocket_cfg);
         if (!websocketClient) {
@@ -229,76 +214,13 @@ namespace btspeaker {
         }
     }
 
-    void WebSocketVoiceClient::setState(ConnectionState newState) {
+    void WebSocketVoiceClient::setConnectionState(ConnectionState newState) {
         ConnectionState old_state = state.exchange(newState);
-
         if (old_state != newState) {
             ESP_LOGI(TAG, "State changed: %d -> %d", static_cast<int>(old_state), static_cast<int>(newState));
-
-            if (stateChangeCallback) {
-                stateChangeCallback(newState);
-            }
         }
     }
 
-    void WebSocketVoiceClient::handleTextMessage(const char *data, size_t length) {
-        std::string message(data, length);
-        ESP_LOGD(TAG, "Received backend message: %s", message.c_str());
-
-        cJSON *root = cJSON_Parse(message.c_str());
-        if (!root) {
-            ESP_LOGE(TAG, "Failed to parse backend JSON response");
-            return;
-        }
-
-        // Check message type
-        cJSON *type_item = cJSON_GetObjectItem(root, "type");
-        if (type_item && cJSON_IsString(type_item)) {
-            std::string msg_type = type_item->valuestring;
-
-            if (msg_type == "state_change") {
-                // Handle backend state change
-                cJSON *state_item = cJSON_GetObjectItem(root, "state");
-                if (state_item && cJSON_IsString(state_item)) {
-                    std::string new_state = state_item->valuestring;
-                    ESP_LOGI(TAG, "Backend state changed to: %s", new_state.c_str());
-
-                    if (audioCallback) {
-                        // Pass state change to command processor
-                        audioCallback(nullptr, 0, false, message.c_str());
-                    }
-                }
-            } else if (msg_type == "error") {
-                // Handle error message
-                cJSON *error_msg = cJSON_GetObjectItem(root, "message");
-                if (error_msg && cJSON_IsString(error_msg)) {
-                    ESP_LOGE(TAG, "Received error from backend: %s", error_msg->valuestring);
-                }
-            }
-        } else {
-            // Check for legacy intent messages (for backward compatibility)
-            cJSON *intent_item = cJSON_GetObjectItem(root, "intent");
-            if (intent_item && cJSON_IsString(intent_item)) {
-                ESP_LOGI(TAG, "Received intent from backend: %s", message.c_str());
-                if (audioCallback) {
-                    // Pass intent JSON to command processor
-                    audioCallback(nullptr, 0, true, message.c_str());
-                }
-            }
-        }
-
-        cJSON_Delete(root);
-    }
-
-    void WebSocketVoiceClient::handleBinaryMessage(const uint8_t *data, size_t length) {
-        ESP_LOGD(TAG, "Received binary message: %zu bytes", length);
-
-        if (audioCallback) {
-            audioCallback(data, length, false, nullptr);
-        }
-    }
-
-// Static reconnection task
     void WebSocketVoiceClient::reconnectTask(void *pvParameters) {
         auto *client = static_cast<WebSocketVoiceClient *>(pvParameters);
 

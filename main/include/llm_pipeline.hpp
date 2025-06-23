@@ -40,7 +40,7 @@ namespace btspeaker {
         void shutdown();
 
         // Queue audio chunk for streaming playback
-        esp_err_t queueAudioChunk(const uint8_t *audio_data, size_t length, bool is_final);
+        esp_err_t queueAudioChunk(const uint8_t *audio_data, size_t length);
 
         // Control functions
         esp_err_t stop();
@@ -89,10 +89,8 @@ namespace btspeaker {
         std::vector<uint8_t> audioBuffer_;
     };
 
-// Audio data queue item
     struct AudioDataItem {
         std::vector<uint8_t> data;
-        bool isFinal;
     };
 
 } // namespace btspeaker 

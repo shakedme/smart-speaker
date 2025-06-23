@@ -1,19 +1,24 @@
 #include "../include/app_manager.hpp"
 #include "../include/voice_config.hpp"
 #include "../include/audio_source_manager.hpp"
+#include "../include/memory_utils.hpp"
 
 extern "C" {
 #include "esp_log.h"
 #include "esp_system.h"
 #include "nvs_flash.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 }
 
 namespace btspeaker {
 
+    static constexpr const char *TAG = "APP_MANAGER";
 
     AppManager::AppManager() {
+        ESP_LOGI(TAG, "🚀 Starting AppManager initialization");
+
         initNVS();
 
         wifiManager = std::make_unique<WiFiManager>();
@@ -22,84 +27,75 @@ namespace btspeaker {
         audioSourceManager = std::make_unique<AudioSourceManager>(*wifiManager);
 
         if (wifiManager->isConnected()) {
-            voiceAssistant = std::make_unique<VoiceAssistantManager>(*audioSourceManager);
-            voiceAssistant->setMusicPlaybackCallback(
-                    [this](const char *command) {
-                        this->musicPlaybackCmdCallback(command);
-                    }
-            );
-        } else {
-            ESP_LOGW(TAG, "WiFi not connected, voice assistant disabled");
+            voiceAssistantManager = std::make_unique<VoiceAssistantManager>(*audioSourceManager);
         }
 
-        ESP_LOGI(TAG, "Application initialized successfully");
+        ESP_LOGI(TAG, "✅ AppManager initialization complete");
     }
 
     AppManager::~AppManager() {
         shutdown();
     }
 
-    esp_err_t AppManager::run() {
-        ESP_LOGI(TAG, "Starting application");
+    esp_err_t AppManager::start() {
+        ESP_LOGI(TAG, "🎬 Starting application services");
 
-        audioSourceManager->start();
-
-        if (voiceAssistant) {
-            voiceAssistant->start();
+        // Start audio source manager
+        esp_err_t ret = audioSourceManager->start();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start audio source manager: %s", esp_err_to_name(ret));
+            return ret;
         }
 
-        ESP_LOGI(TAG, "Application running. Starting event loop...");
-
-        while (true) {
-            vTaskDelay(pdMS_TO_TICKS(1000));  // Simple event loop for now
+        // Start voice assistant if available
+        if (voiceAssistantManager) {
+            ret = voiceAssistantManager->start();
+            if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to start voice assistant: %s", esp_err_to_name(ret));
+                // Continue without voice assistant
+            }
         }
+
+        ESP_LOGI(TAG, "✅ Application services started successfully");
+        return ESP_OK;
+    }
+
+    esp_err_t AppManager::stop() {
+        ESP_LOGI(TAG, "🛑 Stopping application services");
+
+        if (voiceAssistantManager) {
+            voiceAssistantManager->stop();
+        }
+
+        audioSourceManager->stop();
+
+        ESP_LOGI(TAG, "✅ Application services stopped");
+        return ESP_OK;
     }
 
     void AppManager::shutdown() {
-        // Stop voice assistant first
-        if (voiceAssistant) {
-            voiceAssistant->stop();
-            voiceAssistant->shutdown();
-            voiceAssistant.reset();
+        ESP_LOGI(TAG, "🔌 Shutting down application");
+
+        stop();
+
+        if (voiceAssistantManager) {
+            voiceAssistantManager->shutdown();
+            voiceAssistantManager.reset();
         }
 
-        // Clean up AudioSourceManager
-        audioSourceManager->stop();
+        audioSourceManager.reset();
+        wifiManager.reset();
 
-        // Clean up WiFi
-        if (wifiManager) {
-            wifiManager->shutdown();
-            wifiManager.reset();
-        }
-
-        ESP_LOGI(TAG, "Application shutdown complete");
+        ESP_LOGI(TAG, "✅ Application shutdown complete");
     }
 
-
-    esp_err_t AppManager::initNVS() {
-        ESP_LOGD(TAG, "Initializing NVS");
+    void AppManager::initNVS() {
         esp_err_t ret = nvs_flash_init();
         if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-            ESP_LOGW(TAG, "NVS needs erase and reinit: %s", esp_err_to_name(ret));
-            ret = nvs_flash_erase();
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to erase NVS: %s", esp_err_to_name(ret));
-                return ret;
-            }
+            ESP_ERROR_CHECK(nvs_flash_erase());
             ret = nvs_flash_init();
         }
-
-        return ret;
-    }
-
-    void AppManager::musicPlaybackCmdCallback(const char *command) {
-        if (!command) {
-            ESP_LOGW(TAG, "Invalid music command");
-            return;
-        }
-
-        ESP_LOGI(TAG, "Processing voice music command: %s", command);
-        audioSourceManager->onMusicCommand(command);
+        ESP_ERROR_CHECK(ret);
     }
 
 } // namespace btspeaker 

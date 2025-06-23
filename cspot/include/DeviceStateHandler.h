@@ -22,94 +22,101 @@
 #include "protobuf/connect.pb.h"  // for PutStateRequest, DeviceState, PlayerState...
 
 namespace cspot {
-struct Context;
-struct PlayerContext;
+    struct Context;
+    struct PlayerContext;
 
-class DeviceStateHandler {
- public:
-  //Command Callback Structure
-  enum CommandType {
-    STOP,
-    PLAY,
-    PAUSE,
-    DISC,
-    DEPLETED,
-    FLUSH,
-    PLAYBACK_START,
-    PLAYBACK,
-    SKIP_NEXT,
-    SKIP_PREV,
-    SEEK,
-    SET_SHUFFLE,
-    SET_REPEAT,
-    VOLUME,
-    TRACK_INFO,
-  };
+    class DeviceStateHandler {
+    public:
+        //Command Callback Structure
+        enum CommandType {
+            STOP,
+            PLAY,
+            PAUSE,
+            DISC,
+            DEPLETED,
+            FLUSH,
+            PLAYBACK_START,
+            PLAYBACK,
+            SKIP_NEXT,
+            SKIP_PREV,
+            SEEK,
+            SET_SHUFFLE,
+            SET_REPEAT,
+            VOLUME,
+            TRACK_INFO,
+        };
 
-  typedef std::variant<std::shared_ptr<cspot::QueuedTrack>, int32_t, bool>
-      CommandData;
+        typedef std::variant<std::shared_ptr<cspot::QueuedTrack>, int32_t, bool>
+                CommandData;
 
-  struct Command {
-    CommandType commandType;
-    CommandData data;
-  };
+        struct Command {
+            CommandType commandType;
+            CommandData data;
+        };
 
-  typedef std::function<void(Command)> StateCallback;
-  std::function<void()> onClose;
+        typedef std::function<void(Command)> StateCallback;
+        std::function<void()> onClose;
 
-  DeviceStateHandler(std::shared_ptr<cspot::Context>, std::function<void()>);
-  ~DeviceStateHandler();
+        DeviceStateHandler(std::shared_ptr<cspot::Context>, std::function<void()>);
 
-  void disconnect();
+        ~DeviceStateHandler();
 
-  void putDeviceState(PutStateReason member_type =
-                          PutStateReason::PutStateReason_PLAYER_STATE_CHANGED);
+        void disconnect();
 
-  void setDeviceState(PutStateReason put_state_reason);
-  void putPlayerState(PutStateReason member_type =
-                          PutStateReason::PutStateReason_PLAYER_STATE_CHANGED);
-  void handleConnectState();
-  void sendCommand(CommandType, CommandData data = {});
+        void putDeviceState(PutStateReason member_type =
+        PutStateReason::PutStateReason_PLAYER_STATE_CHANGED);
 
-  Device device = Device_init_zero;
+        void setDeviceState(PutStateReason put_state_reason);
 
-  std::vector<ProvidedTrack> currentTracks = {};
-  StateCallback stateCallback;
+        void putPlayerState(PutStateReason member_type =
+        PutStateReason::PutStateReason_PLAYER_STATE_CHANGED);
 
-  uint64_t started_playing_at = 0;
-  uint32_t last_message_id = -1;
-  uint8_t offset = 0;
-  int64_t offsetFromStartInMillis = 0;
+        void handleConnectState();
 
-  bool is_active = false;
-  bool reloadPreloadedTracks = true;
-  bool needsToBeSkipped = true;
-  bool playerStateChanged = false;
+        void sendCommand(CommandType, CommandData data = {});
 
-  std::shared_ptr<cspot::TrackPlayer> trackPlayer;
-  std::shared_ptr<cspot::TrackQueue> trackQueue;
-  std::shared_ptr<cspot::Context> ctx;
+        Device device = Device_init_zero;
 
- private:
-  std::shared_ptr<PlayerContext> playerContext;
+        std::vector<ProvidedTrack> currentTracks = {};
+        StateCallback stateCallback;
 
-  std::pair<uint8_t*, std::vector<ProvidedTrack>*> queuePacket = {
-      &offset, &currentTracks};
-  std::vector<std::pair<std::string, std::string>> metadata_map = {};
-  std::vector<std::pair<std::string, std::string>> context_metadata_map = {};
-  std::mutex playerStateMutex;
-  std::string context_uri, context_url;
-  void parseCommand(std::vector<uint8_t>& data);
-  void skip(CommandType dir, bool notify);
+        uint64_t started_playing_at = 0;
+        uint32_t last_message_id = -1;
+        uint8_t offset = 0;
+        int64_t offsetFromStartInMillis = 0;
 
-  void unreference(char** string) {
-    if (*string != NULL) {
-      free(*string);
-      *string = NULL;
-    }
-  }
+        bool is_active = false;
+        bool reloadPreloadedTracks = true;
+        bool needsToBeSkipped = true;
+        bool playerStateChanged = false;
 
-  static void reloadTrackList(void*);
-  std::atomic<bool> resolvingContext = false;
-};
+        std::shared_ptr<cspot::TrackPlayer> trackPlayer;
+        std::shared_ptr<cspot::TrackQueue> trackQueue;
+        std::shared_ptr<cspot::Context> ctx;
+        std::shared_ptr<PlayerContext> playerContext;
+
+    private:
+
+        std::pair<uint8_t *, std::vector<ProvidedTrack> *> queuePacket = {
+                &offset, &currentTracks};
+        std::vector<std::pair<std::string, std::string>> metadata_map = {};
+        std::vector<std::pair<std::string, std::string>> context_metadata_map = {};
+        std::mutex playerStateMutex;
+        std::string context_uri, context_url;
+
+        void parseCommand(std::vector<uint8_t> &data);
+
+        void skip(CommandType dir, bool notify);
+
+        void unreference(char **string) {
+            if (*string != NULL) {
+                free(*string);
+                *string = NULL;
+            }
+        }
+
+        static void reloadTrackList(void *);
+
+        std::atomic<bool> resolvingContext = false;
+    };
 }  // namespace cspot

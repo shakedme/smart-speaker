@@ -11,16 +11,12 @@ set(PROJECT_SRCS
         src/websocket_voice_client.cpp
         src/voice_assistant_manager.cpp
         src/microphone_manager.cpp
-        src/wake_word_detector.cpp
-        src/voice_command_processor.cpp
         src/wifi_manager.cpp
         src/spotify_pipeline.cpp
         src/audio_pipeline_util.cpp
         src/audio_source_manager.cpp
         src/adf_audio_sink.cpp
         src/base_audio_pipeline.cpp
-        src/rufus_model_data.cc
-        src/micro_features_generator.cpp
 
         # ESP32-specific cspot files
         "../cspot/esp32/main/EspPlayer.cpp"
@@ -53,6 +49,7 @@ idf_component_register(
         esp-sr
         json
         esp-tflite-micro
+        esp-dsp
 
         # Additional for cspot
         esp_http_client

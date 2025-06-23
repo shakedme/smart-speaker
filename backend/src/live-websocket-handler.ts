@@ -2,7 +2,9 @@ import {WebSocket} from 'ws';
 import {v4 as uuidv4} from 'uuid';
 import {GoogleGenAI, Modality, Part} from '@google/genai';
 import {Cobra} from "@picovoice/cobra-node";
+import {Porcupine} from "@picovoice/porcupine-node";
 import axios from 'axios';
+import * as fs from 'fs';
 
 // The state of the WebSocket session handler
 type SessionState =
@@ -20,9 +22,14 @@ interface ControlMessage {
 }
 
 // VAD constants
-const VAD_SENSITIVITY = 0.7; // 0.0 (lowest) to 1.0 (highest)
+const VAD_SENSITIVITY = 0.4; // 0.0 (lowest) to 1.0 (highest)
 const VAD_SILENCE_TIMEOUT_MS = 1200; // Time of silence before processing
 const CONVERSATION_TIMEOUT_MS = 5000; // Time to keep conversation session alive with no user input
+
+// Audio constants
+const INPUT_SAMPLE_RATE = 16000; // ESP32 now sends at 16kHz directly
+const TARGET_SAMPLE_RATE = 16000; // VAD/Wake word models expect 16kHz
+const USE_RESAMPLING = false; // Disabled - ESP32 sends 16kHz directly
 
 export class LiveWebSocketHandler {
     private ws: WebSocket;
@@ -30,6 +37,8 @@ export class LiveWebSocketHandler {
     private gemini: GoogleGenAI;
     private cobra: Cobra;
     private cobraFrameLength: number;
+    private porcupine: Porcupine;
+    private porcupineFrameLength: number;
 
     // State management
     private sessionState: SessionState = 'IDLE';
@@ -38,13 +47,23 @@ export class LiveWebSocketHandler {
     // Buffers
     private audioBuffer: Buffer[] = []; // Stores the complete user utterance
     private vadBuffer: Buffer = Buffer.alloc(0); // Temporary buffer for VAD frame processing
+    private porcupineBuffer: Buffer = Buffer.alloc(0); // Temporary buffer for wake word processing
 
     // VAD state
     private silenceTimer: NodeJS.Timeout | null = null;
+    private wakeWordDetected: boolean = false;
 
     // Conversation management
     private conversationTimer: NodeJS.Timeout | null = null;
     private isGeminiSpeaking: boolean = false;
+
+    // Debug audio recording
+    private originalAudioBuffer: Buffer[] = []; // 44.1kHz original audio
+    private resampledAudioBuffer: Buffer[] = []; // 16kHz resampled audio
+    private recordingStartTime: number = 0;
+    private readonly RECORDING_DURATION_MS = 10000; // 10 seconds
+    private hasWrittenOriginalWav: boolean = false;
+    private hasWrittenResampledWav: boolean = false;
 
     constructor(ws: WebSocket) {
         this.ws = ws;
@@ -65,7 +84,12 @@ export class LiveWebSocketHandler {
         this.cobra = new Cobra(picoAccessKey);
         this.cobraFrameLength = this.cobra.frameLength;
 
+        // Initialize Porcupine Wake Word Detection
+        this.porcupine = new Porcupine(picoAccessKey, ['./Hey-Rufus_en_mac_v3_0_0.ppn'], [0.5]);
+        this.porcupineFrameLength = this.porcupine.frameLength;
+
         this.broadcastStateChange('LISTENING');
+        this.recordingStartTime = Date.now();
         this.log('info', `Session created. State: ${this.sessionState}. Waiting for audio...`);
     }
 
@@ -77,6 +101,8 @@ export class LiveWebSocketHandler {
 
         if (this.sessionState === 'LISTENING' || this.sessionState === 'WAITING_FOR_USER') {
             this.handleAudioData(data);
+        } else {
+            this.log('warn', `Ignoring audio data - not in listening state (current: ${this.sessionState})`);
         }
     }
 
@@ -91,16 +117,17 @@ export class LiveWebSocketHandler {
 
         // Add incoming audio to the main buffer for the full utterance
         this.audioBuffer.push(data);
-
-        // Add to the VAD buffer for frame processing
+        // Add processed audio to processing buffers
         this.vadBuffer = Buffer.concat([this.vadBuffer, data]);
+        this.porcupineBuffer = Buffer.concat([this.porcupineBuffer, data]);
 
         // Process audio in VAD-compatible frames
-        const frameSizeInBytes = this.cobraFrameLength * 2; // 16-bit PCM
+        const vadFrameSizeInBytes = this.cobraFrameLength * 2; // 16-bit PCM
+        const porcupineFrameSizeInBytes = this.porcupineFrameLength * 2; // 16-bit PCM
 
-        while (this.vadBuffer.length >= frameSizeInBytes) {
-            const audioFrameBytes = this.vadBuffer.subarray(0, frameSizeInBytes);
-            this.vadBuffer = this.vadBuffer.subarray(frameSizeInBytes);
+        while (this.vadBuffer.length >= vadFrameSizeInBytes) {
+            const audioFrameBytes = this.vadBuffer.subarray(0, vadFrameSizeInBytes);
+            this.vadBuffer = this.vadBuffer.subarray(vadFrameSizeInBytes);
 
             // Explicitly read Int16 values to ensure correct format for Cobra.
             const audioFrameInt16 = new Int16Array(this.cobraFrameLength);
@@ -111,9 +138,32 @@ export class LiveWebSocketHandler {
             const voiceProbability = this.cobra.process(audioFrameInt16);
 
             if (voiceProbability > VAD_SENSITIVITY) {
-                this.log(`info`, `Voice detected with probability ${voiceProbability}. Accumulating audio...`);
                 this.resetConversationTimer();
-                this.resetSilenceTimer();
+
+                // Only check for wake word when VAD detects voice
+                if (!this.wakeWordDetected) {
+                    // Check same audio frame for wake word detection
+                    if (this.porcupineBuffer.length >= porcupineFrameSizeInBytes) {
+                        const porcupineFrameBytes = this.porcupineBuffer.subarray(0, porcupineFrameSizeInBytes);
+                        this.porcupineBuffer = this.porcupineBuffer.subarray(porcupineFrameSizeInBytes);
+
+                        const porcupineAudioFrameInt16 = new Int16Array(this.porcupineFrameLength);
+                        for (let i = 0; i < this.porcupineFrameLength; i++) {
+                            porcupineAudioFrameInt16[i] = porcupineFrameBytes.readInt16LE(i * 2);
+                        }
+
+                        const keywordIndex = this.porcupine.process(porcupineAudioFrameInt16);
+                        if (keywordIndex !== -1) {
+                            this.log('info', `Wake word detected! Starting silence timer.`);
+                            this.wakeWordDetected = true;
+                        }
+                    }
+                }
+
+                if (this.wakeWordDetected) {
+                    this.resetSilenceTimer();
+                    break;
+                }
             }
         }
     }
@@ -122,10 +172,14 @@ export class LiveWebSocketHandler {
         if (this.silenceTimer) {
             clearTimeout(this.silenceTimer);
         }
-        // If we don't hear more speech for the timeout duration, process the command
+        // If we don't hear more speech for the timeout duration, process the command only if wake word was detected
         this.silenceTimer = setTimeout(() => {
-            this.log('info', `Silence detected. Processing accumulated audio.`);
-            this.processIntent();
+            if (this.wakeWordDetected) {
+                this.log('info', `Silence detected after wake word. Processing accumulated audio.`);
+                this.processIntent();
+            } else {
+                this.log('debug', `Silence detected but no wake word detected. Continuing to listen.`);
+            }
         }, VAD_SILENCE_TIMEOUT_MS);
     }
 
@@ -133,17 +187,19 @@ export class LiveWebSocketHandler {
         if (this.conversationTimer) {
             clearTimeout(this.conversationTimer);
         }
-        // If there's no user activity for the timeout duration, close conversation
-        this.conversationTimer = setTimeout(() => {
-            if (!this.isGeminiSpeaking) {
-                this.log('info', 'Conversation timeout. Closing session.');
-                this.endConversation();
-            } else {
-                this.log('info', 'Conversation timeout delayed - Gemini is still speaking.');
-                // Reset timer to check again later
-                this.resetConversationTimer();
-            }
-        }, CONVERSATION_TIMEOUT_MS);
+        if (this.responseSession) {
+            this.conversationTimer = setTimeout(() => {
+                if (!this.isGeminiSpeaking) {
+                    this.log('info', 'Conversation timeout. Closing session.');
+                    this.endConversation();
+                } else {
+                    this.log('info', 'Conversation timeout delayed - Gemini is still speaking.');
+                    // Reset timer to check again later
+                    this.resetConversationTimer();
+                }
+            }, CONVERSATION_TIMEOUT_MS);
+        }
+
     }
 
     private broadcastStateChange(newState: SessionState): void {
@@ -151,7 +207,7 @@ export class LiveWebSocketHandler {
         if (this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify({
                 type: 'state_change',
-                state: newState
+                data: newState
             }));
         }
         this.log('info', `State changed to: ${newState}`);
@@ -279,7 +335,11 @@ export class LiveWebSocketHandler {
                 this.broadcastStateChange('HANDLING_COMMAND');
                 const uri = await this.resolveSpotifyUri(intent.data);
                 if (uri) {
-                    this.ws.send(JSON.stringify({intent: 'spotify', data: uri}));
+                    this.ws.send(JSON.stringify({
+                        type: 'intent',
+                        intent: 'spotify',
+                        data: uri
+                    }));
                 } else {
                     this.sendError(`Could not find Spotify URI for: ${intent.data}`);
                 }
@@ -288,7 +348,11 @@ export class LiveWebSocketHandler {
             case 'playback_control':
                 this.log('info', `Intent is "playback_control". Data: ${intent.data}`);
                 this.broadcastStateChange('HANDLING_COMMAND');
-                this.ws.send(JSON.stringify(intent));
+                this.ws.send(JSON.stringify(({
+                    type: 'intent',
+                    intent: 'playback_control',
+                    data: intent.data
+                })));
                 this.resetToListening(); // Command sent, go back to listening
                 break;
             default:
@@ -387,6 +451,8 @@ export class LiveWebSocketHandler {
     private clearAudioBuffers(): void {
         this.audioBuffer = [];
         this.vadBuffer = Buffer.alloc(0);
+        this.porcupineBuffer = Buffer.alloc(0);
+        this.wakeWordDetected = false;
     }
 
     private clearAllTimers(): void {
@@ -413,6 +479,7 @@ export class LiveWebSocketHandler {
         this.clearAllTimers();
         this.sessionState = 'IDLE';
         this.cobra.release(); // Release Cobra resources
+        this.porcupine.release(); // Release Porcupine resources
     }
 
     private log(level: 'info' | 'warn' | 'error' | 'debug', message: string): void {
@@ -455,5 +522,73 @@ export class LiveWebSocketHandler {
             this.sendError('Spotify token error: ' + e);
             return null;
         }
+    }
+
+    // Debug WAV file writing methods
+    private writeOriginalWavFile(): void {
+        if (this.hasWrittenOriginalWav) return;
+
+        try {
+            const combinedAudio = Buffer.concat(this.originalAudioBuffer);
+            const wavBuffer = this.createWavBufferForDebug(combinedAudio, INPUT_SAMPLE_RATE);
+
+            const filename = `debug_esp32_${this.sessionId}_16000Hz.wav`;
+            fs.writeFileSync(filename, wavBuffer);
+
+            this.log('info', `Saved ESP32 audio to ${filename} (${combinedAudio.length} bytes, ~${(combinedAudio.length / 2 / INPUT_SAMPLE_RATE).toFixed(1)}s)`);
+            this.hasWrittenOriginalWav = true;
+        } catch (error) {
+            this.log('error', `Failed to write original WAV file: ${error}`);
+        }
+    }
+
+    private writeResampledWavFile(): void {
+        if (this.hasWrittenResampledWav) return;
+
+        try {
+            const combinedAudio = Buffer.concat(this.resampledAudioBuffer);
+            const sampleRate = USE_RESAMPLING ? TARGET_SAMPLE_RATE : INPUT_SAMPLE_RATE;
+            const wavBuffer = this.createWavBufferForDebug(combinedAudio, sampleRate);
+
+            const filename = `debug_processed_${this.sessionId}_${sampleRate}Hz.wav`;
+            fs.writeFileSync(filename, wavBuffer);
+
+            this.log('info', `Saved processed audio to ${filename} (${combinedAudio.length} bytes, ~${(combinedAudio.length / 2 / sampleRate).toFixed(1)}s)`);
+            this.hasWrittenResampledWav = true;
+        } catch (error) {
+            this.log('error', `Failed to write processed WAV file: ${error}`);
+        }
+    }
+
+    private createWavBufferForDebug(pcmData: Buffer, sampleRate: number): Buffer {
+        const numChannels = 1;
+        const bitsPerSample = 16;
+        const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+        const blockAlign = numChannels * (bitsPerSample / 8);
+        const dataSize = pcmData.length;
+        const fileSize = 36 + dataSize;
+
+        const buffer = Buffer.alloc(44);
+
+        // RIFF header
+        buffer.write('RIFF', 0);
+        buffer.writeUInt32LE(fileSize, 4);
+        buffer.write('WAVE', 8);
+
+        // "fmt " sub-chunk
+        buffer.write('fmt ', 12);
+        buffer.writeUInt32LE(16, 16); // Sub-chunk size (16 for PCM)
+        buffer.writeUInt16LE(1, 20); // Audio format (1 for PCM)
+        buffer.writeUInt16LE(numChannels, 22);
+        buffer.writeUInt32LE(sampleRate, 24);
+        buffer.writeUInt32LE(byteRate, 28);
+        buffer.writeUInt16LE(blockAlign, 32);
+        buffer.writeUInt16LE(bitsPerSample, 34);
+
+        // "data" sub-chunk
+        buffer.write('data', 36);
+        buffer.writeUInt32LE(dataSize, 40);
+
+        return Buffer.concat([buffer, pcmData]);
     }
 }

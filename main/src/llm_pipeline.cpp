@@ -56,7 +56,7 @@ namespace btspeaker {
         getState(State::IDLE);
     }
 
-    esp_err_t LLMPipeline::queueAudioChunk(const uint8_t *audio_data, size_t length, bool is_final) {
+    esp_err_t LLMPipeline::queueAudioChunk(const uint8_t *audio_data, size_t length) {
         if (state_.load() == State::IDLE) {
             ESP_LOGI(TAG, "Starting LLM audio playback");
             getState(State::PREPARING);
@@ -83,7 +83,6 @@ namespace btspeaker {
         // Create audio data item
         auto *item = new AudioDataItem();
         item->data.assign(audio_data, audio_data + length);
-        item->isFinal = is_final;
 
         // Queue the data
         if (xQueueSend(audioDataQueue_, &item, pdMS_TO_TICKS(1000)) != pdTRUE) {
@@ -92,7 +91,7 @@ namespace btspeaker {
             return ESP_ERR_TIMEOUT;
         }
 
-        ESP_LOGD(TAG, "Queued audio chunk (%zu bytes, final: %s)", length, is_final ? "yes" : "no");
+        ESP_LOGD(TAG, "Queued audio chunk (%zu bytes)", length);
         return ESP_OK;
     }
 
@@ -145,7 +144,6 @@ namespace btspeaker {
     void LLMPipeline::runAudioPlayback() {
         ESP_LOGI(TAG, "LLM audio playback task started");
 
-        // Start response pipeline
         if (responsePipeline_) {
             esp_err_t ret = audio_pipeline_run(responsePipeline_.get());
             if (ret != ESP_OK) {
@@ -155,9 +153,7 @@ namespace btspeaker {
             }
         }
 
-        bool playback_complete = false;
-
-        while (state_.load() != State::IDLE && !playback_complete) {
+        while (state_.load() != State::IDLE) {
             AudioDataItem *item = nullptr;
 
             // Wait for audio data
@@ -166,11 +162,6 @@ namespace btspeaker {
                     esp_err_t ret = writeAudioToPipeline(item->data.data(), item->data.size());
                     if (ret != ESP_OK) {
                         ESP_LOGW(TAG, "Failed to write audio to pipeline: %s", esp_err_to_name(ret));
-                    }
-
-                    if (item->isFinal) {
-                        playback_complete = true;
-                        ESP_LOGI(TAG, "Final audio chunk processed, playback complete");
                     }
                 }
 

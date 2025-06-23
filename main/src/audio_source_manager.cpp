@@ -1,5 +1,6 @@
 #include "../include/audio_source_manager.hpp"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 
 namespace btspeaker {
 
@@ -11,12 +12,9 @@ namespace btspeaker {
             previousSource(AudioSource::NONE),
             volume(100),
             isInitialized(false) {
-        ESP_LOGI(TAG, "Initializing AudioSourceManager");
-
         btPipeline = std::make_unique<BluetoothPipeline>();
         btPipeline->setupPipeline();
         btPipeline->setConnectedCallback([this]() {
-            ESP_LOGI(TAG, "Bluetooth connected");
             this->switchToSource(AudioSource::BLUETOOTH);
         });
 
@@ -25,11 +23,7 @@ namespace btspeaker {
             spotifyPipeline->setAuthenticatedCallback([this]() {
                 this->switchToSource(AudioSource::SPOTIFY);
             });
-//            ESP_LOGI(TAG, "LLM PIPELINE PRE INIT: Available internal memory: %d",
-//                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-//            llmPipeline = std::make_unique<LLMPipeline>();
-//            ESP_LOGI(TAG, "LLM PIPELINE POST INIT: Available internal memory: %d",
-//                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+            llmPipeline = std::make_unique<LLMPipeline>();
         }
 
         // Initialize state
@@ -37,8 +31,6 @@ namespace btspeaker {
         previousSource = AudioSource::NONE;
         volume = 100;
         isInitialized = true;
-
-        ESP_LOGI(TAG, "AudioSourceManager initialized successfully");
     }
 
     esp_err_t AudioSourceManager::start() {
@@ -49,14 +41,7 @@ namespace btspeaker {
 
         ESP_LOGI(TAG, "Starting AudioSourceManager");
 
-        // Start Bluetooth pipeline (always available)
-        ESP_LOGI(TAG, "PRE BT START: Available internal memory: %d",
-                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         btPipeline->start();
-        ESP_LOGI(TAG, "POST BT START: Available internal memory: %d",
-                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-
-        // Default to Bluetooth source
         switchToSource(AudioSource::BLUETOOTH);
 
         ESP_LOGI(TAG, "AudioSourceManager started successfully");
@@ -309,9 +294,7 @@ namespace btspeaker {
         }
     }
 
-// ===== VOICE RESPONSE METHODS =====
-
-    esp_err_t AudioSourceManager::queueVoiceResponseChunk(const uint8_t *audio_data, size_t length, bool is_final) {
+    esp_err_t AudioSourceManager::queueVoiceResponseChunk(const uint8_t *audio_data, size_t length) {
         if (!isInitialized || !llmPipeline) {
             return ESP_ERR_INVALID_STATE;
         }
@@ -322,11 +305,10 @@ namespace btspeaker {
             if (ret != ESP_OK) {
                 ESP_LOGW(TAG, "Failed to pause current source: %s", esp_err_to_name(ret));
             }
-
             switchToSource(AudioSource::VOICE_RESPONSE);
         }
 
-        esp_err_t ret = llmPipeline->queueAudioChunk(audio_data, length, is_final);
+        esp_err_t ret = llmPipeline->queueAudioChunk(audio_data, length);
 
         return ret;
     }
@@ -352,7 +334,6 @@ namespace btspeaker {
         return ESP_OK;
     }
 
-// ===== SPOTIFY METHODS =====
 
     esp_err_t AudioSourceManager::spotifyPlay(const std::string &uri) {
         if (!isInitialized || !spotifyPipeline) {
@@ -374,8 +355,6 @@ namespace btspeaker {
 
         return ret;
     }
-
-// ===== CALLBACK MANAGEMENT =====
 
     void AudioSourceManager::onMusicCommand(const char *command) {
         esp_err_t ret = ESP_OK;

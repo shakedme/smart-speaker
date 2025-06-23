@@ -274,8 +274,10 @@ namespace btspeaker {
         config.max_uri_handlers = 8;
         config.max_resp_headers = 8;
         config.stack_size = 16384;  // Increased for TLS operations
-
-        ESP_LOGI(TAG, "Starting HTTP server on port %d", SPOTIFY_CONNECT_PORT);
+        
+        config.task_caps = MALLOC_CAP_SPIRAM;
+        
+        ESP_LOGI(TAG, "Starting HTTP server on port %d with stack size %d (PSRAM)", SPOTIFY_CONNECT_PORT, config.stack_size);
 
         esp_err_t ret = httpd_start(&httpServer, &config);
         if (ret != ESP_OK) {
@@ -606,6 +608,12 @@ namespace btspeaker {
         }
         ESP_LOGI(TAG, "[play] Playing Spotify URI: %s", uri.c_str());
 
+        // Stop current track player and flush audio buffer (like official play command)
+        if (deviceStateHandler->trackPlayer) {
+            deviceStateHandler->trackPlayer->stop();
+        }
+        deviceStateHandler->sendCommand(cspot::DeviceStateHandler::CommandType::DEPLETED);
+
         // Clear current queue
         deviceStateHandler->currentTracks.clear();
 
@@ -621,8 +629,21 @@ namespace btspeaker {
             deviceStateHandler->trackQueue->preloadedTracks.clear();
         }
 
-        // Trigger playback
-        deviceStateHandler->sendCommand(cspot::DeviceStateHandler::CommandType::PLAY);
+        // Update device state for playback
+        deviceStateHandler->device.player_state.is_playing = true;
+        deviceStateHandler->device.player_state.has_track = true;
+        deviceStateHandler->device.player_state.track = track;
+
+        // Set flag to reload preloaded tracks (like official play command)
+        deviceStateHandler->reloadPreloadedTracks = true;
+
+        // Trigger proper track loading and playback initialization
+        std::vector<std::pair<std::string, std::string>> metadata_map;
+        deviceStateHandler->playerContext->resolveTracklist(metadata_map, 
+                                                           deviceStateHandler->reloadTrackList, 
+                                                           true, true);
+
+        ESP_LOGI(TAG, "Successfully initiated playback for URI: %s", uri.c_str());
         return ESP_OK;
     }
 

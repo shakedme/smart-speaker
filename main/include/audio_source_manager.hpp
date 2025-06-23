@@ -36,8 +36,7 @@ public:
     void setVolume(uint8_t volume);
     [[nodiscard]] uint8_t getVolume() const { return volume; }
 
-    // Voice response controls (highest priority)
-    esp_err_t queueVoiceResponseChunk(const uint8_t* audio_data, size_t length, bool is_final);
+    esp_err_t queueVoiceResponseChunk(const uint8_t* audio_data, size_t length);
     esp_err_t stopVoiceResponse();
 
 private:

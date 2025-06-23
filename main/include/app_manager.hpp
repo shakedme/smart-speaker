@@ -19,7 +19,9 @@ namespace btspeaker {
 
         ~AppManager();
 
-        esp_err_t run();
+        esp_err_t start();
+        
+        esp_err_t stop();
 
         void shutdown();
 
@@ -27,12 +29,10 @@ namespace btspeaker {
         static constexpr const char *TAG = "APP_MANAGER";
 
         std::unique_ptr<WiFiManager> wifiManager;
-        std::unique_ptr<VoiceAssistantManager> voiceAssistant;
+        std::unique_ptr<VoiceAssistantManager> voiceAssistantManager;
         std::unique_ptr<AudioSourceManager> audioSourceManager;
 
-        esp_err_t initNVS();
-
-        void musicPlaybackCmdCallback(const char *command);
+        void initNVS();
 
     };
 

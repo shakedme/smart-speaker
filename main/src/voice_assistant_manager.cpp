@@ -1,23 +1,20 @@
 #include "../include/voice_assistant_manager.hpp"
 #include "../include/microphone_manager.hpp"
-#include "../include/wake_word_detector.hpp"
-#include "../include/voice_command_processor.hpp"
 #include "../include/websocket_voice_client.hpp"
-#include "../include/llm_pipeline.hpp"
-#include "../include/voice_config.hpp"
 #include <stdexcept>
 
 extern "C" {
 #include "esp_log.h"
+#include "cJSON.h"
 }
 
 namespace btspeaker {
 
-    VoiceAssistantManager::VoiceAssistantManager(AudioSourceManager& audioSourceManager)
+    VoiceAssistantManager::VoiceAssistantManager(AudioSourceManager &audioSourceManager)
             :
-            state(State::UNINITIALIZED),
+            state(VoiceAssistantState::IDLE),
             stateMutex(nullptr),
-            audioSourceManager(audioSourceManager){
+            audioSourceManager(audioSourceManager) {
         // Create state mutex
         stateMutex = xSemaphoreCreateMutex();
         if (!stateMutex) {
@@ -25,57 +22,18 @@ namespace btspeaker {
             throw std::runtime_error("Failed to create state mutex");
         }
 
-        websocketClient = std::make_unique<WebSocketVoiceClient>();
-        esp_err_t ret = websocketClient->init();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to initialize WebSocket client: %s", esp_err_to_name(ret));
-            throw std::runtime_error("Failed to initialize WebSocket client");
-        }
+        websocketClient = std::make_unique<WebSocketVoiceClient>(*this);
+        websocketClient->init();
 
-        // Attempt to connect to WebSocket server
-        ret = websocketClient->connect();
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to connect to WebSocket server: %s", esp_err_to_name(ret));
-            throw std::runtime_error("Failed to connect to WebSocket server");
-        }
-
-        // Initialize voice command processor
-        voiceCommandProcessor = std::make_unique<VoiceCommandProcessor>(audioSourceManager);
-        ret = voiceCommandProcessor->init(websocketClient.get());  // AudioSourceManager handles audio
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to initialize command processor: %s", esp_err_to_name(ret));
-            throw std::runtime_error("Failed to initialize command processor");
-        }
-
-        // Initialize wake word detector
-        wakeWordDetector = std::make_unique<WakeWordDetector>();
-        ret = wakeWordDetector->init();
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Wake word detector initialization failed: %s", esp_err_to_name(ret));
-            throw std::runtime_error("Failed to initialize wake word detector");
-        }
-
-        // Initialize microphone manager
         microphoneManager = std::make_unique<MicrophoneManager>();
-        ret = microphoneManager->init();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to initialize microphone manager: %s", esp_err_to_name(ret));
-            throw std::runtime_error("Failed to initialize microphone manager");
-        }
-
+        microphoneManager->init();
         microphoneManager->setAudioCallback(
                 [this](const uint8_t *data, size_t length) {
-                    onAudioData(data, length);
+                    onAudioInput(data, length);
                 }
         );
 
-        wakeWordDetector->setWakeWordCallback(
-                [this]() {
-                    onWakeWordDetected();
-                }
-        );
-
-        setState(State::LISTENING);
+        setVoiceAssistantState(VoiceAssistantState::IDLE);
         ESP_LOGI(TAG, "VoiceAssistantManager initialized successfully");
     }
 
@@ -84,19 +42,14 @@ namespace btspeaker {
     }
 
     esp_err_t VoiceAssistantManager::start() {
-        if (state.load() == State::UNINITIALIZED) {
-            ESP_LOGE(TAG, "Voice assistant not initialized");
-            return ESP_ERR_INVALID_STATE;
-        }
+        setVoiceAssistantState(VoiceAssistantState::LISTENING);
 
-        // Start microphone recording
         esp_err_t ret = microphoneManager->startRecording();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start microphone recording: %s", esp_err_to_name(ret));
             return ret;
         }
 
-        setState(State::LISTENING);
         ESP_LOGI(TAG, "Voice assistant started");
         return ESP_OK;
     }
@@ -109,34 +62,22 @@ namespace btspeaker {
             microphoneManager->stopRecording();
         }
 
-        // Cancel any ongoing command processing
-        if (voiceCommandProcessor) {
-            voiceCommandProcessor->cancelRecording();
+        if (websocketClient) {
+            websocketClient->cancelOperations();
         }
 
-        setState(State::LISTENING);
+        setVoiceAssistantState(VoiceAssistantState::IDLE);
         return ESP_OK;
     }
 
     void VoiceAssistantManager::shutdown() {
         ESP_LOGI(TAG, "Shutting down voice assistant");
 
-        setState(State::UNINITIALIZED);
+        setVoiceAssistantState(VoiceAssistantState::IDLE);
 
-        // Shutdown all components
         if (microphoneManager) {
             microphoneManager->shutdown();
             microphoneManager.reset();
-        }
-
-        if (wakeWordDetector) {
-            wakeWordDetector->shutdown();
-            wakeWordDetector.reset();
-        }
-
-        if (voiceCommandProcessor) {
-            voiceCommandProcessor->shutdown();
-            voiceCommandProcessor.reset();
         }
 
         if (websocketClient) {
@@ -150,117 +91,133 @@ namespace btspeaker {
         }
     }
 
-    void VoiceAssistantManager::setMusicPlaybackCallback(const MusicPlaybackCallback &callback) {
-        musicCallback = callback;
-        if (voiceCommandProcessor) {
-            voiceCommandProcessor->setMusicPlaybackCallback(callback);
+    void VoiceAssistantManager::onAudioResponse(const uint8_t *data, size_t length) {
+        if (!data || length == 0) {
+            ESP_LOGW(TAG, "Received empty audio response");
+            return;
         }
+        audioSourceManager.queueVoiceResponseChunk(data, length);
     }
 
-    void VoiceAssistantManager::onAudioData(const uint8_t *data, size_t length) {
+    void VoiceAssistantManager::onAudioInput(const uint8_t *data, size_t length) {
         if (!data || length == 0) {
             return;
         }
 
-        State current_state = state.load();
+        VoiceAssistantState current_state = state.load();
 
-        // We just continuously send audio data when the voice assistant is in the RECORDING_COMMAND state.
-        if (current_state == State::RECORDING_COMMAND) {
-            // Stream audio to backend via WebSocketVoiceClient
-            if (websocketClient && websocketClient->isConnected()) {
+        if (current_state == VoiceAssistantState::LISTENING || current_state == VoiceAssistantState::WAITING_FOR_USER) {
+            if (websocketClient->isConnected()) {
                 esp_err_t ret = websocketClient->sendAudioChunk(data, length);
                 if (ret != ESP_OK) {
                     ESP_LOGE(TAG, "Failed to stream audio to backend: %s", esp_err_to_name(ret));
-                    setState(State::ERROR);
-                }
-            }
-        } else if (current_state == State::LISTENING) {
-            if (wakeWordDetector && wakeWordDetector->isEnabled()) {
-                esp_err_t ret = wakeWordDetector->feedAudioData(data, length);
-                if (ret != ESP_OK && ret != ESP_ERR_NO_MEM) {
-                    // ESP_ERR_NO_MEM is expected when ring buffer is full (just drop data)
-                    ESP_LOGD(TAG, "Failed to feed audio to wake word detector: %s", esp_err_to_name(ret));
                 }
             }
         }
     }
 
-    void VoiceAssistantManager::onWakeWordDetected() {
-        ESP_LOGI(TAG, "Wake word detected, starting command recording");
-
-        if (state.load() == State::RECORDING_COMMAND) {
-            ESP_LOGW(TAG, "Already recording, ignoring wake word.");
+    void VoiceAssistantManager::onTextData(const char *messageJson) {
+        if (!messageJson) {
+            ESP_LOGW(TAG, "Received null JSON message");
             return;
         }
 
-        setState(State::RECORDING_COMMAND);
+        ESP_LOGD(TAG, "Received text data: %s", messageJson);
 
-        // The WebSocket client will start streaming automatically when it connects.
-        if (websocketClient && !websocketClient->isConnected()) {
-            ESP_LOGI(TAG, "WebSocket not connected, attempting to connect...");
-            websocketClient->connect();
+        cJSON *json = cJSON_Parse(messageJson);
+        if (!json) {
+            ESP_LOGE(TAG, "Failed to parse JSON: %s", messageJson);
+            return;
         }
+
+        // Get the message type
+        cJSON *typeItem = cJSON_GetObjectItem(json, "type");
+        if (!typeItem || !cJSON_IsString(typeItem)) {
+            ESP_LOGE(TAG, "Missing or invalid 'type' field in JSON");
+            cJSON_Delete(json);
+            return;
+        }
+
+        const char *type = cJSON_GetStringValue(typeItem);
+        
+        if (strcmp(type, "state_change") == 0) {
+            // Handle state change message: {"type": "state_change", "data": "LISTENING"}
+            cJSON *dataItem = cJSON_GetObjectItem(json, "data");
+            if (!dataItem || !cJSON_IsString(dataItem)) {
+                ESP_LOGE(TAG, "Missing or invalid 'data' field in state_change message");
+                cJSON_Delete(json);
+                return;
+            }
+
+            const char *stateStr = cJSON_GetStringValue(dataItem);
+            VoiceAssistantState newState;
+
+            // Map string states to enum values
+            if (strcmp(stateStr, "IDLE") == 0) {
+                newState = VoiceAssistantState::IDLE;
+            } else if (strcmp(stateStr, "LISTENING") == 0) {
+                newState = VoiceAssistantState::LISTENING;
+            } else if (strcmp(stateStr, "PROCESSING_INTENT") == 0) {
+                newState = VoiceAssistantState::PROCESSING_INTENT;
+            } else if (strcmp(stateStr, "STREAMING_RESPONSE") == 0) {
+                newState = VoiceAssistantState::STREAMING_RESPONSE;
+            } else if (strcmp(stateStr, "HANDLING_COMMAND") == 0) {
+                newState = VoiceAssistantState::HANDLING_COMMAND;
+            } else if (strcmp(stateStr, "WAITING_FOR_USER") == 0) {
+                newState = VoiceAssistantState::WAITING_FOR_USER;
+            } else {
+                ESP_LOGW(TAG, "Unknown state received: %s", stateStr);
+                cJSON_Delete(json);
+                return;
+            }
+
+            ESP_LOGI(TAG, "Received state change: %s", stateStr);
+            setVoiceAssistantState(newState);
+
+        } else if (strcmp(type, "intent") == 0) {
+            // Handle intent message: {"type": "intent", "intent": "spotify", "data": "<uri>"}
+            // or {"type": "intent", "intent": "playback_control", "data": "pause"}
+            cJSON *intentItem = cJSON_GetObjectItem(json, "intent");
+            cJSON *dataItem = cJSON_GetObjectItem(json, "data");
+            
+            if (!intentItem || !cJSON_IsString(intentItem) || !dataItem || !cJSON_IsString(dataItem)) {
+                ESP_LOGE(TAG, "Missing or invalid 'intent' or 'data' field in intent message");
+                cJSON_Delete(json);
+                return;
+            }
+
+            const char *intent = cJSON_GetStringValue(intentItem);
+            const char *data = cJSON_GetStringValue(dataItem);
+
+            ESP_LOGI(TAG, "Received intent: %s, data: %s", intent, data);
+
+            // Pass the data to audioSourceManager for music command processing
+            audioSourceManager.onMusicCommand(data);
+
+        } else {
+            ESP_LOGW(TAG, "Unknown message type received: %s", type);
+        }
+
+        cJSON_Delete(json);
     }
 
-    void VoiceAssistantManager::setState(State new_state) {
+    void VoiceAssistantManager::setVoiceAssistantState(VoiceAssistantState new_state) {
         if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            State old_state = state.exchange(new_state);
+            VoiceAssistantState old_state = state.exchange(new_state);
             if (old_state != new_state) {
                 ESP_LOGI(TAG, "State changed: %d -> %d", static_cast<int>(old_state), static_cast<int>(new_state));
-
-                // Handle wake word detector state based on new state
-                if (wakeWordDetector) {
-                    switch (new_state) {
-                        case State::LISTENING:
-                            // Enable wake word detection when listening
-                            if (!wakeWordDetector->isEnabled()) {
-                                wakeWordDetector->setEnabled(true);
-                                ESP_LOGI(TAG, "Wake word detection enabled for listening state");
-                            }
-                            break;
-
-                        case State::RECORDING_COMMAND:
-                        case State::PROCESSING_COMMAND:
-                        case State::PLAYING_RESPONSE:
-                            // Disable wake word detection during other states to save CPU
-                            if (wakeWordDetector->isEnabled()) {
-                                wakeWordDetector->setEnabled(false);
-                                ESP_LOGI(TAG, "Wake word detection disabled during %s state",
-                                         new_state == State::RECORDING_COMMAND ? "recording" :
-                                         new_state == State::PROCESSING_COMMAND ? "processing" : "playback");
-                            }
-                            break;
-
-                        default:
-                            break;
-                    }
-                }
-
-                // Handle state-specific actions
-                switch (new_state) {
-                    case State::PROCESSING_COMMAND:
-                        ESP_LOGI(TAG, "Processing voice command via WebSocket");
-                        break;
-
-                    case State::PLAYING_RESPONSE:
-                        ESP_LOGI(TAG, "Playing audio response");
-                        break;
-
-                    case State::ERROR:
-                        ESP_LOGE(TAG, "Voice assistant entered error state");
-                        // Attempt to recover by returning to listening state
-                        vTaskDelay(pdMS_TO_TICKS(1000));
-                        setState(State::LISTENING);
-                        break;
-
-                    default:
-                        break;
-                }
+            }
+            switch (new_state) {
+                case VoiceAssistantState::LISTENING:
+                    audioSourceManager.stopVoiceResponse();
+                    break;
+                default:
+                    break;
             }
             xSemaphoreGive(stateMutex);
         } else {
             // Fallback without mutex protection
-            State old_state = state.exchange(new_state);
+            VoiceAssistantState old_state = state.exchange(new_state);
             if (old_state != new_state) {
                 ESP_LOGW(TAG, "State changed without mutex: %d -> %d", static_cast<int>(old_state),
                          static_cast<int>(new_state));

@@ -362,7 +362,6 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
       throw std::runtime_error("Empty CDN URL received");
     }
 
-    ESP_LOGI("TrackQueue", "Successfully obtained CDN URL for track, setting state to READY");
     state = State::READY;
     retries = 0; // Reset retry count on success
     
@@ -375,8 +374,7 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
     
     // Exponential backoff: 1s, 2s, 4s, 8s, 16s
     int backoffMs = 1000 * (1 << (retries - 1));
-    ESP_LOGI("TrackQueue", "Retrying CDN request in %d ms...", backoffMs);
-    
+
     // Don't block the TrackQueue task - set state to retry and let the main loop handle it
     state = State::CDN_REQUIRED;
     
@@ -392,8 +390,7 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
     
     // Exponential backoff for unknown errors too
     int backoffMs = 1000 * (1 << (retries - 1));
-    ESP_LOGI("TrackQueue", "Retrying CDN request in %d ms...", backoffMs);
-    
+
     state = State::CDN_REQUIRED;
     return;
   }

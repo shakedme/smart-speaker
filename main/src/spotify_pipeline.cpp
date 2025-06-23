@@ -122,6 +122,8 @@ namespace btspeaker {
             return ESP_FAIL;
         }
 
+        audioSink = std::make_shared<ADFAudioSink>();
+
         isRunning_ = true;
         ESP_LOGI(TAG, "Spotify main task started");
         return ESP_OK;
@@ -563,7 +565,7 @@ namespace btspeaker {
             espPlayer->disconnect();
         }
 
-        audioSink->stop();
+        audioSink->cleanupPipeline();
 
         return ESP_OK;
     }

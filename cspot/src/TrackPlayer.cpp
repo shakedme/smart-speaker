@@ -91,17 +91,13 @@ TrackPlayer::~TrackPlayer() {
 }
 
 void TrackPlayer::start() {
-    ESP_LOGI("TrackPlayer", "Starting player task");
     if (!isRunning) {
         isRunning = true;
-        ESP_LOGI("TrackPlayer", "Calling startTask()...");
         bool taskStarted = startTask();
         if (!taskStarted) {
-            ESP_LOGE("TrackPlayer", "Failed to start TrackPlayer task!");
             isRunning = false;
             return;
         }
-        ESP_LOGI("TrackPlayer", "TrackPlayer task started successfully");
         this->ctx->playbackMetrics->start_reason = PlaybackMetrics::REMOTE;
         this->ctx->playbackMetrics->start_source = "unknown";
     } else {
@@ -131,19 +127,15 @@ void TrackPlayer::seekMs(size_t ms, bool loading) {
 #ifndef CONFIG_BELL_NOCODEC
     if (!loading) {
         // We're in the middle of the next track, so we need to reset the player in order to seek
-        ESP_LOGI("TrackPlayer", "Resetting state");
         resetState();
     }
 #endif
 
-    ESP_LOGI("TrackPlayer", "Seeking...");
     this->pendingSeekPositionMs = ms;
 }
 
 void TrackPlayer::runTask() {
-    ESP_LOGI("TrackPlayer", "TrackPlayer::runTask() started");
     std::scoped_lock lock(runningMutex);
-    ESP_LOGI("TrackPlayer", "TrackPlayer acquired runningMutex, starting main loop");
 
     std::shared_ptr<QueuedTrack> track = nullptr, newTrack = nullptr;
 
@@ -152,12 +144,9 @@ void TrackPlayer::runTask() {
     bool eof = false;
     bool endOfQueueReached = false;
 
-    ESP_LOGI("TrackPlayer", "TrackPlayer entering main while loop, isRunning=%d", isRunning.load());
     while (isRunning) {
-        ESP_LOGI("TrackPlayer", "Waiting for track to play");
         bool properStream = true;
         this->trackQueue->playableSemaphore->wait();
-        ESP_LOGI("TrackPlayer", "Playable semaphore signaled, checking for tracks...");
 
         // Last track was interrupted, reset to default
         if (pendingReset) {
@@ -173,7 +162,6 @@ void TrackPlayer::runTask() {
         BELL_SLEEP_MS(50);
 
         if (pendingReset) {
-            ESP_LOGI("TrackPlayer", "Pending reset..");
             continue;
         }
         if (!*repeating_track_ || newTrack == nullptr)
@@ -183,17 +171,10 @@ void TrackPlayer::runTask() {
             if (trackOffset == -1) {
                 // Reset required
                 track = nullptr;
-                ESP_LOGI("TrackPlayer", "Track offset = -1, reset required");
-            } else {
-                ESP_LOGI("TrackPlayer", "No track available, trackOffset=%d", trackOffset);
             }
-            ESP_LOGE("TrackPlayer", "NULLPTR - no track to consume");
-
             BELL_SLEEP_MS(100);
             continue;
         }
-
-        ESP_LOGI("TrackPlayer", "Successfully consumed track: %s", newTrack->trackInfo.name.c_str());
 
         track = newTrack;
         this->ctx->playbackMetrics->trackMetrics = track->trackMetrics;
@@ -203,7 +184,6 @@ void TrackPlayer::runTask() {
         while (track->state != QueuedTrack::State::READY &&
                track->state != QueuedTrack::State::FAILED && retries-- > 0) {
             BELL_SLEEP_MS(100);
-            ESP_LOGI("TrackPlayer", "Track in state %i, waiting...", (int) track->state);
         }
         if (track->state != QueuedTrack::State::READY) {
             ESP_LOGE("TrackPlayer", "Track failed to load, final state: %i, skipping it", (int) track->state);
@@ -213,7 +193,6 @@ void TrackPlayer::runTask() {
             continue;
         }
         
-        ESP_LOGI("TrackPlayer", "Track is READY, starting playback!");
         track->playingTrackIndex = tracksPlayed;
         currentSongPlaying = true;
         track->trackMetrics->startTrack();
@@ -236,7 +215,6 @@ void TrackPlayer::runTask() {
             }
 #endif
             if (pendingReset || !currentSongPlaying) {
-                ESP_LOGI("TrackPlayer", "Pending reset or not playing anymore, skipping track");
                 continue;
             }
             track->trackMetrics->startTrackDecoding();
@@ -286,8 +264,6 @@ void TrackPlayer::runTask() {
             eof = false;
             track->loading = true;
 
-            ESP_LOGI("TrackPlayer", "Playing");
-
             while (!eof && currentSongPlaying) {
                 // Execute seek if needed
                 if (pendingSeekPositionMs > 0) {
@@ -319,7 +295,6 @@ void TrackPlayer::runTask() {
 
                 if (ret < 0) {
                     if (retries == 0) {
-                        ESP_LOGE("TrackPlayer", "Track failed to reload, skipping it");
                         currentSongPlaying = false;
                         properStream = false;
                         eof = true;
@@ -355,7 +330,6 @@ void TrackPlayer::runTask() {
                     }
                 } else {
                     if (ret == 0) {
-                        ESP_LOGI("TrackPlayer", "EOF");
                         // and done :)
                         eof = true;
                     }
@@ -388,9 +362,6 @@ void TrackPlayer::runTask() {
 #ifndef CONFIG_BELL_NOCODEC
             ov_clear(&vorbisFile);
 #endif
-
-            ESP_LOGI("TrackPlayer", "Playing done");
-
             // always move back to LOADING (ensure proper seeking after last track has been loaded)
             currentTrackStream = nullptr;
             track->loading = false;

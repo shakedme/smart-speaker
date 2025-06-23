@@ -32,7 +32,7 @@ namespace btspeaker {
             ESP_LOGE(TAG, "Failed to create audio event interface");
             throw std::runtime_error("Failed to create audio event interface");
         }
-        audioPipeline->evtHandle.reset(evtHandle, audioEventIfaceDeleter);
+        audioPipeline->evtHandle.reset(evtHandle);
 
         // Create I2S writer
         auto i2SHandle = createI2SWriter(
@@ -45,10 +45,8 @@ namespace btspeaker {
             ESP_LOGE(TAG, "Failed to create I2S stream via shared service");
             throw std::runtime_error("Failed to create I2S stream");
         }
-        audioPipeline->i2SStreamWriter.reset(i2SHandle, audioElementDeleter);
-
-        // Create I2S reader
-        audioPipeline->i2SStreamReader.reset(reader, audioElementDeleter);
+        audioPipeline->i2SStreamWriter.reset(i2SHandle);
+        audioPipeline->i2SStreamReader.reset(reader);
 
         // Create the audio pipeline
         audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
@@ -213,22 +211,10 @@ namespace btspeaker {
     }
 
     void AudioPipelineUtil::cleanupPipeline(I2SAudioPipeline &pipeline) {
-        if (pipeline.pipeline) {
-            if (pipeline.i2SStreamReader) {
-                audio_pipeline_unregister(pipeline.pipeline.get(), pipeline.i2SStreamReader.get());
-            }
-            if (pipeline.i2SStreamWriter) {
-                audio_pipeline_unregister(pipeline.pipeline.get(), pipeline.i2SStreamWriter.get());
-            }
-            audio_pipeline_terminate(pipeline.pipeline.get());
-            audio_pipeline_deinit(pipeline.pipeline.get());
-        }
-
-        pipeline.i2SStreamWriter.reset();
-        pipeline.i2SStreamReader.reset();
-        pipeline.evtHandle.reset();
-        pipeline.pipeline.reset();
-
+        if (pipeline.pipeline) pipeline.pipeline.reset();
+        if (pipeline.i2SStreamReader) pipeline.i2SStreamReader.reset();
+        if (pipeline.i2SStreamWriter) pipeline.i2SStreamWriter.reset();
+        if (pipeline.evtHandle) pipeline.evtHandle.reset();
         ESP_LOGI(TAG, "Pipeline cleanup completed");
     }
 

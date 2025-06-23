@@ -42,7 +42,7 @@ namespace btspeaker {
 
     private:
         static constexpr const char *TAG = "MIC_MGR";
-        static constexpr int AUDIO_BUFFER_SIZE = 2048; // Increased for better audio quality (16ms at 44.1kHz)
+        static constexpr int AUDIO_BUFFER_SIZE = 1024 * 8; // Increased for better audio quality (16ms at 44.1kHz)
 
         // Audio processing task
         static void audioTask(void *arg);
@@ -63,6 +63,10 @@ namespace btspeaker {
         bool recording_;
         TaskHandle_t audioTaskHandle_;
         AudioDataCallback audioCallback_;
+
+        // Memory allocated for task stack and buffer (for cleanup)
+        StackType_t* taskStack = nullptr;
+        StaticTask_t* taskBuffer = nullptr;
 
         // Direct I2S channel handle (new API)
         i2s_chan_handle_t i2s_rx_handle_ = nullptr;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esp_raii_wrapper.hpp"
+#include "audio_types.hpp"
 #include <memory>
 #include <atomic>
 #include <vector>
@@ -66,24 +67,18 @@ namespace btspeaker {
         // Pipeline management
         esp_err_t setupResponsePipeline();
 
-        esp_err_t cleanupResponsePipeline();
-
         // Audio processing
         esp_err_t writeAudioToPipeline(const uint8_t *data, size_t length);
 
         // State management
-        void getState(State new_state);
+        void setState(State new_state);
 
         // Member variables
         std::atomic<State> state_;
         TaskHandle_t playbackTaskHandle_;
         QueueHandle_t audioDataQueue_;
 
-        // Pipeline components (independent I2S setup)
-        PipelineHandle responsePipeline_;
-        ElementHandle rawResponseStream_;
-        ElementHandle i2sResponseWriter_;
-        EventIfaceHandle responseEvent_;
+        std::unique_ptr<I2SAudioPipeline> audioPipeline;
 
         // Audio processing
         std::vector<uint8_t> audioBuffer_;

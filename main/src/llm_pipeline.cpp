@@ -23,13 +23,7 @@ namespace btspeaker {
         }
 
         // Setup response pipeline
-        esp_err_t ret = setupResponsePipeline();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to setup response pipeline: %s", esp_err_to_name(ret));
-            throw std::runtime_error("Failed to initialize LLM pipeline");
-        }
-
-        getState(State::IDLE);
+        setState(State::IDLE);
         ESP_LOGI(TAG, "LLM pipeline initialized successfully");
     }
 
@@ -41,7 +35,6 @@ namespace btspeaker {
         ESP_LOGI(TAG, "Shutting down LLM pipeline");
 
         stop();
-        cleanupResponsePipeline();
 
         if (audioDataQueue_) {
             // Clear any remaining queue items
@@ -53,13 +46,20 @@ namespace btspeaker {
             audioDataQueue_ = nullptr;
         }
 
-        getState(State::IDLE);
+        setState(State::IDLE);
     }
 
     esp_err_t LLMPipeline::queueAudioChunk(const uint8_t *audio_data, size_t length) {
         if (state_.load() == State::IDLE) {
             ESP_LOGI(TAG, "Starting LLM audio playback");
-            getState(State::PREPARING);
+            esp_err_t ret = setupResponsePipeline();
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to setup response pipeline: %s", esp_err_to_name(ret));
+                return ESP_FAIL;
+            }
+
+            setState(State::PREPARING);
+
 
             // Create playback task
             BaseType_t task_created = xTaskCreate(
@@ -73,11 +73,11 @@ namespace btspeaker {
 
             if (task_created != pdPASS) {
                 ESP_LOGE(TAG, "Failed to create audio playback task");
-                getState(State::ERROR);
+                setState(State::ERROR);
                 return ESP_FAIL;
             }
 
-            getState(State::PLAYING);
+            setState(State::PLAYING);
         }
 
         // Create audio data item
@@ -92,13 +92,14 @@ namespace btspeaker {
         }
 
         ESP_LOGD(TAG, "Queued audio chunk (%zu bytes)", length);
+        writeAudioToPipeline(audio_data, length);
         return ESP_OK;
     }
 
     esp_err_t LLMPipeline::stop() {
         ESP_LOGI(TAG, "Stopping LLM audio playback");
 
-        getState(State::IDLE);
+        setState(State::IDLE);
 
         // Stop playback task
         if (playbackTaskHandle_) {
@@ -114,14 +115,14 @@ namespace btspeaker {
             }
         }
 
-        audio_pipeline_stop(responsePipeline_.get());
+        AudioPipelineUtil::cleanupPipeline(*audioPipeline);
 
         return ESP_OK;
     }
 
     esp_err_t LLMPipeline::pause() {
         if (state_.load() == State::PLAYING) {
-            getState(State::PAUSED);
+            setState(State::PAUSED);
             ESP_LOGI(TAG, "LLM audio playback paused");
         }
         return ESP_OK;
@@ -129,7 +130,7 @@ namespace btspeaker {
 
     esp_err_t LLMPipeline::resume() {
         if (state_.load() == State::PAUSED) {
-            getState(State::PLAYING);
+            setState(State::PLAYING);
             ESP_LOGI(TAG, "LLM audio playback resumed");
         }
         return ESP_OK;
@@ -144,11 +145,11 @@ namespace btspeaker {
     void LLMPipeline::runAudioPlayback() {
         ESP_LOGI(TAG, "LLM audio playback task started");
 
-        if (responsePipeline_) {
-            esp_err_t ret = audio_pipeline_run(responsePipeline_.get());
+        if (audioPipeline) {
+            esp_err_t ret = audio_pipeline_run(audioPipeline->pipeline.get());
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to start response pipeline: %s", esp_err_to_name(ret));
-                getState(State::ERROR);
+                setState(State::ERROR);
                 return;
             }
         }
@@ -171,22 +172,18 @@ namespace btspeaker {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
 
-        // Stop response pipeline
-        if (responsePipeline_) {
-            audio_pipeline_stop(responsePipeline_.get());
-        }
+        AudioPipelineUtil::cleanupPipeline(*audioPipeline);
 
-        getState(State::IDLE);
+        setState(State::IDLE);
         ESP_LOGI(TAG, "LLM audio playback task ended");
     }
 
     esp_err_t LLMPipeline::setupResponsePipeline() {
         ESP_LOGI(TAG, "Setting up LLM response audio pipeline");
 
-        // Create raw stream for audio input
         raw_stream_cfg_t raw_cfg = {
                 .type = AUDIO_STREAM_READER,
-                .out_rb_size = 4 * 1024,  // 4KB buffer
+                .out_rb_size = 16 * 1024,
         };
 
         audio_element_handle_t raw_handle = raw_stream_init(&raw_cfg);
@@ -195,7 +192,7 @@ namespace btspeaker {
             return ESP_FAIL;
         }
 
-        auto audioPipeline = AudioPipelineUtil::createAudioPipeline(
+        audioPipeline = AudioPipelineUtil::createAudioPipeline(
                 AudioSource::VOICE_RESPONSE,
                 raw_handle,
                 false,
@@ -204,37 +201,16 @@ namespace btspeaker {
                 DEFAULT_BITS
         );
 
-        responsePipeline_ = std::move(audioPipeline->pipeline);
-        rawResponseStream_ = std::move(audioPipeline->i2SStreamReader);
-        i2sResponseWriter_ = std::move(audioPipeline->i2SStreamWriter);
-        responseEvent_ = std::move(audioPipeline->evtHandle);
-
         ESP_LOGI(TAG, "LLM response audio pipeline setup completed");
         return ESP_OK;
     }
 
-    esp_err_t LLMPipeline::cleanupResponsePipeline() {
-        ESP_LOGI(TAG, "Cleaning up LLM response pipeline");
-
-        if (responsePipeline_) {
-            audio_pipeline_stop(responsePipeline_.get());
-            audio_pipeline_terminate(responsePipeline_.get());
-        }
-
-        i2sResponseWriter_.reset();
-        rawResponseStream_.reset();
-        responsePipeline_.reset();
-        responseEvent_.reset();
-
-        return ESP_OK;
-    }
-
     esp_err_t LLMPipeline::writeAudioToPipeline(const uint8_t *data, size_t length) {
-        if (!rawResponseStream_ || !data || length == 0) {
+        if (!audioPipeline->pipeline || !data || length == 0) {
             return ESP_ERR_INVALID_ARG;
         }
 
-        int bytes_written = raw_stream_write(rawResponseStream_.get(), (char *) data, length);
+        int bytes_written = raw_stream_write(audioPipeline->i2SStreamReader.get(), (char *) data, length);
         if (bytes_written != length) {
             ESP_LOGW(TAG, "Incomplete write: %d/%zu bytes", bytes_written, length);
             return ESP_FAIL;
@@ -243,7 +219,7 @@ namespace btspeaker {
         return ESP_OK;
     }
 
-    void LLMPipeline::getState(State new_state) {
+    void LLMPipeline::setState(State new_state) {
         State old_state = state_.exchange(new_state);
         if (old_state != new_state) {
             ESP_LOGI(TAG, "State changed: %d -> %d", static_cast<int>(old_state), static_cast<int>(new_state));

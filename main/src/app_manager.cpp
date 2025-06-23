@@ -33,10 +33,6 @@ namespace btspeaker {
         ESP_LOGI(TAG, "✅ AppManager initialization complete");
     }
 
-    AppManager::~AppManager() {
-        shutdown();
-    }
-
     esp_err_t AppManager::start() {
         ESP_LOGI(TAG, "🎬 Starting application services");
 
@@ -47,46 +43,15 @@ namespace btspeaker {
             return ret;
         }
 
-        // Start voice assistant if available
         if (voiceAssistantManager) {
             ret = voiceAssistantManager->start();
             if (ret != ESP_OK) {
                 ESP_LOGW(TAG, "Failed to start voice assistant: %s", esp_err_to_name(ret));
-                // Continue without voice assistant
             }
         }
 
         ESP_LOGI(TAG, "✅ Application services started successfully");
         return ESP_OK;
-    }
-
-    esp_err_t AppManager::stop() {
-        ESP_LOGI(TAG, "🛑 Stopping application services");
-
-        if (voiceAssistantManager) {
-            voiceAssistantManager->stop();
-        }
-
-        audioSourceManager->stop();
-
-        ESP_LOGI(TAG, "✅ Application services stopped");
-        return ESP_OK;
-    }
-
-    void AppManager::shutdown() {
-        ESP_LOGI(TAG, "🔌 Shutting down application");
-
-        stop();
-
-        if (voiceAssistantManager) {
-            voiceAssistantManager->shutdown();
-            voiceAssistantManager.reset();
-        }
-
-        audioSourceManager.reset();
-        wifiManager.reset();
-
-        ESP_LOGI(TAG, "✅ Application shutdown complete");
     }
 
     void AppManager::initNVS() {

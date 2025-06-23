@@ -153,7 +153,6 @@ void EspPlayer::runTask() {
     ESP_LOGI("EspPlayer", "Starting EspPlayer keepalive task");
 
     while (isRunning) {
-        ESP_LOGI("EspPlayer", "Read buffer size: %d", this->audioSink->getBufferFillLevel());
         if (this->audioSink->isPlaying()) {
             this->handler->putPlayerState();
         }

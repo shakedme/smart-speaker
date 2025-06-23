@@ -5,11 +5,11 @@
 #include <functional>
 #include <atomic>
 #include "../include/voice_assistant_manager.hpp"
+#include "../include/esp_websocket_client.h"
 
 extern "C" {
 #include "esp_err.h"
 #include "esp_log.h"
-#include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 }
@@ -81,12 +81,15 @@ namespace btspeaker {
         esp_websocket_client_handle_t websocketClient;
         SemaphoreHandle_t stateMutex;
         TaskHandle_t reconnectTaskHandle;
+        std::atomic_bool isDestroying{false};
 
         VoiceAssistantManager &voiceAssistantManager;
 
         // State tracking
         bool initialized;
+        bool isClientRunning;
         int reconnectAttempts;
+
     };
 
 } // namespace btspeaker 

@@ -17,13 +17,9 @@ namespace btspeaker {
     public:
         AppManager();
 
-        ~AppManager();
+        ~AppManager() = default;
 
         esp_err_t start();
-        
-        esp_err_t stop();
-
-        void shutdown();
 
     private:
         static constexpr const char *TAG = "APP_MANAGER";

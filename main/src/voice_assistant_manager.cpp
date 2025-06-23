@@ -204,9 +204,6 @@ namespace btspeaker {
     void VoiceAssistantManager::setVoiceAssistantState(VoiceAssistantState new_state) {
         if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             VoiceAssistantState old_state = state.exchange(new_state);
-            if (old_state != new_state) {
-                ESP_LOGI(TAG, "State changed: %d -> %d", static_cast<int>(old_state), static_cast<int>(new_state));
-            }
             switch (new_state) {
                 case VoiceAssistantState::LISTENING:
                     audioSourceManager.stopVoiceResponse();
@@ -219,8 +216,7 @@ namespace btspeaker {
             // Fallback without mutex protection
             VoiceAssistantState old_state = state.exchange(new_state);
             if (old_state != new_state) {
-                ESP_LOGW(TAG, "State changed without mutex: %d -> %d", static_cast<int>(old_state),
-                         static_cast<int>(new_state));
+
             }
         }
     }

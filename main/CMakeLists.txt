@@ -17,6 +17,7 @@ set(PROJECT_SRCS
         src/audio_source_manager.cpp
         src/adf_audio_sink.cpp
         src/base_audio_pipeline.cpp
+        src/esp_websocket_client.c
 
         # ESP32-specific cspot files
         "../cspot/esp32/main/EspPlayer.cpp"
@@ -44,7 +45,6 @@ idf_component_register(
         audio_stream
         bluetooth_service
         esp_wifi
-        esp_websocket_client
         json
 
         # Additional for cspot

@@ -33,6 +33,8 @@ namespace btspeaker {
 
         void cleanupPipeline() override;
 
+        void disconnectCurrentDevice();
+
     private:
         static constexpr const char *TAG = "BT_PIPELINE";
         static constexpr const int SAMPLE_RATE = 44100;
@@ -40,7 +42,9 @@ namespace btspeaker {
         static constexpr const int BITS_PER_SAMPLE = 16;
         bool btServiceStarted = false;
         ConnectedCallback connectedCallback;
-        static BluetoothPipeline* instance;
+        static BluetoothPipeline *instance;
+        bool btConnected;
+        esp_bd_addr_t connectedDeviceAddr{};
 
     };
 

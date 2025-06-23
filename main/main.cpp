@@ -25,7 +25,6 @@ void app_main() {
     esp_err_t ret = g_app_instance->start();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "❌ Failed to start application: %s", esp_err_to_name(ret));
-        g_app_instance->shutdown();
         g_app_instance.reset();
         return;
     }

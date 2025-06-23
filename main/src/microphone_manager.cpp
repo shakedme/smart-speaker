@@ -25,11 +25,8 @@ namespace btspeaker {
     }
 
     void MicrophoneManager::applySPH0645Fix(i2s_port_t i2s_num) {
-        // Critical timing adjustments for SPH0645LM4H - same as working test
-        REG_SET_BIT(I2S_TIMING_REG(i2s_num), BIT(9));        // I2S_RX_SD_IN_DELAY
-        REG_SET_BIT(I2S_CONF_REG(i2s_num), I2S_RX_MSB_SHIFT); // Phillips I2S - WS changes a cycle earlier
-
-        ESP_LOGI(TAG, "Applied SPH0645LM4H timing fixes to I2S%d", i2s_num);
+        REG_SET_BIT(I2S_TIMING_REG(i2s_num), BIT(9));
+        REG_SET_BIT(I2S_CONF_REG(i2s_num), I2S_RX_MSB_SHIFT);
     }
 
     void MicrophoneManager::init() {
@@ -50,24 +47,37 @@ namespace btspeaker {
             return ESP_OK;
         }
 
-        // Log memory stats before task creation
-        MemoryUtils::logMemoryStats("Before audio task creation");
-
         recording_ = true;
 
+        const size_t stackSizeWords = 1024 * 4;  // 32KB stack
+        taskStack = (StackType_t *) heap_caps_malloc(
+                stackSizeWords * sizeof(StackType_t),
+                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+        );
+
+        taskBuffer = (StaticTask_t *) heap_caps_malloc(
+                sizeof(StaticTask_t),
+                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
+        );
+
         // Create audio processing task with PSRAM stack
-        BaseType_t task_created = xTaskCreatePinnedToCore(
+        audioTaskHandle_ = xTaskCreateStaticPinnedToCore(
                 audioTask,
                 "mic_audio",
-                3072, // Reduced stack size from 4096 to save memory (~1KB saved)
+                stackSizeWords,
                 this,
                 5,    // Priority
-                &audioTaskHandle_,
+                taskStack,
+                taskBuffer,
                 1     // Pin to core 1 (app core), may help with memory allocation
         );
 
-        if (task_created != pdPASS) {
-            ESP_LOGE(TAG, "Failed to create audio task");
+        if (audioTaskHandle_ == NULL) {
+            ESP_LOGE(TAG, "Failed to create microphone audio task");
+            heap_caps_free(taskStack);
+            heap_caps_free(taskBuffer);
+            taskStack = nullptr;
+            taskBuffer = nullptr;
             return ESP_FAIL;
         }
 
@@ -130,8 +140,6 @@ namespace btspeaker {
             i2s_channel_read(i2s_rx_handle_, raw_buffer, AUDIO_BUFFER_SIZE, &bytes_read, pdMS_TO_TICKS(10));
         }
 
-        ESP_LOGI(TAG, "Microphone stabilized, starting mono audio processing with VAD pre-filter");
-
         while (recording_) {
             // Read audio directly from I2S channel
             size_t bytes_read;
@@ -144,7 +152,6 @@ namespace btspeaker {
                     if (processed_bytes > 0) {
                         audioCallback_(processed_buffer, processed_bytes);
                     }
-                    // Backend will handle VAD and wake word detection
                 }
             }
 
@@ -190,7 +197,6 @@ namespace btspeaker {
         };
 
         // Initialize I2S channel
-        ESP_LOGI(TAG, "Initializing I2S STD channel...");
         ret = i2s_channel_init_std_mode(i2s_rx_handle_, &std_cfg);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize I2S STD channel: %s", esp_err_to_name(ret));
@@ -202,15 +208,12 @@ namespace btspeaker {
         applySPH0645Fix(I2S_NUM_1);
 
         // Enable I2S channel
-        ESP_LOGI(TAG, "Enabling I2S channel...");
         ret = i2s_channel_enable(i2s_rx_handle_);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to enable I2S channel: %s", esp_err_to_name(ret));
             i2s_del_channel(i2s_rx_handle_);
             return ret;
         }
-
-        ESP_LOGI(TAG, "Direct I2S STD driver initialized successfully for SPH0645!");
         return ESP_OK;
     }
 

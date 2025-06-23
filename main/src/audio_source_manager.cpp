@@ -48,35 +48,6 @@ namespace btspeaker {
         return ESP_OK;
     }
 
-    esp_err_t AudioSourceManager::stop() {
-        if (!isInitialized) {
-            return ESP_ERR_INVALID_STATE;
-        }
-
-        ESP_LOGI(TAG, "Stopping AudioSourceManager");
-
-        esp_err_t ret = stopCurrentSource();
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to stop current source: %s", esp_err_to_name(ret));
-        }
-
-        // Stop all pipelines
-        if (btPipeline) {
-            btPipeline->stop();
-        }
-        if (spotifyPipeline) {
-            spotifyPipeline->stop();
-        }
-        if (llmPipeline) {
-            llmPipeline->stop();
-        }
-
-        currentSource = AudioSource::NONE;
-
-        ESP_LOGI(TAG, "AudioSourceManager stopped");
-        return ESP_OK;
-    }
-
     esp_err_t AudioSourceManager::switchToSource(AudioSource source) {
         if (!isInitialized) {
             return ESP_ERR_INVALID_STATE;
@@ -128,7 +99,8 @@ namespace btspeaker {
         switch (currentSource) {
             case AudioSource::BLUETOOTH:
                 if (btPipeline->isRunning()) {
-                    btPipeline->stop();
+                    btPipeline->cleanupPipeline();
+                    btPipeline->disconnectCurrentDevice();
                 }
                 return ESP_OK;
             case AudioSource::SPOTIFY:

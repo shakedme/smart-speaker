@@ -21,7 +21,6 @@ public:
     ~AudioSourceManager() = default;
 
     esp_err_t start();
-    esp_err_t stop();
 
     void onMusicCommand(const char* command);
 

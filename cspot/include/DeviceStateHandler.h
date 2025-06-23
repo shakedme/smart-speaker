@@ -75,6 +75,8 @@ namespace cspot {
 
         void sendCommand(CommandType, CommandData data = {});
 
+        static void reloadTrackList(void *);
+
         Device device = Device_init_zero;
 
         std::vector<ProvidedTrack> currentTracks = {};
@@ -95,6 +97,7 @@ namespace cspot {
         std::shared_ptr<cspot::Context> ctx;
         std::shared_ptr<PlayerContext> playerContext;
 
+
     private:
 
         std::pair<uint8_t *, std::vector<ProvidedTrack> *> queuePacket = {
@@ -114,8 +117,6 @@ namespace cspot {
                 *string = NULL;
             }
         }
-
-        static void reloadTrackList(void *);
 
         std::atomic<bool> resolvingContext = false;
     };

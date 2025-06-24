@@ -183,7 +183,7 @@ namespace btspeaker {
                 .task_prio = taskPriority,
                 .stack_in_ext = true,
                 .multi_out_num = 0,
-                .uninstall_drv = false,
+                .uninstall_drv = true,
                 .need_expand = false,
                 .expand_src_bits = static_cast<i2s_data_bit_width_t>(bitsPerSample),
                 .buffer_len = 12000

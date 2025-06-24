@@ -3,12 +3,14 @@
 #include "../include/memory_utils.hpp"
 #include <cmath>
 #include <stdexcept>
+#include "esp_dsp.h"
 
 extern "C" {
 #include "esp_log.h"
 #include "board.h"
 #include "i2s_stream.h"
 #include "audio_common.h"
+#include "dsps_biquad_gen.h"
 #include "soc/i2s_reg.h"  // Add this for SPH0645 timing fixes
 #include "driver/i2s_std.h"   // New I2S standard driver (compatible with ESP-ADF)
 }
@@ -18,6 +20,9 @@ namespace btspeaker {
     MicrophoneManager::MicrophoneManager()
             : recording_(false), audioTaskHandle_(nullptr) {
         ESP_LOGI(TAG, "MicrophoneManager created for SPH0645LM4H I2S MEMS microphone (mono output)");
+        dsps_biquad_gen_hpf_f32(coeffs, F_NORM, Q_FACTOR);
+        floatBuffer = static_cast<float *>(heap_caps_malloc(SAMPLE_COUNT * sizeof(float),
+                                                            MALLOC_CAP_SPIRAM));
     }
 
     MicrophoneManager::~MicrophoneManager() {
@@ -72,7 +77,7 @@ namespace btspeaker {
                 1     // Pin to core 1 (app core), may help with memory allocation
         );
 
-        if (audioTaskHandle_ == NULL) {
+        if (audioTaskHandle_ == nullptr) {
             ESP_LOGE(TAG, "Failed to create microphone audio task");
             heap_caps_free(taskStack);
             heap_caps_free(taskBuffer);
@@ -115,7 +120,7 @@ namespace btspeaker {
     void MicrophoneManager::audioTask(void *arg) {
         auto *self = static_cast<MicrophoneManager *>(arg);
         self->runAudioProcessing();
-        vTaskDelete(NULL);
+        vTaskDelete(nullptr);
     }
 
     void MicrophoneManager::runAudioProcessing() {
@@ -178,7 +183,6 @@ namespace btspeaker {
         }
 
         // Configure I2S standard mode (16kHz for direct VAD/wake word compatibility)
-        // Using Philips I2S mode as specified in official Adafruit SPH0645 example
         i2s_std_config_t std_cfg = {
                 .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(16000),  // 16kHz - Direct compatibility with VAD/wake word
                 .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
@@ -237,21 +241,38 @@ namespace btspeaker {
         const auto *raw_samples = reinterpret_cast<const int32_t *>(raw_data);
         auto *output_samples = reinterpret_cast<int16_t *>(processed_data);
 
-        size_t raw_sample_count = raw_bytes / sizeof(int32_t);
-
-        for (size_t i = 0; i < raw_sample_count; i++) {
+        // Convert int32 to float and normalize
+        for (size_t i = 0; i < SAMPLE_COUNT; i++) {
             int32_t sample = raw_samples[i];
-            int32_t shifted_sample = sample >> 14;
-            int32_t scaled_sample = (shifted_sample >> 2) * 2;
-
-            if (scaled_sample > 32767) scaled_sample = 32767;
-            if (scaled_sample < -32768) scaled_sample = -32768;
-
-            output_samples[i] = (int16_t) scaled_sample;
+            // Convert to float normalized to [-1, 1] range
+            floatBuffer[i] = (float) (sample >> 14) / 32768.0f;
         }
 
-        // Return mono byte count (16-bit samples, 1 channel, 44.1kHz)
-        return raw_sample_count * sizeof(int16_t);
+        esp_err_t ret = dsps_biquad_f32_ae32(floatBuffer,
+                                             floatBuffer,
+                                             static_cast<int>(SAMPLE_COUNT),
+                                             coeffs,
+                                             delay_lines);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "IIR filter error: %s", esp_err_to_name(ret));
+        }
+
+        float maxInt = 32767.0f; // Maximum value for int16_t
+        float minInt = -32768.0f; // Minimum value for int16_t
+
+        // Convert back to int16
+        for (size_t i = 0; i < SAMPLE_COUNT; i++) {
+            // Scale back to int16 range
+            float filtered_sample = floatBuffer[i] * maxInt;
+
+            // Clamp to int16 range
+            if (filtered_sample > maxInt) filtered_sample = maxInt;
+            if (filtered_sample < minInt) filtered_sample = minInt;
+
+            output_samples[i] = (int16_t) filtered_sample;
+        }
+
+        return SAMPLE_COUNT * sizeof(int16_t);
     }
 
 } // namespace btspeaker 

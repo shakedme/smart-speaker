@@ -42,7 +42,15 @@ namespace btspeaker {
 
     private:
         static constexpr const char *TAG = "MIC_MGR";
-        static constexpr int AUDIO_BUFFER_SIZE = 1024 * 8; // Increased for better audio quality (16ms at 44.1kHz)
+        static constexpr int AUDIO_BUFFER_SIZE = 1024 * 2;
+        static constexpr float CUTOFF_HZ = 50.0f;             // remove DC and sub-50Hz drift
+        static constexpr float SAMPLE_RATE = 16000.0f;          // your mic ADC rate
+        static constexpr float F_NORM = CUTOFF_HZ / SAMPLE_RATE;  // ≈0.003125
+        static constexpr float Q_FACTOR = 0.707f;            // Butterworth-style two-pole (~1/√2)
+        static constexpr int SAMPLE_COUNT = AUDIO_BUFFER_SIZE / sizeof(int32_t);
+
+        float delay_lines[2] = {0.0f, 0.0f};
+        float coeffs[5];                        // b0,b1,b2,a1,a2
 
         // Audio processing task
         static void audioTask(void *arg);
@@ -65,8 +73,11 @@ namespace btspeaker {
         AudioDataCallback audioCallback_;
 
         // Memory allocated for task stack and buffer (for cleanup)
-        StackType_t* taskStack = nullptr;
-        StaticTask_t* taskBuffer = nullptr;
+        StackType_t *taskStack = nullptr;
+        StaticTask_t *taskBuffer = nullptr;
+
+        // Float buffer for audio processing
+        float *floatBuffer = nullptr;
 
         // Direct I2S channel handle (new API)
         i2s_chan_handle_t i2s_rx_handle_ = nullptr;

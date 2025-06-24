@@ -25,7 +25,6 @@ namespace btspeaker {
         void pause();
         void resume();
         void start();
-        void stop();
 
         [[nodiscard]] bool isRunning() const { return running; }
 

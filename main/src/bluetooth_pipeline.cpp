@@ -3,7 +3,6 @@
 
 extern "C" {
 #include "esp_log.h"
-#include "esp_system.h"
 #include "audio_pipeline.h"
 #include "audio_common.h"
 #include "bluetooth_service.h"
@@ -18,7 +17,7 @@ namespace btspeaker {
 
     BluetoothPipeline::BluetoothPipeline()
             : BaseAudioPipeline(TAG),
-            btConnected(false) {
+              btConnected(false) {
         instance = this;
 
         bluetooth_service_cfg_t btCfg = {
@@ -76,12 +75,15 @@ namespace btspeaker {
 
         audioPipeline = AudioPipelineUtil::createAudioPipeline(AudioSource::BLUETOOTH,
                                                                bt_handle);
+
+        start();
     }
 
     void BluetoothPipeline::cleanupPipeline() {
         ESP_LOGI(TAG, "Cleaning up audio pipeline");
         AudioPipelineUtil::cleanupPipeline(*audioPipeline);
         audioPipeline.reset();
+        running = false;
         ESP_LOGI(TAG, "Bluetooth pipeline cleanup complete");
     }
 

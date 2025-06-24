@@ -589,10 +589,118 @@ static esp_err_t esp_websocket_client_create_transport(esp_websocket_client_hand
     }
     return ESP_OK;
 }
+//
+//static int esp_websocket_client_send_with_exact_opcode(esp_websocket_client_handle_t client,
+//                                                       ws_transport_opcodes_t opcode,
+//                                                       const uint8_t *data, int len, TickType_t timeout) {
+//    if (client == NULL || len < 0 || (data == NULL && len > 0)) {
+//        ESP_LOGE(TAG, "Invalid arguments");
+//        return -1;
+//    }
+//
+//    if (!esp_websocket_client_is_connected(client)) {
+//        ESP_LOGE(TAG, "Websocket client is not connected");
+//        return -1;
+//    }
+//
+//    if (client->transport == NULL) {
+//        ESP_LOGE(TAG, "Invalid transport");
+//        return -1;
+//    }
+//
+//    if (xSemaphoreTakeRecursive(client->lock, timeout) != pdPASS) {
+//        ESP_LOGE(TAG, "Could not lock ws-client within %" PRIu32 " timeout", timeout);
+//        return -1;
+//    }
+//
+//    int ret = -1;
+//    int need_write = len;
+//    int wlen = 0, widx = 0;
+//    bool contained_fin = opcode & WS_TRANSPORT_OPCODES_FIN;
+//
+//    TickType_t start_tick = xTaskGetTickCount();
+//
+//    if (esp_websocket_new_buf(client, true) != ESP_OK) {
+//        ESP_LOGE(TAG, "Failed to setup tx buffer");
+//        goto unlock_and_return;
+//    }
+//
+//    while (widx < len || opcode) {
+//        if (need_write > client->buffer_size) {
+//            need_write = client->buffer_size;
+//            opcode = opcode & ~WS_TRANSPORT_OPCODES_FIN;
+//        } else if (contained_fin) {
+//            opcode = opcode | WS_TRANSPORT_OPCODES_FIN;
+//        }
+//
+//        memcpy(client->tx_buffer, data + widx, need_write);
+//
+//        TickType_t now = xTaskGetTickCount();
+//        TickType_t remaining_ticks = (timeout == portMAX_DELAY) ? portMAX_DELAY : (timeout > (now - start_tick)) ? (
+//                timeout - (now - start_tick)) : 0;
+//
+//        int retry_count = 0;
+//        const int max_retries = 0;
+//        const TickType_t retry_delay = pdMS_TO_TICKS(20);
+//
+//        do {
+//            wlen = esp_transport_ws_send_raw(client->transport, opcode,
+//                                             (char *) client->tx_buffer, need_write,
+//                                             (remaining_ticks == portMAX_DELAY) ? -1 : remaining_ticks *
+//                                                                                       portTICK_PERIOD_MS);
+//
+//            if (wlen > 0) break;
+//
+//            if (wlen == 0 && retry_count < max_retries && remaining_ticks != 0) {
+//                retry_count++;
+//                vTaskDelay(retry_delay);
+//                now = xTaskGetTickCount();
+//                remaining_ticks = (timeout == portMAX_DELAY) ? portMAX_DELAY : (timeout > (now - start_tick)) ? (
+//                        timeout - (now - start_tick)) : 0;
+//            } else {
+//                break;
+//            }
+//        } while (wlen == 0);
+//
+//        if (wlen < 0 || (wlen == 0 && need_write != 0)) {
+//            ret = wlen;
+//            esp_websocket_free_buf(client, true);
+//            esp_tls_error_handle_t error_handle = esp_transport_get_error_handle(client->transport);
+//            if (error_handle) {
+//                esp_websocket_client_error(client,
+//                                           "esp_transport_write() returned %d, transport_error=%s, tls_error_code=%i, tls_flags=%i, errno=%d",
+//                                           ret, esp_err_to_name(error_handle->last_error),
+//                                           error_handle->esp_tls_error_code,
+//                                           error_handle->esp_tls_flags,
+//                                           errno);
+//            } else {
+//                esp_websocket_client_error(client, "esp_transport_write() returned %d, errno=%d", ret, errno);
+//            }
+//            esp_websocket_client_abort_connection(client, WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT);
+//            goto unlock_and_return;
+//        }
+//
+//        opcode = 0;
+//        widx += wlen;
+//        need_write = len - widx;
+//    }
+//
+//    esp_websocket_free_buf(client, true);
+//    ret = widx;
+//
+//    unlock_and_return:
+//    xSemaphoreGiveRecursive(client->lock);
+//    return ret;
+//}
 
-static int esp_websocket_client_send_with_exact_opcode(esp_websocket_client_handle_t client,
-                                                       ws_transport_opcodes_t opcode,
-                                                       const uint8_t *data, int len, TickType_t timeout) {
+
+static int esp_websocket_client_send_with_exact_opcode(esp_websocket_client_handle_t client, ws_transport_opcodes_t opcode, const uint8_t *data, int len, TickType_t timeout)
+{
+    int ret = -1;
+    int need_write = len;
+    int wlen = 0, widx = 0;
+    bool contained_fin = opcode & WS_TRANSPORT_OPCODES_FIN;
+
     if (client == NULL || len < 0 || (data == NULL && len > 0)) {
         ESP_LOGE(TAG, "Invalid arguments");
         return -1;
@@ -613,78 +721,40 @@ static int esp_websocket_client_send_with_exact_opcode(esp_websocket_client_hand
         return -1;
     }
 
-    int ret = -1;
-    int need_write = len;
-    int wlen = 0, widx = 0;
-    bool contained_fin = opcode & WS_TRANSPORT_OPCODES_FIN;
-
-    TickType_t start_tick = xTaskGetTickCount();
-
     if (esp_websocket_new_buf(client, true) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to setup tx buffer");
         goto unlock_and_return;
     }
 
-    while (widx < len || opcode) {
+    while (widx < len || opcode) {  // allow for sending "current_opcode" only message with len==0
         if (need_write > client->buffer_size) {
             need_write = client->buffer_size;
             opcode = opcode & ~WS_TRANSPORT_OPCODES_FIN;
         } else if (contained_fin) {
             opcode = opcode | WS_TRANSPORT_OPCODES_FIN;
         }
-
         memcpy(client->tx_buffer, data + widx, need_write);
-
-        TickType_t now = xTaskGetTickCount();
-        TickType_t remaining_ticks = (timeout == portMAX_DELAY) ? portMAX_DELAY : (timeout > (now - start_tick)) ? (
-                timeout - (now - start_tick)) : 0;
-
-        int retry_count = 0;
-        const int max_retries = 15;
-        const TickType_t retry_delay = pdMS_TO_TICKS(20);
-
-        do {
-            wlen = esp_transport_ws_send_raw(client->transport, opcode,
-                                             (char *) client->tx_buffer, need_write,
-                                             (remaining_ticks == portMAX_DELAY) ? -1 : remaining_ticks *
-                                                                                       portTICK_PERIOD_MS);
-
-            if (wlen > 0) break;
-
-            if (wlen == 0 && retry_count < max_retries && remaining_ticks != 0) {
-                retry_count++;
-                vTaskDelay(retry_delay);
-                now = xTaskGetTickCount();
-                remaining_ticks = (timeout == portMAX_DELAY) ? portMAX_DELAY : (timeout > (now - start_tick)) ? (
-                        timeout - (now - start_tick)) : 0;
-            } else {
-                break;
-            }
-        } while (wlen == 0);
-
+        // send with ws specific way and specific opcode
+        wlen = esp_transport_ws_send_raw(client->transport, opcode, (char *)client->tx_buffer, need_write,
+                                         (timeout == portMAX_DELAY) ? -1 : timeout * portTICK_PERIOD_MS);
         if (wlen < 0 || (wlen == 0 && need_write != 0)) {
             ret = wlen;
             esp_websocket_free_buf(client, true);
             esp_tls_error_handle_t error_handle = esp_transport_get_error_handle(client->transport);
             if (error_handle) {
-                esp_websocket_client_error(client,
-                                           "esp_transport_write() returned %d, transport_error=%s, tls_error_code=%i, tls_flags=%i, errno=%d",
-                                           ret, esp_err_to_name(error_handle->last_error),
-                                           error_handle->esp_tls_error_code,
-                                           error_handle->esp_tls_flags,
-                                           errno);
+                esp_websocket_client_error(client, "esp_transport_write() returned %d, transport_error=%s, tls_error_code=%i, tls_flags=%i, errno=%d",
+                                           ret, esp_err_to_name(error_handle->last_error), error_handle->esp_tls_error_code,
+                                           error_handle->esp_tls_flags, errno);
             } else {
                 esp_websocket_client_error(client, "esp_transport_write() returned %d, errno=%d", ret, errno);
             }
             esp_websocket_client_abort_connection(client, WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT);
             goto unlock_and_return;
         }
-
         opcode = 0;
         widx += wlen;
         need_write = len - widx;
     }
-
     esp_websocket_free_buf(client, true);
     ret = widx;
 
@@ -692,7 +762,6 @@ static int esp_websocket_client_send_with_exact_opcode(esp_websocket_client_hand
     xSemaphoreGiveRecursive(client->lock);
     return ret;
 }
-
 
 esp_websocket_client_handle_t esp_websocket_client_init(const esp_websocket_client_config_t *config) {
     esp_websocket_client_handle_t client = calloc(1, sizeof(struct esp_websocket_client));

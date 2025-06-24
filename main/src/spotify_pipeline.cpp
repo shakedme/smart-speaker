@@ -69,6 +69,9 @@ namespace btspeaker {
         if (!isInitialized) {
             ESP_LOGE(TAG, "Not initialized");
             return ESP_ERR_INVALID_STATE;
+        } else if (!isAuthenticated) {
+            ESP_LOGE(TAG, "Not authenticated");
+            return ESP_ERR_INVALID_STATE;
         }
 
         if (isRunning_) {

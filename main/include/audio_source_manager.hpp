@@ -56,7 +56,7 @@ private:
 
     // Internal helpers
     esp_err_t stopCurrentSource();
-    esp_err_t pauseCurrentSourceForVoice();
+    void updatePreviousSource();
     esp_err_t restorePreviousSource();
 
     void ensureI2SDriverStopped();

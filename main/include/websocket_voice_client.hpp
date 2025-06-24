@@ -58,6 +58,8 @@ namespace btspeaker {
     private:
         static constexpr const char *TAG = "WS_VOICE_CLIENT";
 
+        int audioChunkCounter{0};
+
         static void websocketEventHandler(void *handlerArgs, esp_event_base_t base,
                                           int32_t eventId, void *eventData);
 

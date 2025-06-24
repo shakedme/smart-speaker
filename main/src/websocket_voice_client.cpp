@@ -103,7 +103,10 @@ namespace btspeaker {
         if (esp_websocket_client_is_connected(websocketClient)) {
             int ret = esp_websocket_client_send_bin(websocketClient, (const char *) audioData, length,
                                                     pdMS_TO_TICKS(1000));
-            return (ret < 0) ? ESP_FAIL : ESP_OK;
+            if (ret < 0) {
+                return ESP_FAIL;
+            }
+            return ESP_OK;
         }
         return ESP_ERR_INVALID_STATE;
     }

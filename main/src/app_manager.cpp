@@ -1,3 +1,4 @@
+#include <esp_sntp.h>
 #include "../include/app_manager.hpp"
 #include "../include/voice_config.hpp"
 #include "../include/audio_source_manager.hpp"

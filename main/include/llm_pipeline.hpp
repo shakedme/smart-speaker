@@ -50,6 +50,8 @@ namespace btspeaker {
 
         esp_err_t resume();
 
+        esp_err_t setupPipeline();
+
         // Get current state
         [[nodiscard]] State getState() const { return state_.load(); }
 
@@ -65,7 +67,6 @@ namespace btspeaker {
         void runAudioPlayback();
 
         // Pipeline management
-        esp_err_t setupResponsePipeline();
 
         // Audio processing
         esp_err_t writeAudioToPipeline(const uint8_t *data, size_t length);

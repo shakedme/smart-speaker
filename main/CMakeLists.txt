@@ -46,6 +46,7 @@ idf_component_register(
         bluetooth_service
         esp_wifi
         json
+        esp-dsp
 
         # Additional for cspot
         esp_http_client

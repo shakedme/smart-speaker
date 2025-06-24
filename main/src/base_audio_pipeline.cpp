@@ -46,17 +46,4 @@ namespace btspeaker {
         }
     }
 
-    void BaseAudioPipeline::stop() {
-        if (running && audioPipeline && audioPipeline->pipeline) {
-            esp_err_t ret = audio_pipeline_stop(audioPipeline->pipeline.get());
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to stop pipeline: %s", esp_err_to_name(ret));
-            } else {
-                audio_pipeline_wait_for_stop(audioPipeline->pipeline.get());
-                running = false;
-                ESP_LOGI(TAG, "Pipeline stopped");
-            }
-        }
-    }
-
 } // namespace btspeaker

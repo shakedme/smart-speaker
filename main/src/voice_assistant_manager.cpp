@@ -139,7 +139,7 @@ namespace btspeaker {
         }
 
         const char *type = cJSON_GetStringValue(typeItem);
-        
+
         if (strcmp(type, "state_change") == 0) {
             // Handle state change message: {"type": "state_change", "data": "LISTENING"}
             cJSON *dataItem = cJSON_GetObjectItem(json, "data");
@@ -179,7 +179,7 @@ namespace btspeaker {
             // or {"type": "intent", "intent": "playback_control", "data": "pause"}
             cJSON *intentItem = cJSON_GetObjectItem(json, "intent");
             cJSON *dataItem = cJSON_GetObjectItem(json, "data");
-            
+
             if (!intentItem || !cJSON_IsString(intentItem) || !dataItem || !cJSON_IsString(dataItem)) {
                 ESP_LOGE(TAG, "Missing or invalid 'intent' or 'data' field in intent message");
                 cJSON_Delete(json);
@@ -204,14 +204,17 @@ namespace btspeaker {
     void VoiceAssistantManager::setVoiceAssistantState(VoiceAssistantState new_state) {
         if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             VoiceAssistantState old_state = state.exchange(new_state);
-            switch (new_state) {
-                case VoiceAssistantState::LISTENING:
-                    audioSourceManager.stopVoiceResponse();
-                    break;
-                default:
-                    break;
+            if (old_state != new_state) {
+                ESP_LOGI(TAG, "Voice assistant state changed from %d to %d", (int) old_state, (int) new_state);
+                switch (new_state) {
+                    case VoiceAssistantState::LISTENING:
+                        audioSourceManager.stopVoiceResponse();
+                        break;
+                    default:
+                        break;
+                }
+                xSemaphoreGive(stateMutex);
             }
-            xSemaphoreGive(stateMutex);
         } else {
             // Fallback without mutex protection
             VoiceAssistantState old_state = state.exchange(new_state);

@@ -60,7 +60,7 @@ private:
     esp_err_t restorePreviousSource();
 
     void ensureI2SDriverStopped();
-    esp_err_t startSource(AudioSource source);
+    void startSource(AudioSource source);
 
     // Spotify-specific controls
     esp_err_t spotifyPlay(const std::string& uri);

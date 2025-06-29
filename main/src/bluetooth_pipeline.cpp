@@ -14,6 +14,7 @@ extern "C" {
 namespace btspeaker {
 
     BluetoothPipeline *BluetoothPipeline::instance = nullptr;
+    static uint8_t avrcp_tl = 0; // Transaction label for AVRCP commands
 
     BluetoothPipeline::BluetoothPipeline()
             : BaseAudioPipeline(TAG),
@@ -80,6 +81,9 @@ namespace btspeaker {
     }
 
     void BluetoothPipeline::cleanupPipeline() {
+        if (!isRunning()) {
+            return;
+        }
         ESP_LOGI(TAG, "Cleaning up audio pipeline");
         AudioPipelineUtil::cleanupPipeline(*audioPipeline);
         audioPipeline.reset();
@@ -97,6 +101,40 @@ namespace btspeaker {
             }
         } else {
             ESP_LOGW(TAG, "No BT device connected to disconnect");
+        }
+    }
+
+    // Helper to send passthrough command (pressed + released)
+    static void send_avrcp_passthrough_cmd(uint8_t key_code) {
+        uint8_t tl = avrcp_tl++ & 0x0F;
+        esp_avrc_ct_send_passthrough_cmd(tl, key_code, ESP_AVRC_PT_CMD_STATE_PRESSED);
+        esp_avrc_ct_send_passthrough_cmd(tl, key_code, ESP_AVRC_PT_CMD_STATE_RELEASED);
+    }
+
+    void BluetoothPipeline::avrcpPause() const {
+        if (btConnected)
+            send_avrcp_passthrough_cmd(ESP_AVRC_PT_CMD_PAUSE);
+    }
+
+    void BluetoothPipeline::avrcpResume() const {
+        if (btConnected)
+            send_avrcp_passthrough_cmd(ESP_AVRC_PT_CMD_PLAY);
+    }
+
+    void BluetoothPipeline::avrcpNext() const {
+        if (btConnected)
+            send_avrcp_passthrough_cmd(ESP_AVRC_PT_CMD_FORWARD);
+    }
+
+    void BluetoothPipeline::avrcpPrevious() const {
+        if (btConnected)
+            send_avrcp_passthrough_cmd(ESP_AVRC_PT_CMD_BACKWARD);
+    }
+
+    void BluetoothPipeline::setAvrcpVolume(uint8_t volume) const {
+        if (btConnected) {
+            uint8_t tl = avrcp_tl++ & 0x0F;
+            esp_avrc_ct_send_set_absolute_volume_cmd(tl, volume > 0x7F ? 0x7F : volume);
         }
     }
 

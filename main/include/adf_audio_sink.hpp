@@ -41,12 +41,14 @@ namespace btspeaker {
 
         void pause() override;
 
-        void stop();
-
         void flush() override;
 
         bool isPlaying() override {
             return isPlaying_.load();
+        }
+
+        bool isInitialized() {
+            return initialized_.load();
         }
 
         size_t getBufferFillLevel() override;

@@ -181,23 +181,68 @@ void LoginBlob::loadUserPass(const std::string& username,
 
 void LoginBlob::loadJson(const std::string& json) {
 #ifdef BELL_ONLY_CJSON
+  ESP_LOGI(TAG, "🔧 DEBUG: Starting JSON parsing with cJSON");
   cJSON* root = cJSON_Parse(json.c_str());
-  this->authType = cJSON_GetObjectItem(root, "authType")->valueint;
-  this->username = cJSON_GetObjectItem(root, "username")->valuestring;
-  std::string authDataObject =
-      cJSON_GetObjectItem(root, "authData")->valuestring;
-  this->authData = crypto->base64Decode(authDataObject);
+  if (!root) {
+    ESP_LOGE(TAG, "Failed to parse JSON: %s", cJSON_GetErrorPtr());
+    throw std::runtime_error("Invalid JSON format");
+  }
+  
+  ESP_LOGI(TAG, "🔧 DEBUG: JSON parsed successfully, extracting fields");
+  
+  // Check and extract authType
+  cJSON* authTypeItem = cJSON_GetObjectItem(root, "authType");
+  if (!authTypeItem || !cJSON_IsNumber(authTypeItem)) {
+    ESP_LOGE(TAG, "Missing or invalid 'authType' field in JSON");
+    cJSON_Delete(root);
+    throw std::runtime_error("Missing authType field");
+  }
+  this->authType = authTypeItem->valueint;
+  ESP_LOGI(TAG, "🔧 DEBUG: Extracted authType: %d", this->authType);
+  
+  // Check and extract username
+  cJSON* usernameItem = cJSON_GetObjectItem(root, "username");
+  if (!usernameItem || !cJSON_IsString(usernameItem)) {
+    ESP_LOGE(TAG, "Missing or invalid 'username' field in JSON");
+    cJSON_Delete(root);
+    throw std::runtime_error("Missing username field");
+  }
+  this->username = usernameItem->valuestring;
+  ESP_LOGI(TAG, "🔧 DEBUG: Extracted username: '%s'", this->username.c_str());
+  
+  // Check and extract authData
+  cJSON* authDataItem = cJSON_GetObjectItem(root, "authData");
+  if (!authDataItem || !cJSON_IsString(authDataItem)) {
+    ESP_LOGE(TAG, "Missing or invalid 'authData' field in JSON");
+    cJSON_Delete(root);
+    throw std::runtime_error("Missing authData field");
+  }
+  std::string authDataObject = authDataItem->valuestring;
+  ESP_LOGI(TAG, "🔧 DEBUG: Extracted authData string length: %d", authDataObject.length());
+  
+  // Decode base64 auth data
+  try {
+    this->authData = crypto->base64Decode(authDataObject);
+    ESP_LOGI(TAG, "🔧 DEBUG: Base64 decoded authData size: %d bytes", this->authData.size());
+  } catch (const std::exception& e) {
+    ESP_LOGE(TAG, "Failed to decode base64 authData: %s", e.what());
+    cJSON_Delete(root);
+    throw;
+  }
   
   // Load device name and ID if present (for backward compatibility)
   cJSON* deviceNameItem = cJSON_GetObjectItem(root, "deviceName");
   if (deviceNameItem && cJSON_IsString(deviceNameItem)) {
     this->name = deviceNameItem->valuestring;
+    ESP_LOGI(TAG, "🔧 DEBUG: Extracted deviceName: '%s'", this->name.c_str());
   }
   cJSON* deviceIdItem = cJSON_GetObjectItem(root, "deviceId");
   if (deviceIdItem && cJSON_IsString(deviceIdItem)) {
     this->deviceId = deviceIdItem->valuestring;
+    ESP_LOGI(TAG, "🔧 DEBUG: Extracted deviceId: '%s'", this->deviceId.c_str());
   }
   
+  ESP_LOGI(TAG, "🔧 DEBUG: JSON loading completed successfully");
   cJSON_Delete(root);
 #else
   auto root = nlohmann::json::parse(json);

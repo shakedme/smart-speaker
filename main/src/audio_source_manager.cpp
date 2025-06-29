@@ -22,6 +22,10 @@ namespace btspeaker {
             spotifyPipeline->setAuthenticatedCallback([this]() {
                 this->switchToSource(AudioSource::SPOTIFY);
             });
+            spotifyPipeline->setFailureCallback([this]() {
+                ESP_LOGE(TAG, "Spotify authentication failed, switching to Bluetooth");
+                this->switchToSource(AudioSource::BLUETOOTH);
+            });
             llmPipeline = std::make_unique<LLMPipeline>();
         }
 
@@ -57,9 +61,6 @@ namespace btspeaker {
 
         ESP_LOGI(TAG, "Switching from source %d to %d", (int) currentSource, (int) source);
 
-        AudioSource old_source = currentSource;
-
-        // Step 1: Ensure clean shutdown of current source
         ensureI2SDriverStopped();
 
         // Store previous source for restoration after voice response
@@ -71,26 +72,8 @@ namespace btspeaker {
             vTaskDelay(pdMS_TO_TICKS(300));
         }
 
-        // Step 3: Start new source with proper hardware state tracking
-        esp_err_t ret = startSource(source);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to start new source %d: %s", (int) source, esp_err_to_name(ret));
-
-            // Attempt recovery - try to restore previous source
-            vTaskDelay(pdMS_TO_TICKS(1000));
-
-            ESP_LOGW(TAG, "Attempting to restore previous source %d", (int) old_source);
-            esp_err_t recovery_ret = startSource(old_source);
-            if (recovery_ret != ESP_OK) {
-                ESP_LOGE(TAG, "Recovery failed, system in unstable state");
-                currentSource = AudioSource::NONE;
-            }
-            return ret;
-        }
-
+        startSource(source);
         currentSource = source;
-        ESP_LOGI(TAG, "Post switch: Available internal memory: %d",
-                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         ESP_LOGI(TAG, "Successfully switched to source %d", (int) source);
         return ESP_OK;
     }
@@ -98,20 +81,14 @@ namespace btspeaker {
     esp_err_t AudioSourceManager::stopCurrentSource() {
         switch (currentSource) {
             case AudioSource::BLUETOOTH:
-                if (btPipeline->isRunning()) {
-                    btPipeline->cleanupPipeline();
-                    btPipeline->disconnectCurrentDevice();
-                }
+                btPipeline->cleanupPipeline();
+                btPipeline->disconnectCurrentDevice();
                 return ESP_OK;
             case AudioSource::SPOTIFY:
-                if (spotifyPipeline->isRunning()) {
-                    return spotifyPipeline->stop();
-                }
+                return spotifyPipeline->stop();
             case AudioSource::VOICE_RESPONSE:
-                if (llmPipeline->getState() == LLMPipeline::State::PLAYING) {
-                    return llmPipeline->stop();
-                } else {
-                }
+                llmPipeline->cleanupPipeline();
+                return ESP_OK;
             case AudioSource::NONE:
                 return ESP_OK;
             default:
@@ -153,14 +130,14 @@ namespace btspeaker {
         esp_err_t ret = ESP_OK;
         switch (currentSource) {
             case AudioSource::BLUETOOTH:
-                btPipeline->resume();
+                btPipeline->avrcpResume();
                 ret = ESP_OK;
                 break;
             case AudioSource::SPOTIFY:
                 ret = spotifyPipeline->resume();
                 break;
             case AudioSource::VOICE_RESPONSE:
-                ret = llmPipeline->resume();
+                ret = ESP_OK;
                 break;
             default:
                 ret = ESP_ERR_INVALID_STATE;
@@ -177,14 +154,14 @@ namespace btspeaker {
         esp_err_t ret = ESP_OK;
         switch (currentSource) {
             case AudioSource::BLUETOOTH:
-                btPipeline->pause();
+                btPipeline->avrcpPause();
                 ret = ESP_OK;
                 break;
             case AudioSource::SPOTIFY:
                 ret = spotifyPipeline->pause();
                 break;
             case AudioSource::VOICE_RESPONSE:
-                ret = llmPipeline->pause();
+                ret = ESP_OK;
                 break;
             default:
                 ret = ESP_ERR_INVALID_STATE;
@@ -212,9 +189,8 @@ namespace btspeaker {
             case AudioSource::SPOTIFY:
                 return spotifyPipeline->skipNext();
             case AudioSource::BLUETOOTH:
-                // Bluetooth doesn't support skip (would need AVRCP implementation)
-                ESP_LOGW(TAG, "Skip not supported for Bluetooth source");
-                return ESP_ERR_NOT_SUPPORTED;
+                btPipeline->avrcpNext();
+                return ESP_OK;
             case AudioSource::VOICE_RESPONSE:
                 ESP_LOGW(TAG, "Skip not supported for voice responses");
                 return ESP_ERR_NOT_SUPPORTED;
@@ -232,8 +208,8 @@ namespace btspeaker {
             case AudioSource::SPOTIFY:
                 return spotifyPipeline->skipPrevious();
             case AudioSource::BLUETOOTH:
-                ESP_LOGW(TAG, "Skip not supported for Bluetooth source");
-                return ESP_ERR_NOT_SUPPORTED;
+                btPipeline->avrcpPrevious();
+                return ESP_OK;
             case AudioSource::VOICE_RESPONSE:
                 ESP_LOGW(TAG, "Skip not supported for voice responses");
                 return ESP_ERR_NOT_SUPPORTED;
@@ -247,20 +223,14 @@ namespace btspeaker {
 
         ESP_LOGI(TAG, "Setting volume to %d", volume);
 
-        // Apply volume to all sources
         if (btPipeline) {
-            // TODO: Implement Bluetooth volume control
-            ESP_LOGD(TAG, "Bluetooth volume control not implemented");
+            btPipeline->setAvrcpVolume(volume);
         }
 
         if (spotifyPipeline) {
             spotifyPipeline->setVolume(volume);
         }
 
-        if (llmPipeline) {
-            // TODO: Implement voice response volume control if needed
-            ESP_LOGD(TAG, "Voice response volume control not implemented");
-        }
     }
 
     esp_err_t AudioSourceManager::queueVoiceResponseChunk(const uint8_t *audio_data, size_t length) {
@@ -273,17 +243,18 @@ namespace btspeaker {
             switchToSource(AudioSource::VOICE_RESPONSE);
         }
 
-        esp_err_t ret = llmPipeline->queueAudioChunk(audio_data, length);
+        esp_err_t ret = llmPipeline->writeAudioToPipeline(audio_data, length);
 
         return ret;
     }
 
     esp_err_t AudioSourceManager::stopVoiceResponse() {
         if (currentSource != AudioSource::VOICE_RESPONSE) {
-            return ESP_OK;  // Not playing voice response
+            return ESP_OK;
         }
-        // Restore previous source
+
         esp_err_t ret = restorePreviousSource();
+
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "Failed to restore previous source: %s", esp_err_to_name(ret));
         }
@@ -300,15 +271,13 @@ namespace btspeaker {
         ESP_LOGI(TAG, "Playing Spotify URI: %s", uri.c_str());
 
         // Switch to Spotify if not already active
+        esp_err_t ret;
         if (currentSource != AudioSource::SPOTIFY) {
-            esp_err_t ret = switchToSource(AudioSource::SPOTIFY);
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to switch to Spotify: %s", esp_err_to_name(ret));
-                return ret;
-            }
+            spotifyPipeline->setNextURI(uri);
+            ret = switchToSource(AudioSource::SPOTIFY);
+        } else {
+            ret = spotifyPipeline->playURI(uri);
         }
-
-        esp_err_t ret = spotifyPipeline->playURI(uri);
 
         return ret;
     }
@@ -378,33 +347,23 @@ namespace btspeaker {
         vTaskDelay(pdMS_TO_TICKS(I2S_SWITCH_DELAY_MS));
     }
 
-    esp_err_t AudioSourceManager::startSource(AudioSource source) {
+    void AudioSourceManager::startSource(AudioSource source) {
         ESP_LOGD(TAG, "Starting source %d with hardware coordination", (int) source);
 
-
-        esp_err_t ret = ESP_OK;
-        // Start the source
         switch (source) {
             case AudioSource::BLUETOOTH:
                 btPipeline->setupPipeline();
-                ret = ESP_OK;
                 break;
             case AudioSource::SPOTIFY:
-                ret = spotifyPipeline->start();
+                spotifyPipeline->start();
                 break;
             case AudioSource::VOICE_RESPONSE:
-                ret = llmPipeline->setupPipeline();
+                llmPipeline->setupPipeline();
                 break;
             default:
-                ret = ESP_OK;
                 break;
         }
 
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to start source %d: %s", (int) source, esp_err_to_name(ret));
-        }
-
-        return ret;
     }
 
 } // namespace btspeaker 

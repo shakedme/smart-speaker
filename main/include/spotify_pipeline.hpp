@@ -6,18 +6,11 @@
 #include "esp_raii_wrapper.hpp"
 #include "DeviceStateHandler.h"
 #include "esp_err.h"
-#include "esp_http_server.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "../include/spotify_config.hpp"
 #include "../include/adf_audio_sink.hpp"
-
-// cspot includes
-#include "CSpotContext.h"
-#include "LoginBlob.h"
-#include "DeviceStateHandler.h"
-#include "../../cspot/esp32/main/EspPlayer.h"
-#include "adf_audio_sink.hpp"
+#include "spotify_auth_manager.hpp"
+#include "EspPlayer.h"
+#include "WrappedSemaphore.h"
 
 namespace cspot {
     struct Context;
@@ -27,18 +20,11 @@ namespace cspot {
     class DeviceStateHandler;
 }
 
-namespace bell {
-    class Task;
-
-    class WrappedSemaphore;
-
-    class CircularBuffer;
-}
-
-using AuthenticatedCallback = std::function<void()>;
-
 
 namespace btspeaker {
+
+    using AuthenticatedCallback = std::function<void()>;
+    using FailureCallback = std::function<void()>;
 
     class SpotifyPipeline {
     public:
@@ -58,84 +44,52 @@ namespace btspeaker {
         // Playback control
         esp_err_t playURI(const std::string &uri);
 
+        void setNextURI(const std::string &uri);
+
         esp_err_t skipNext();
 
         esp_err_t skipPrevious();
 
         void setVolume(uint8_t volume);
 
-        // Authentication methods
-        esp_err_t startZeroconfDiscovery();
+        void setAuthenticatedCallback(AuthenticatedCallback cb);
 
-        // Callback for successful authentication
-        esp_err_t onSpotifyConnected(const std::shared_ptr<cspot::LoginBlob> &blob);
-
-        [[nodiscard]] bool isRunning() const { return isRunning_.load(); };
-
-        void setAuthenticatedCallback(AuthenticatedCallback callback) {
-            authenticatedCallback = std::move(callback);
-        }
-
-        static constexpr const char *TAG = "SpotifyPipeline";
-        static constexpr const char *NVS_NAMESPACE = "spotify_auth";
-        static constexpr const char *NVS_AUTH_KEY = "auth_blob";
+        void setFailureCallback(FailureCallback cb);
 
     private:
+        std::string nextUri;
         std::shared_ptr<cspot::Context> context;
-        std::shared_ptr<cspot::LoginBlob> loginBlob;
         std::shared_ptr<cspot::DeviceStateHandler> deviceStateHandler;
         std::atomic<bool> isPlaying;
         std::atomic<bool> isInitialized;
         std::atomic<bool> isRunning_;
         std::atomic<uint8_t> volume;
 
-        // Authentication state
-        std::atomic<bool> isAuthenticated;
-        std::string storedUsername;
-
-        // Callback for successful authentication
-        AuthenticatedCallback authenticatedCallback;
-
         // Audio streaming components
         std::shared_ptr<ADFAudioSink> audioSink;
         std::unique_ptr<EspPlayer> espPlayer;
 
-        // HTTP server for Zeroconf authentication
-        httpd_handle_t httpServer;
-
         // FreeRTOS task handle for packet processing
         TaskHandle_t packetHandlerTaskHandle = NULL;
-        
-        // Memory allocated for task stack and buffer (for cleanup)
-        StackType_t* taskStack = nullptr;
-        StaticTask_t* taskBuffer = nullptr;
+        StackType_t *taskStack = nullptr;
+        StaticTask_t *taskBuffer = nullptr;
 
-        esp_err_t startAuthentication();
+        // Auth manager
+        std::unique_ptr<SpotifyAuthManager> authManager;
 
-        esp_err_t loadStoredAuth();
+        // FreeRTOS task function for main Spotify workflow
+        static void spotifyMainTask(void *parameter);
 
-        esp_err_t saveAuthBlob();
+        esp_err_t initCSpotComponents();
 
-        void clearStoredAuth();
+        FailureCallback failureCallback;
 
-        esp_err_t startHttpServer();
-
-        void stopHttpServer();
-
-        // HTTP handlers
-        static esp_err_t spotifyInfoGetHandler(httpd_req_t *req);
-
-        static esp_err_t spotifyInfoPostHandler(httpd_req_t *req);
-
-        static esp_err_t closeHandler(httpd_req_t *req);
-
-        // Helper methods
-        static SpotifyPipeline *getInstanceFromRequest(httpd_req_t *req);
-
-        static std::string urlDecode(const std::string &str);
-
-        // FreeRTOS task function for main Spotify workflow (like official CSpotTask)
-        static void spotifyMainTask(void* parameter);
+        void unreference(char **string) {
+            if (*string != NULL) {
+                free(*string);
+                *string = NULL;
+            }
+        }
     };
 
 } // namespace btspeaker 

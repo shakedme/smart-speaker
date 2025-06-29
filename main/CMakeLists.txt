@@ -18,6 +18,7 @@ set(PROJECT_SRCS
         src/adf_audio_sink.cpp
         src/base_audio_pipeline.cpp
         src/esp_websocket_client.c
+        src/spotify_auth_manager.cpp
 
         # ESP32-specific cspot files
         "../cspot/esp32/main/EspPlayer.cpp"

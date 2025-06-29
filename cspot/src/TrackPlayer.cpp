@@ -64,7 +64,7 @@ TrackPlayer::TrackPlayer(std::shared_ptr<cspot::Context> ctx,
                          TrackEndedCallback onTrackEnd,
                          TrackChangedCallback onTrackChanged,
                          bool *repeating_track)
-        : bell::Task("cspot_player", 60 * 1024, 2, 0) {
+        : bell::Task("cspot_player", 60 * 1024, 2, 1) {
     this->ctx = ctx;
     this->onTrackEnd = onTrackEnd;
     this->onTrackChanged = onTrackChanged;

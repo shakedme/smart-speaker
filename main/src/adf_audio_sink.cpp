@@ -35,21 +35,21 @@ namespace btspeaker {
 
 
         size_t offset = 0;
-        const size_t chunkSize = 1024;
+        const size_t chunkSize = 256;
         auto raw = audioPipeline->i2SStreamReader.get();
         while (offset < bytes) {
             size_t toWrite = std::min(chunkSize, bytes - offset);
 
             size_t free_bytes = rb_bytes_available(audio_element_get_output_ringbuf(raw));
             if (free_bytes < toWrite) {
-                BELL_SLEEP_MS(5);
+                BELL_SLEEP_MS(100);
                 continue;
             }
 
             int written = raw_stream_write(raw, (char *) (buffer + offset), toWrite);
             if (written < 0) {
                 ESP_LOGE(TAG, "[RAW STREAM] Error writing to pipeline: %d", written);
-                break; 
+                break;
             }
             if ((size_t) written != toWrite) {
                 ESP_LOGW(TAG, "[RAW STREAM] Partial write: %d/%zu bytes", written, toWrite);
@@ -89,13 +89,13 @@ namespace btspeaker {
                 raw_handle
         );
 
+        initialized_ = true;
         ESP_LOGI(TAG, "ADF audio pipeline setup completed");
     }
 
     void ADFAudioSink::start() {
         if (!initialized_) {
             setupPipeline();
-            initialized_ = true;
         }
 
         if (audioPipeline) {
@@ -105,16 +105,6 @@ namespace btspeaker {
             ESP_LOGI(TAG, "ADF audio pipeline started");
         } else {
             ESP_LOGE(TAG, "Audio pipeline not initialized");
-        }
-    }
-
-    void ADFAudioSink::stop() {
-        if (audioPipeline && audioPipeline->pipeline) {
-            audio_pipeline_stop(audioPipeline->pipeline.get());
-            audio_pipeline_wait_for_stop(audioPipeline->pipeline.get());
-            pipelineRunning_ = false;
-            isPlaying_.store(false);
-            ESP_LOGI(TAG, "Spotify (ADFSink) audio pipeline stopped");
         }
     }
 

@@ -1,0 +1,170 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# BT Speaker Project Architecture
+
+## Project Overview
+This is an ESP32-based smart portable speaker with multiple audio input sources, voice assistant capabilities, and advanced audio processing. The system integrates Bluetooth, Spotify Connect, LLM-based voice assistant, and microphone input into a unified audio management system.
+
+## Hardware Architecture
+- **ESP32-DevKitC-VE**: Main controller with ESP32-WROVER (8MB Flash + PSRAM)
+- **Audio Chain**: PCM5102A I2S DAC → TPA3116D2 2×50W amplifier → Dual Dayton Audio RS100P-4 speakers + passive radiators
+- **Power System**: 3S LiIon battery (11.1V) → LM317 buck (5V) + LM2587 boost (15V) converters
+- **Audio Input**: 2× SPH0645LM4H MEMS microphones via I2S
+- **Connectivity**: WiFi for Spotify/LLM, Bluetooth for A2DP audio streaming
+
+## Software Architecture
+
+### Core Components Hierarchy
+```
+AppManager (main orchestrator)
+├── WiFiManager (network connectivity)
+├── VoiceAssistantManager (voice processing orchestrator)
+│   ├── MicrophoneManager (audio capture from MEMS mics)
+│   └── WebSocketVoiceClient (connection to backend LLM service)
+└── AudioSourceManager (audio output orchestrator)
+    ├── BluetoothPipeline (A2DP audio streaming)
+    ├── SpotifyPipeline (Spotify Connect via cspot)
+    └── LLMPipeline (voice response audio output)
+```
+
+### Audio Source Management
+The `AudioSourceManager` is the central hub that manages four distinct audio sources:
+- **AudioSource::BLUETOOTH**: A2DP streaming from paired devices
+- **AudioSource::SPOTIFY**: Spotify Connect via cspot library
+- **AudioSource::VOICE_RESPONSE**: LLM-generated voice responses
+- **AudioSource::NONE**: Idle state
+
+## Four Audio Flows
+
+### 1. Spotify Audio Flow (via cspot)
+**Path**: Spotify App → Internet → ESP32 WiFi → cspot library → SpotifyPipeline → ADFAudioSink → I2S → PCM5102A DAC → TPA3116D2 Amp → Speakers
+
+**Components**:
+- `SpotifyPipeline`: Manages Spotify Connect authentication and playback
+- `SpotifyAuthManager`: Handles Spotify OAuth and token management
+- `cspot` library: Full Spotify Connect protocol implementation
+- `EspPlayer`: ESP32-specific audio player for cspot
+- `ADFAudioSink`: Common audio output sink using ESP-ADF framework
+
+**Key Features**:
+- Full Spotify Connect compatibility (appears as native Spotify device)
+- Playback control (play/pause/skip/volume) via Spotify app
+- URI-based track selection and queueing
+- Authentication via Spotify OAuth flow
+
+### 2. Bluetooth Audio Flow
+**Path**: Phone/Device → Bluetooth A2DP → ESP32 Bluetooth → BluetoothPipeline → ESP-ADF → I2S → PCM5102A DAC → TPA3116D2 Amp → Speakers
+
+**Components**:
+- `BluetoothPipeline`: Manages A2DP connection and AVRCP controls
+- ESP-IDF Bluetooth stack with A2DP sink and AVRCP controller
+- ESP-ADF audio pipeline for Bluetooth stream processing
+- `BaseAudioPipeline`: Common audio pipeline infrastructure
+
+**Key Features**:
+- A2DP sink for high-quality audio streaming
+- AVRCP controller for playback control (play/pause/skip/volume)
+- Automatic source switching on Bluetooth connection
+- Device connection/disconnection handling
+
+### 3. LLM Voice Response Flow
+**Path**: Backend LLM Service → WebSocket → ESP32 WiFi → LLMPipeline → I2S → PCM5102A DAC → TPA3116D2 Amp → Speakers
+
+**Components**:
+- `LLMPipeline`: Receives and plays back LLM-generated audio
+- `WebSocketVoiceClient`: Manages WebSocket connection to backend
+- Backend TypeScript service with Google Gemini integration
+- Real-time audio streaming with chunked delivery
+
+**Key Features**:
+- Real-time audio streaming from cloud LLM services
+- WebSocket-based low-latency communication
+- Interrupt capability (stops current source for voice responses)
+- Automatic restoration to previous source after response
+
+### 4. Microphone Input Flow
+**Path**: Sound → SPH0645LM4H MEMS Mics → I2S → ESP32 → MicrophoneManager → VAD/Wake Word → WebSocket → Backend LLM Service
+
+**Components**:
+- `MicrophoneManager`: Captures audio from dual MEMS microphones
+- `VoiceAssistantManager`: Orchestrates voice interaction workflow
+- Backend service with Picovoice VAD and wake word detection
+- Google Gemini integration for intent processing
+
+**Key Features**:
+- Dual MEMS microphone array with I2S interface
+- Real-time VAD (Voice Activity Detection) using Picovoice Cobra
+- Wake word detection ("Hey Rufus") using Picovoice Porcupine
+- Audio preprocessing (DC blocking, noise filtering)
+- WebSocket streaming to backend for LLM processing
+
+## System Design Patterns
+
+### Audio Pipeline Architecture
+All audio flows use a common base architecture through `BaseAudioPipeline`:
+- **Setup/Cleanup**: Standardized pipeline lifecycle management
+- **I2S Management**: Shared I2S driver coordination to prevent conflicts
+- **State Management**: Common running/paused/stopped states
+- **ESP-ADF Integration**: Leverages ESP Audio Development Framework
+
+### Source Switching Strategy
+The `AudioSourceManager` implements sophisticated source management:
+- **Priority System**: Voice responses interrupt any current source
+- **State Preservation**: Previous source is restored after voice responses
+- **I2S Coordination**: Ensures only one pipeline uses I2S at a time
+- **Volume Synchronization**: Maintains consistent volume across sources
+
+### Voice Assistant Workflow
+1. **Idle State**: Continuous wake word monitoring
+2. **Wake Word Detection**: "Hey Rufus" activates listening mode
+3. **Voice Activity Detection**: Captures user speech until silence
+4. **Intent Processing**: Backend LLM analyzes speech and determines intent
+5. **Response Generation**: LLM generates appropriate response (text or audio)
+6. **Action Execution**: System executes commands (music control, etc.)
+7. **Return to Idle**: System returns to wake word monitoring
+
+### Real-time Communication
+- **WebSocket Protocol**: Bidirectional real-time communication with backend
+- **Chunked Audio Streaming**: Both directions support streaming audio
+- **State Synchronization**: Device and backend maintain synchronized state
+- **Error Recovery**: Automatic reconnection and graceful degradation
+
+## Key Integration Points
+
+### WiFi Dependency Management
+- Spotify and LLM features require WiFi connectivity
+- Graceful fallback to Bluetooth-only mode when WiFi unavailable
+- Dynamic feature enablement based on network status
+
+### Audio Format Coordination
+- **I2S Configuration**: 44.1kHz/16-bit for Bluetooth, 24kHz/16-bit for LLM
+- **Format Conversion**: Automatic sample rate/channel conversion as needed
+- **Buffer Management**: Optimized buffering for each audio source type
+
+### Memory Management
+- **PSRAM Utilization**: Large audio buffers stored in external PSRAM
+- **Static Allocation**: FreeRTOS tasks use static allocation for predictability
+- **Resource Cleanup**: Proper cleanup prevents memory leaks during source switching
+
+## Development Considerations
+
+### Modular Design
+Each audio pipeline is independently testable and replaceable:
+- Clear interface boundaries through abstract base classes
+- Dependency injection for cross-component communication
+- Minimal coupling between audio sources
+
+### Performance Optimization
+- **Task Prioritization**: Audio tasks run at high FreeRTOS priorities
+- **DMA Usage**: I2S uses DMA for low-CPU audio streaming
+- **Buffer Sizing**: Optimized buffer sizes prevent audio dropouts
+- **CPU Core Assignment**: Audio-critical tasks pinned to specific cores
+
+### Error Handling Strategy
+- **Graceful Degradation**: System continues operating with reduced functionality
+- **Automatic Recovery**: Failed components attempt automatic restart
+- **User Feedback**: Clear indication of system state and errors
+- **Logging**: Comprehensive logging for debugging and monitoring

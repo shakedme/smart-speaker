@@ -1,5 +1,7 @@
 #include "../include/websocket_voice_client.hpp"
+#include "../include/voice_assistant_manager.hpp"
 #include "../include/voice_config.hpp"
+#include <stdexcept>
 
 extern "C" {
 #include "esp_log.h"
@@ -109,10 +111,6 @@ namespace btspeaker {
             return ESP_OK;
         }
         return ESP_ERR_INVALID_STATE;
-    }
-
-    void WebSocketVoiceClient::cancelOperations() {
-        disconnect();
     }
 
     void WebSocketVoiceClient::websocketEventHandler(void *handlerArgs, esp_event_base_t base, int32_t eventId,

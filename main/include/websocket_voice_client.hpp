@@ -4,7 +4,6 @@
 #include <string>
 #include <functional>
 #include <atomic>
-#include "../include/voice_assistant_manager.hpp"
 #include "../include/esp_websocket_client.h"
 
 extern "C" {
@@ -15,6 +14,8 @@ extern "C" {
 }
 
 namespace btspeaker {
+
+    class VoiceAssistantManager;
 
     class WebSocketVoiceClient {
     public:
@@ -49,16 +50,10 @@ namespace btspeaker {
 
         [[nodiscard]] bool isConnected() const { return state.load() == ConnectionState::CONNECTED; }
 
-        // Live audio streaming
         esp_err_t sendAudioChunk(const uint8_t *audioData, size_t length);
-
-        // Cancel ongoing operations
-        void cancelOperations();
 
     private:
         static constexpr const char *TAG = "WS_VOICE_CLIENT";
-
-        int audioChunkCounter{0};
 
         static void websocketEventHandler(void *handlerArgs, esp_event_base_t base,
                                           int32_t eventId, void *eventData);

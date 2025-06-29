@@ -1,8 +1,6 @@
 #pragma once
 
 #include "esp_raii_wrapper.hpp"
-#include "bluetooth_pipeline.hpp"
-#include "audio_source_manager.hpp"
 #include <memory>
 #include <atomic>
 #include <functional>
@@ -18,6 +16,8 @@ namespace btspeaker {
     class MicrophoneManager;
 
     class WebSocketVoiceClient;
+
+    class AudioSourceManager;
 
     class VoiceAssistantManager {
     public:
@@ -36,10 +36,6 @@ namespace btspeaker {
 
         esp_err_t start();
 
-        esp_err_t stop();
-
-        void shutdown();
-
         void onAudioResponse(const uint8_t *data, size_t length);
 
         void onTextData(const char *messageJson);
@@ -53,7 +49,6 @@ namespace btspeaker {
 
         // Member variables
         std::atomic<VoiceAssistantState> state;
-        SemaphoreHandle_t stateMutex;
         AudioSourceManager &audioSourceManager;
 
         // Sub-components

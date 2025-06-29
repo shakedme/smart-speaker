@@ -32,10 +32,13 @@ EspPlayer::EspPlayer(std::shared_ptr<AudioSink> sink,
             [this](cspot::DeviceStateHandler::Command event) {
                 switch (event.commandType) {
                     case cspot::DeviceStateHandler::CommandType::PAUSE:
+                        ESP_LOGI("EspPlayer", "Pause command received");
                         this->isPaused = true;
                         this->audioSink->pause();
                         break;
                     case cspot::DeviceStateHandler::CommandType::PLAY:
+                    case cspot::DeviceStateHandler::CommandType::FLUSH:
+                    case cspot::DeviceStateHandler::CommandType::SEEK:
                         this->isPaused = false;
                         this->audioSink->resume();
                         break;
@@ -51,14 +54,6 @@ EspPlayer::EspPlayer(std::shared_ptr<AudioSink> sink,
                             }
                         }
                         this->playlistEnd = true;
-                        break;
-                    case cspot::DeviceStateHandler::CommandType::FLUSH:
-                        this->audioSink->flush();
-                        this->isPreBuffered = false;
-                        break;
-                    case cspot::DeviceStateHandler::CommandType::SEEK:
-                        this->audioSink->flush();
-                        this->isPreBuffered = false;
                         break;
                     case cspot::DeviceStateHandler::CommandType::SKIP_NEXT:
                     case cspot::DeviceStateHandler::CommandType::SKIP_PREV:
@@ -103,20 +98,14 @@ EspPlayer::EspPlayer(std::shared_ptr<AudioSink> sink,
 
 void EspPlayer::feedData(uint8_t *data, size_t len, size_t trackId) {
     if (isPaused) {
-        BELL_SLEEP_MS(100);
+        BELL_SLEEP_MS(20);
         return;
     }
-
-    if (!this->isPreBuffered && this->audioSink->isPlaying()) {
-        audioSink->pause();
+    if (!this->audioSink->isPlaying()) {
+        this->audioSink->resume();
     }
 
     this->audioSink->feedPCMFrames(data, len);
-
-    if (this->audioSink->getBufferFillLevel() > (1024 * 1512) && !this->isPreBuffered) {
-        audioSink->resume();
-        this->isPreBuffered = true;
-    }
 
     // Track management and metrics
     {
@@ -153,10 +142,11 @@ void EspPlayer::runTask() {
     ESP_LOGI("EspPlayer", "Starting EspPlayer keepalive task");
 
     while (isRunning) {
+        ESP_LOGI("EspPlayer", "Buffer size: %d bytes", this->audioSink->getBufferFillLevel());
         if (this->audioSink->isPlaying()) {
             this->handler->putPlayerState();
         }
-        BELL_SLEEP_MS(1000);
+        BELL_SLEEP_MS(5000);
     }
 
     ESP_LOGI("EspPlayer", "EspPlayer keepalive task exiting");

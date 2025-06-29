@@ -62,7 +62,7 @@ namespace btspeaker {
 
         taskBuffer = (StaticTask_t *) heap_caps_malloc(
                 sizeof(StaticTask_t),
-                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
+                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
         );
 
         // Create audio processing task with PSRAM stack

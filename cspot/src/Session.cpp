@@ -23,84 +23,87 @@
 #include <esp_log.h>
 
 using random_bytes_engine =
-    std::independent_bits_engine<std::default_random_engine, CHAR_BIT, uint8_t>;
+        std::independent_bits_engine<std::default_random_engine, CHAR_BIT, uint8_t>;
 
 using namespace cspot;
 
 Session::Session() {
-  this->challenges = std::make_unique<cspot::AuthChallenges>();
+    this->challenges = std::make_unique<cspot::AuthChallenges>();
 }
 
 Session::~Session() {}
 
 void Session::connect(std::unique_ptr<cspot::PlainConnection> connection) {
-  this->conn = std::move(connection);
-  conn->timeoutHandler = [this]() {
-    return this->triggerTimeout();
-  };
-  auto helloPacket = this->conn->sendPrefixPacket(
-      {0x00, 0x04}, this->challenges->prepareClientHello());
-  auto apResponse = this->conn->recvPacket();
+    this->conn = std::move(connection);
+    conn->timeoutHandler = [this]() {
+        return this->triggerTimeout();
+    };
+    auto helloPacket = this->conn->sendPrefixPacket(
+            {0x00, 0x04}, this->challenges->prepareClientHello());
+    auto apResponse = this->conn->recvPacket();
 
-  auto solvedHello = this->challenges->solveApHello(helloPacket, apResponse);
+    auto solvedHello = this->challenges->solveApHello(helloPacket, apResponse);
 
-  conn->sendPrefixPacket({}, solvedHello);
+    conn->sendPrefixPacket({}, solvedHello);
 
-  // Generates the public and priv key
-  this->shanConn = std::make_shared<ShannonConnection>();
+    // Generates the public and priv key
+    this->shanConn = std::make_shared<ShannonConnection>();
 
-  // Init shanno-encrypted connection
-  this->shanConn->wrapConnection(this->conn, challenges->shanSendKey,
-                                 challenges->shanRecvKey);
+    // Init shanno-encrypted connection
+    this->shanConn->wrapConnection(this->conn, challenges->shanSendKey,
+                                   challenges->shanRecvKey);
 }
 
 void Session::connectWithRandomAp() {
-  auto apResolver = std::make_unique<ApResolve>("");
-  auto conn = std::make_unique<cspot::PlainConnection>();
-  conn->timeoutHandler = [this]() {
-    return this->triggerTimeout();
-  };
+    auto apResolver = std::make_unique<ApResolve>("");
+    auto conn = std::make_unique<cspot::PlainConnection>();
+    conn->timeoutHandler = [this]() {
+        return this->triggerTimeout();
+    };
 
-  std::string apAddr = apResolver->fetchFirstApAddress();
+    std::string apAddr = apResolver->fetchFirstApAddress();
 
 //  ESP_LOGI("Session", Connecting with AP <%s>", apAddr.c_str());
-  conn->connect(apAddr);
+    conn->connect(apAddr);
 
-  this->connect(std::move(conn));
+    this->connect(std::move(conn));
 }
 
-std::vector<uint8_t> Session::authenticate(std::shared_ptr<LoginBlob> blob) {
-  // save auth blob for reconnection purposes
-  authBlob = blob;
-  // prepare authentication request proto
-  auto data = challenges->prepareAuthPacket(
-      blob->authData, blob->authType, blob->getDeviceId(), blob->username);
+std::vector<uint8_t> Session::authenticate(const std::shared_ptr<LoginBlob> &blob) {
+    // save auth blob for reconnection purposes
+    authBlob = blob;
+    // prepare authentication request proto
+    ESP_LOGI("Session", "Preparing authentication request for user");
+    auto data = challenges->prepareAuthPacket(
+            blob->authData, blob->authType, blob->getDeviceId(), blob->username);
 
-  // Send login request
-  this->shanConn->sendPacket(LOGIN_REQUEST_COMMAND, data);
+    // Send login request
+    ESP_LOGI("Session", "Sending login request with auth data size");
+    this->shanConn->sendPacket(LOGIN_REQUEST_COMMAND, data);
 
-  auto packet = this->shanConn->recvPacket();
-  switch (packet.command) {
-    case AUTH_SUCCESSFUL_COMMAND: {
-      APWelcome welcome;
-      ESP_LOGD("Session", "Authorization successful");
-      pbDecode(welcome, APWelcome_fields, packet.data);
-      return std::vector<uint8_t>(welcome.reusable_auth_credentials.bytes,
-                                  welcome.reusable_auth_credentials.bytes +
-                                      welcome.reusable_auth_credentials.size);
-      break;
+    ESP_LOGI("Session", "Waiting for authentication response...");
+    auto packet = this->shanConn->recvPacket();
+    switch (packet.command) {
+        case AUTH_SUCCESSFUL_COMMAND: {
+            APWelcome welcome;
+            ESP_LOGI("Session", "Authorization successful");
+            pbDecode(welcome, APWelcome_fields, packet.data);
+            return std::vector<uint8_t>(welcome.reusable_auth_credentials.bytes,
+                                        welcome.reusable_auth_credentials.bytes +
+                                        welcome.reusable_auth_credentials.size);
+            break;
+        }
+        case AUTH_DECLINED_COMMAND: {
+            ESP_LOGI("Session", "Authorization declined");
+            break;
+        }
+        default:
+            ESP_LOGI("Session", "Unknown auth fail code %d", packet.command);
     }
-    case AUTH_DECLINED_COMMAND: {
-      ESP_LOGI("Session", "Authorization declined");
-      break;
-    }
-    default:
-      ESP_LOGI("Session", "Unknown auth fail code %d", packet.command);
-  }
 
-  return std::vector<uint8_t>(0);
+    return std::vector<uint8_t>(0);
 }
 
 void Session::close() {
-  this->conn->close();
+    this->conn->close();
 }

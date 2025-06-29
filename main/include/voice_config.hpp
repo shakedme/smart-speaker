@@ -1,11 +1,7 @@
 #pragma once
 
-// Voice Assistant Configuration
-
 // WebSocket Server Configuration
-#ifndef CONFIG_WEBSOCKET_SERVER_URL
-#define CONFIG_WEBSOCKET_SERVER_URL "ws://192.168.1.191:8080/voice"
-#endif
+#define CONFIG_WEBSOCKET_SERVER_URL "ws://192.168.1.213:8080/voice"
 
 // WebSocket Connection Settings
 #define CONFIG_WS_KEEPALIVE_INTERVAL_S  30
@@ -18,21 +14,9 @@
 #define CONFIG_MIC_SAMPLE_RATE      48000
 #define MIC_BITS                    I2S_DATA_BIT_WIDTH_24BIT
 
-// Wake Word Configuration
-#define CONFIG_WAKE_WORD_ENABLED    true
-#define CONFIG_WAKE_WORD_THRESHOLD  0.8f
-
-// Debug Configuration
-#define CONFIG_MICROPHONE_DEBUG_MODE true  // Enable detailed microphone debugging
-
 // WiFi Configuration (required for WebSocket connection)
-#ifndef CONFIG_WIFI_SSID
-#define CONFIG_WIFI_SSID "nadav"
-#endif
-
-#ifndef CONFIG_WIFI_PASSWORD  
-#define CONFIG_WIFI_PASSWORD "0542402269"
-#endif
+#define CONFIG_WIFI_SSID "Shaked"
+#define CONFIG_WIFI_PASSWORD "0543512375"
 
 // Hardware Pin Configuration - Updated for single SPH0645LM4H I2S MEMS microphone
 // Note: Using I2S1 for microphone to avoid conflict with I2S0 used for audio output (PCM5102A)

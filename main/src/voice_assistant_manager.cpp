@@ -1,6 +1,7 @@
 #include "../include/voice_assistant_manager.hpp"
 #include "../include/microphone_manager.hpp"
 #include "../include/websocket_voice_client.hpp"
+#include "../include/audio_source_manager.hpp"
 #include <stdexcept>
 
 extern "C" {
@@ -13,15 +14,7 @@ namespace btspeaker {
     VoiceAssistantManager::VoiceAssistantManager(AudioSourceManager &audioSourceManager)
             :
             state(VoiceAssistantState::IDLE),
-            stateMutex(nullptr),
             audioSourceManager(audioSourceManager) {
-        // Create state mutex
-        stateMutex = xSemaphoreCreateMutex();
-        if (!stateMutex) {
-            ESP_LOGE(TAG, "Failed to create state mutex");
-            throw std::runtime_error("Failed to create state mutex");
-        }
-
         websocketClient = std::make_unique<WebSocketVoiceClient>(*this);
         websocketClient->init();
 
@@ -37,9 +30,7 @@ namespace btspeaker {
         ESP_LOGI(TAG, "VoiceAssistantManager initialized successfully");
     }
 
-    VoiceAssistantManager::~VoiceAssistantManager() {
-        shutdown();
-    }
+    VoiceAssistantManager::~VoiceAssistantManager() {}
 
     esp_err_t VoiceAssistantManager::start() {
         setVoiceAssistantState(VoiceAssistantState::LISTENING);
@@ -52,43 +43,6 @@ namespace btspeaker {
 
         ESP_LOGI(TAG, "Voice assistant started");
         return ESP_OK;
-    }
-
-    esp_err_t VoiceAssistantManager::stop() {
-        ESP_LOGI(TAG, "Stopping voice assistant");
-
-        // Stop microphone recording
-        if (microphoneManager) {
-            microphoneManager->stopRecording();
-        }
-
-        if (websocketClient) {
-            websocketClient->cancelOperations();
-        }
-
-        setVoiceAssistantState(VoiceAssistantState::IDLE);
-        return ESP_OK;
-    }
-
-    void VoiceAssistantManager::shutdown() {
-        ESP_LOGI(TAG, "Shutting down voice assistant");
-
-        setVoiceAssistantState(VoiceAssistantState::IDLE);
-
-        if (microphoneManager) {
-            microphoneManager->shutdown();
-            microphoneManager.reset();
-        }
-
-        if (websocketClient) {
-            websocketClient->shutdown();
-            websocketClient.reset();
-        }
-
-        if (stateMutex) {
-            vSemaphoreDelete(stateMutex);
-            stateMutex = nullptr;
-        }
     }
 
     void VoiceAssistantManager::onAudioResponse(const uint8_t *data, size_t length) {
@@ -202,24 +156,15 @@ namespace btspeaker {
     }
 
     void VoiceAssistantManager::setVoiceAssistantState(VoiceAssistantState new_state) {
-        if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            VoiceAssistantState old_state = state.exchange(new_state);
-            if (old_state != new_state) {
-                ESP_LOGI(TAG, "Voice assistant state changed from %d to %d", (int) old_state, (int) new_state);
-                switch (new_state) {
-                    case VoiceAssistantState::LISTENING:
-                        audioSourceManager.stopVoiceResponse();
-                        break;
-                    default:
-                        break;
-                }
-                xSemaphoreGive(stateMutex);
-            }
-        } else {
-            // Fallback without mutex protection
-            VoiceAssistantState old_state = state.exchange(new_state);
-            if (old_state != new_state) {
-
+        VoiceAssistantState old_state = state.exchange(new_state);
+        if (old_state != new_state) {
+            ESP_LOGI(TAG, "Voice assistant state changed from %d to %d", (int) old_state, (int) new_state);
+            switch (new_state) {
+                case VoiceAssistantState::LISTENING:
+                    audioSourceManager.stopVoiceResponse();
+                    break;
+                default:
+                    break;
             }
         }
     }

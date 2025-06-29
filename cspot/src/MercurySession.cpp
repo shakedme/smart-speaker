@@ -240,9 +240,6 @@ void MercurySession::handlePacket() {
         case RequestType::SEND:
         case RequestType::SUB:
         case RequestType::UNSUB: {
-            ESP_LOGD("MercurySession", "Received Mercury send/sub/unsub response");
-            ESP_LOGD("MercurySession", "Internal memory before SEND/SUB/UNSUB: %d, partials count: %d",
-                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL), partials.size());
             auto response = this->decodeResponse(packet.data);
             if (!response.fail) {
                 if (this->callbacks.count(response.sequenceId)) {

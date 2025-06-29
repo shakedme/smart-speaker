@@ -56,17 +56,12 @@ namespace bell {
         bool startTask() {
 #ifdef ESP_PLATFORM
             if (true) {
-                ESP_LOGI("BellTask", "Creating task on PSRAM %s", this->TASK.c_str());
-                ESP_LOGI("BellTask", "Available PSRAM memory: %d", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-                ESP_LOGI("BellTask", "Available internal memory: %d", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-
                 // Check if stack was allocated in constructor
                 if (!xStack) {
                     ESP_LOGE("BellTask", "Failed to allocate PSRAM stack for %s", this->TASK.c_str());
                     return false;
                 }
-                ESP_LOGI("BellTask", "Stack allocated successfully: %p", xStack);
-                
+
                 xTaskBuffer = (StaticTask_t *) heap_caps_malloc(
                         sizeof(StaticTask_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
                 if (!xTaskBuffer) {
@@ -74,8 +69,7 @@ namespace bell {
                     ESP_LOGE("BellTask", "Available internal memory after failure: %d", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
                     return false;
                 }
-                ESP_LOGI("BellTask", "Task buffer allocated successfully: %p", xTaskBuffer);
-                
+
                 TaskHandle_t taskHandle = xTaskCreateStaticPinnedToCore(
                         taskEntryFuncPSRAM, this->TASK.c_str(), this->stackSize, this,
                         this->priority, xStack, xTaskBuffer, this->core);
@@ -86,8 +80,6 @@ namespace bell {
                     xTaskBuffer = NULL;
                     return false;
                 }
-                
-                ESP_LOGI("BellTask", "Task created successfully: %s, handle: %p", this->TASK.c_str(), taskHandle);
                 return true;
             } else {
                 printf("task on internal %s", this->TASK.c_str());

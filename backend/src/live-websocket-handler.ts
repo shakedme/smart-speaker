@@ -21,11 +21,11 @@ interface ControlMessage {
 }
 
 // VAD constants
-const VAD_SENSITIVITY = 0.5; // 0.0 (lowest) to 1.0 (highest)
-const VAD_SILENCE_TIMEOUT_MS = 1200; // Time of silence before processing
-const CONVERSATION_TIMEOUT_MS = 4000; // Time to keep conversation session alive with no user input
+const VAD_SENSITIVITY = 0.3; // 0.0 (lowest) to 1.0 (highest)
+const VAD_SILENCE_TIMEOUT_MS = 2400; // Time of silence before processing
+const CONVERSATION_TIMEOUT_MS = 5000; // Time to keep conversation session alive with no user input
 const WAKE_WORD_WINDOW_MS = 1500; // Reduced from 3000ms for lower latency
-const WAKE_WORD_SENSITIVITY = 0.7; // Lower = more sensitive
+const WAKE_WORD_SENSITIVITY = 1; // Lower = more sensitive
 
 export class LiveWebSocketHandler {
     private ws: WebSocket;
@@ -105,6 +105,7 @@ export class LiveWebSocketHandler {
 
     private handleAudioData(data: Buffer): void {
         if (!this.wakeWordDetected && !this.responseSession) {
+            this.log("info", `Wake word not detected yet. Buffering audio...`);
             this.addToWakeWordBuffer(data);
             this.wakeWordProcessBuffer = Buffer.concat([this.wakeWordProcessBuffer, data]);
             this.processWakeWordDetection();
@@ -127,6 +128,7 @@ export class LiveWebSocketHandler {
             const voiceProbability = this.cobra.process(audioFrameInt16);
 
             if (voiceProbability > VAD_SENSITIVITY) {
+                this.log('debug', `Voice activity detected with probability: ${voiceProbability}`);
                 this.voiceActivityDetected = true;
 
                 if (this.wakeWordDetected || this.responseSession) {
@@ -180,6 +182,8 @@ export class LiveWebSocketHandler {
                     this.resetSilenceTimer();
                 }
                 break;
+            } else {
+                this.log('info', `No wake word detected in current frame.`);
             }
         }
     }
@@ -282,9 +286,9 @@ export class LiveWebSocketHandler {
             Respond with a single, minified JSON object with the format: {"intent": "...", "data": "..."}.
             Do not include any other text, markdown, or explanation.
             Possible intents are "spotify", "playback_control", and "information".
-            - For "spotify", the "data" should be the song, artist, or playlist name.
-            - For "playback_control", the "data" should be the action (e.g., "pause", "next", "volume up").
-            - For "information", the "data" should be the user's full question.`;
+            - For "spotify", the "data" should be the song, artist, or playlist name. The word PLAY must be included in the intent.
+            - For "playback_control", the "data" should be the action ("pause", "next", "volume up/down").
+            - For "information", the "data" should be the user's full question, and clearly not be a command.`;
             const contents: Part[] = [
                 {text: systemInstruction},
                 {
@@ -396,10 +400,10 @@ export class LiveWebSocketHandler {
     private async startAudioResponseSession(question: string): Promise<void> {
         try {
             this.responseSession = await this.gemini.live.connect({
-                model: 'gemini-2.0-flash-live-001',
+                model: 'gemini-2.5-flash-exp-native-audio-thinking-dialog',
                 config: {
                     responseModalities: [Modality.AUDIO],
-                    speechConfig: {voiceConfig: {prebuiltVoiceConfig: {voiceName: "Aoede"}}},
+                    speechConfig: {voiceConfig: {prebuiltVoiceConfig: {voiceName: "Orus"}}},
                     systemInstruction: `You are a helpful voice assistant. Provide concise, natural responses. Keep your responses conversational and be ready for follow-up questions.`
                 },
                 callbacks: {
@@ -476,8 +480,9 @@ export class LiveWebSocketHandler {
     private clearAudioBuffers(): void {
         this.audioBuffer = [];
         this.vadBuffer = Buffer.alloc(0);
+        this.wakeWordBufferDuration = 0;
         this.wakeWordProcessBuffer = Buffer.alloc(0);
-        // Don't clear the wake word ring buffer here - it maintains history
+        this.wakeWordRingBuffer= [];
     }
 
     private clearAllTimers(): void {
@@ -520,8 +525,8 @@ export class LiveWebSocketHandler {
         try {
             const resp = await axios.get(url, {headers: {Authorization: `Bearer ${token}`}});
             if (resp.data.tracks?.items.length > 0) return resp.data.tracks.items[0].uri;
-            if (resp.data.playlists?.items.length > 0) return resp.data.playlists.items[0].uri;
             if (resp.data.artists?.items.length > 0) return resp.data.artists.items[0].uri;
+            if (resp.data.playlists?.items.length > 0) return resp.data.playlists.items[0].uri;
             return null;
         } catch (e) {
             this.sendError('Spotify API error: ' + e);

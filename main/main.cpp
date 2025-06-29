@@ -30,10 +30,13 @@ void app_main() {
     }
 
     ESP_LOGI(TAG, "✅ Application running. Starting event loop...");
-    
+
     // Simple event loop
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        ESP_LOGI(TAG, "DRAM: %d bytes, PSRAM: %d bytes",
+                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
 

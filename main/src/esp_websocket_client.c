@@ -693,7 +693,6 @@ static esp_err_t esp_websocket_client_create_transport(esp_websocket_client_hand
 //    return ret;
 //}
 
-
 static int esp_websocket_client_send_with_exact_opcode(esp_websocket_client_handle_t client, ws_transport_opcodes_t opcode, const uint8_t *data, int len, TickType_t timeout)
 {
     int ret = -1;
@@ -737,6 +736,7 @@ static int esp_websocket_client_send_with_exact_opcode(esp_websocket_client_hand
         // send with ws specific way and specific opcode
         wlen = esp_transport_ws_send_raw(client->transport, opcode, (char *)client->tx_buffer, need_write,
                                          (timeout == portMAX_DELAY) ? -1 : timeout * portTICK_PERIOD_MS);
+
         if (wlen < 0 || (wlen == 0 && need_write != 0)) {
             ret = wlen;
             esp_websocket_free_buf(client, true);

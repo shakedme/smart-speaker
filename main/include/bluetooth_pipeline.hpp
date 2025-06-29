@@ -35,6 +35,13 @@ namespace btspeaker {
 
         void disconnectCurrentDevice();
 
+        // AVRCP control interface
+        void avrcpPause() const;
+        void avrcpResume() const;
+        void avrcpNext() const;
+        void avrcpPrevious() const;
+        void setAvrcpVolume(uint8_t volume) const; // 0-127 (AVRCP absolute volume)
+
     private:
         static constexpr const char *TAG = "BT_PIPELINE";
         static constexpr const int SAMPLE_RATE = 44100;

@@ -7,8 +7,8 @@
 #include <memory>
 
 extern "C" {
+#include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 }
 
@@ -33,10 +33,11 @@ void app_main() {
 
     // Simple event loop
     while (true) {
-        ESP_LOGI(TAG, "DRAM: %d bytes, PSRAM: %d bytes",
-                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                 heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        float dram_mb = heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1000000.0f;
+        float psram_mb = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1000000.0f;
+        ESP_LOGI(TAG, "DRAM: %.2f MB, PSRAM: %.2f MB", dram_mb, psram_mb);
         vTaskDelay(pdMS_TO_TICKS(2000));
+   
     }
 }
 

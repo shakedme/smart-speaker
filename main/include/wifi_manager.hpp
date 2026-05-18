@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <functional>
 
@@ -22,6 +23,8 @@ namespace btspeaker {
         };
 
         using StatusCallback = std::function<void(Status status)>;
+
+        static std::unique_ptr<WiFiManager> create();
 
         WiFiManager();
 

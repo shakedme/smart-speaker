@@ -17,7 +17,7 @@ namespace btspeaker {
     public:
         AppManager();
 
-        ~AppManager() = default;
+        ~AppManager();
 
         esp_err_t start();
 

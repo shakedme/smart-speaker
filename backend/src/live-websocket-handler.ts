@@ -62,14 +62,14 @@ export class LiveWebSocketHandler {
         this.sessionId = uuidv4();
 
         // Initialize Google Gemini
-        const googleApiKey = process.env.GOOGLE_AI_API_KEY;
+        const googleApiKey = 'AIzaSyDLWE7QnreYIWkMiWGNklp5h-oq1TIE9UU';
         if (!googleApiKey) {
             throw new Error('GOOGLE_AI_API_KEY is not set in environment variables.');
         }
         this.gemini = new GoogleGenAI({apiKey: googleApiKey});
 
         // Initialize Picovoice Cobra VAD
-        const picoAccessKey = process.env.PICOVOICE_ACCESS_KEY;
+        const picoAccessKey = 'NrqcOM1naSSYl1fYVru7i9Mbmu4+1s99e5ZUUDmOMdaFBnb0/+TEkw==';
         if (!picoAccessKey) {
             throw new Error('PICOVOICE_ACCESS_KEY is not set in environment variables. Get one from Picovoice Console.');
         }

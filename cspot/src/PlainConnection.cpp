@@ -9,7 +9,7 @@
 #include <sys/errno.h>    // for EAGAIN, EINTR, ETIMEDOUT, errno
 #include <sys/socket.h>   // for setsockopt, connect, recv, send, shutdown
 #include <sys/time.h>     // for timeval
-#include <cstring>        // for memset
+#include <cstring>        // for memset, strerror
 #include <stdexcept>      // for runtime_error
 
 #else
@@ -46,31 +46,42 @@ PlainConnection::~PlainConnection() {
 };
 
 void PlainConnection::connect(const std::string &apAddress) {
-    struct addrinfo h, *airoot, *ai;
-    std::string hostname = apAddress.substr(0, apAddress.find(":"));
-    std::string portStr =
-            apAddress.substr(apAddress.find(":") + 1, apAddress.size());
+    struct addrinfo h;
+    struct addrinfo *airoot = nullptr;
+    const size_t colon = apAddress.find(':');
+    if (colon == std::string::npos) {
+        ESP_LOGE("PlainConnection", "Invalid AP address (expected host:port): %s",
+                 apAddress.c_str());
+        throw std::runtime_error("Invalid Spotify AP address");
+    }
+    std::string hostname = apAddress.substr(0, colon);
+    std::string portStr = apAddress.substr(colon + 1);
+
     memset(&h, 0, sizeof(h));
     h.ai_family = AF_INET;
     h.ai_socktype = SOCK_STREAM;
-    h.ai_protocol = IPPROTO_IP;
+    h.ai_protocol = IPPROTO_TCP;
 
-    // Lookup host
-    if (getaddrinfo(hostname.c_str(), portStr.c_str(), &h, &airoot)) {
-        CSPOT_LOG(error, "getaddrinfo failed");
+    const int gaiErr =
+            getaddrinfo(hostname.c_str(), portStr.c_str(), &h, &airoot);
+    if (gaiErr != 0) {
+        ESP_LOGE("PlainConnection", "getaddrinfo failed for %s:%s (code %d)",
+                 hostname.c_str(), portStr.c_str(), gaiErr);
+        throw std::runtime_error("Can't resolve Spotify AP address");
     }
 
-    // find the right ai, connect to server
-    for (ai = airoot; ai; ai = ai->ai_next) {
+    this->apSock = -1;
+    for (struct addrinfo *ai = airoot; ai; ai = ai->ai_next) {
         if (ai->ai_family != AF_INET && ai->ai_family != AF_INET6)
             continue;
 
-        this->apSock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (this->apSock < 0)
+        int sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (sock < 0)
             continue;
 
-        if (::connect(this->apSock, (struct sockaddr *) ai->ai_addr,
-                      ai->ai_addrlen) != -1) {
+        if (::connect(sock, (struct sockaddr *) ai->ai_addr, ai->ai_addrlen) ==
+            0) {
+            this->apSock = sock;
 #ifdef _WIN32
             uint32_t tv = 3000;
 #else
@@ -84,25 +95,29 @@ void PlainConnection::connect(const std::string &apAddress) {
                        sizeof tv);
 
             int flag = 1;
-            setsockopt(this->apSock, /* socket affected */
-                       IPPROTO_TCP,  /* set option at TCP level */
-                       TCP_NODELAY,  /* name of option */
-                       (char *) &flag, /* the cast is historical cruft */
-                       sizeof(int)); /* length of option value */
+            setsockopt(this->apSock, IPPROTO_TCP, TCP_NODELAY, (char *) &flag,
+                       sizeof(int));
             break;
         }
 
+        const int err = getErrno();
+        ESP_LOGW("PlainConnection", "connect() to %s:%s failed: errno=%d (%s)",
+                 hostname.c_str(), portStr.c_str(), err, strerror(err));
 #ifdef _WIN32
-        closesocket(this->apSock);
+        closesocket(sock);
 #else
-        ::close(this->apSock);
+        ::close(sock);
 #endif
-        apSock = -1;
-        ESP_LOGE("PlainConnection", "Failed to connect to spotify servers");
-        throw std::runtime_error("Can't connect to spotify servers");
     }
 
     freeaddrinfo(airoot);
+
+    if (this->apSock < 0) {
+        ESP_LOGE("PlainConnection",
+                 "Failed to connect to Spotify AP (exhausted candidates for %s:%s)",
+                 hostname.c_str(), portStr.c_str());
+        throw std::runtime_error("Can't connect to spotify servers");
+    }
 }
 
 std::vector<uint8_t> PlainConnection::recvPacket() {

@@ -1,10 +1,12 @@
 #include "DeviceStateHandler.h"
 
 #include <string.h>  // for strdup, memcpy, strcpy, strlen
+#include <algorithm>
 #include <cstdint>   // for uint8_t
 #include <cstdlib>   // for unreference, NULL, realloc, rand
 #include <cstring>
 #include <memory>       // for shared_ptr
+#include <string>
 #include <type_traits>  // for remove_extent_t
 #include <utility>      // for swap
 
@@ -23,6 +25,191 @@
 #include "pb_decode.h"            // for pb_release
 
 using namespace cspot;
+
+namespace {
+const char *boolStr(bool value) {
+    return value ? "true" : "false";
+}
+
+const char *reasonName(PutStateReason reason) {
+    switch (reason) {
+        case PutStateReason::PutStateReason_PLAYER_STATE_CHANGED:
+            return "PLAYER_STATE_CHANGED";
+        case PutStateReason::PutStateReason_BECAME_INACTIVE:
+            return "BECAME_INACTIVE";
+        case PutStateReason::PutStateReason_SPIRC_HELLO:
+            return "SPIRC_HELLO";
+        case PutStateReason::PutStateReason_SPIRC_NOTIFY:
+            return "SPIRC_NOTIFY";
+        case PutStateReason::PutStateReason_PICKER_OPENED:
+            return "PICKER_OPENED";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+void logPlayerState(const char *prefix,
+                    const DeviceStateHandler *handler,
+                    PutStateReason reason) {
+    const auto &state = handler->device.player_state;
+    const char *trackUri = state.has_track && state.track.uri ? state.track.uri : "(none)";
+    const uint64_t now = handler->ctx->timeProvider->getSyncedTimestamp();
+    int64_t position = state.has_position_as_of_timestamp
+                       ? state.position_as_of_timestamp
+                       : -1;
+    const std::string positionStr = std::to_string(position);
+    const std::string timestampStr = std::to_string(state.timestamp);
+    const std::string nowStr = std::to_string(now);
+
+    ESP_LOGI("DST",
+             "%s reason=%s active=%s playing=%s(has=%s) paused=%s(has=%s) "
+             "queue=%u offset=%u position=%s timestamp=%s now=%s track=%s",
+             prefix,
+             reasonName(reason),
+             boolStr(handler->is_active),
+             boolStr(state.is_playing),
+             boolStr(state.has_is_playing),
+             boolStr(state.is_paused),
+             boolStr(state.has_is_paused),
+             (unsigned) handler->trackQueue->preloadedTracks.size(),
+             (unsigned) handler->offset,
+             positionStr.c_str(),
+             timestampStr.c_str(),
+             nowStr.c_str(),
+             trackUri);
+}
+
+bool playerStateIsPaused(const PlayerState &state) {
+    if (state.has_is_paused) {
+        return state.is_paused;
+    }
+
+    if (state.has_is_playing) {
+        return !state.is_playing;
+    }
+
+    return false;
+}
+
+void setPausedState(PlayerState &state, bool paused) {
+    state.has_is_paused = true;
+    state.is_paused = paused;
+    // In Spotify Connect, is_playing means "this device owns an active
+    // playback session" (the timeline owner), not "audio is coming out
+    // right now". Both playing and paused sessions report is_playing=true;
+    // only a truly idle device (no track, no session) reports is_playing=
+    // false. Setting is_playing=false on pause makes the Spotify app treat
+    // the device as having gone idle and hides the playback controls.
+    state.has_is_playing = true;
+    state.is_playing = true;
+}
+
+void stripLargeCommandDataField(std::vector<uint8_t> &data) {
+    static const char pattern[] = "\"data\":\"";
+    auto start = std::search(data.begin(), data.end(),
+                             pattern, pattern + sizeof(pattern) - 1);
+    if (start == data.end()) {
+        return;
+    }
+
+    auto valueStart = start + sizeof(pattern) - 1;
+    auto valueEnd = valueStart;
+    while (valueEnd != data.end()) {
+        if (*valueEnd == '"' && (valueEnd == valueStart || *(valueEnd - 1) != '\\')) {
+            break;
+        }
+        valueEnd++;
+    }
+
+    if (valueEnd != data.end() && valueEnd > valueStart) {
+        data.erase(valueStart, valueEnd);
+    }
+}
+
+bool readJsonIndex(const nlohmann::json &object, const char *key, int64_t &value) {
+    auto found = object.find(key);
+    if (found == object.end()) {
+        return false;
+    }
+
+    if (found->is_number_integer() || found->is_number_unsigned()) {
+        value = found->get<int64_t>();
+        return true;
+    }
+
+    if (found->is_string()) {
+        const auto text = found->get<std::string>();
+        char *end = nullptr;
+        const long long parsed = std::strtoll(text.c_str(), &end, 10);
+        if (end != text.c_str()) {
+            value = parsed;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+nlohmann::json *findTrackInContext(nlohmann::json &context,
+                                   const char *trackUri,
+                                   const char *trackUid,
+                                   bool hasTrackIndex,
+                                   int64_t trackIndex,
+                                   uint8_t &pageOut,
+                                   uint32_t &offsetOut) {
+    auto pages = context.find("pages");
+    if (pages == context.end() || !pages->is_array()) {
+        return nullptr;
+    }
+
+    uint32_t globalIndex = 0;
+    nlohmann::json *trackAtIndex = nullptr;
+    uint8_t trackAtIndexPage = 0;
+    uint32_t trackAtIndexOffset = 0;
+
+    for (size_t page = 0; page < pages->size(); page++) {
+        auto tracks = (*pages)[page].find("tracks");
+        if (tracks == (*pages)[page].end() || !tracks->is_array()) {
+            continue;
+        }
+
+        for (size_t offset = 0; offset < tracks->size(); offset++, globalIndex++) {
+            auto &candidate = (*tracks)[offset];
+
+            auto uri = candidate.find("uri");
+            if (trackUri != nullptr && uri != candidate.end() &&
+                uri->is_string() && uri->get<std::string>() == trackUri) {
+                pageOut = static_cast<uint8_t>(page);
+                offsetOut = static_cast<uint32_t>(offset);
+                return &candidate;
+            }
+
+            auto uid = candidate.find("uid");
+            if (trackUid != nullptr && uid != candidate.end() &&
+                uid->is_string() && uid->get<std::string>() == trackUid) {
+                pageOut = static_cast<uint8_t>(page);
+                offsetOut = static_cast<uint32_t>(offset);
+                return &candidate;
+            }
+
+            if (hasTrackIndex &&
+                (globalIndex == static_cast<uint32_t>(trackIndex) ||
+                 offset == static_cast<size_t>(trackIndex))) {
+                trackAtIndex = &candidate;
+                trackAtIndexPage = static_cast<uint8_t>(page);
+                trackAtIndexOffset = static_cast<uint32_t>(offset);
+            }
+        }
+    }
+
+    if (trackAtIndex != nullptr) {
+        pageOut = trackAtIndexPage;
+        offsetOut = trackAtIndexOffset;
+    }
+
+    return trackAtIndex;
+}
+}  // namespace
 
 #if defined(_WIN32) || defined(_WIN64)
 char* strndup(const char* str, size_t n) {
@@ -43,31 +230,59 @@ static DeviceStateHandler *handler;
 
 void DeviceStateHandler::reloadTrackList(void *data) {
     if (data == NULL) {
+        bool sendStateAfterQueueLoad = false;
         if (handler->reloadPreloadedTracks) {
             handler->needsToBeSkipped = true;
             while (!handler->trackQueue->playableSemaphore->twait(1)) {};
 
-            bool trackPlayerStarted = false;
-            try {
-                handler->trackPlayer->start();
-                trackPlayerStarted = true;
-            } catch (const std::exception &e) {
-                ESP_LOGE("DST", "Exception starting TrackPlayer: %s", e.what());
-            } catch (...) {
-                ESP_LOGE("DST", "Unknown exception starting TrackPlayer");
-            }
+            const bool startPaused = playerStateIsPaused(handler->device.player_state);
+            ESP_LOGI("DST",
+                     "reloadTrackList: first track ready; startPaused=%s tracks=%u current=%u offset=%u",
+                     boolStr(startPaused),
+                     (unsigned) handler->trackQueue->preloadedTracks.size(),
+                     (unsigned) handler->currentTracks.size(),
+                     (unsigned) handler->offset);
 
-            // If TrackPlayer failed to start, clean up and abort
-            if (!trackPlayerStarted) {
-                handler->reloadPreloadedTracks = false;
-                handler->trackQueue->preloadedTracks.clear();
-                return;
+            if (!startPaused) {
+                bool trackPlayerStarted = false;
+                try {
+                    handler->trackPlayer->start();
+                    trackPlayerStarted = true;
+                } catch (const std::exception &e) {
+                    ESP_LOGE("DST", "Exception starting TrackPlayer: %s", e.what());
+                } catch (...) {
+                    ESP_LOGE("DST", "Unknown exception starting TrackPlayer");
+                }
+
+                // If TrackPlayer failed to start, clean up and abort
+                if (!trackPlayerStarted) {
+                    handler->reloadPreloadedTracks = false;
+                    handler->trackQueue->preloadedTracks.clear();
+                    return;
+                }
+
+                setPausedState(handler->device.player_state, false);
+                handler->sendCommand(CommandType::PLAYBACK_START);
+            } else {
+                setPausedState(handler->device.player_state, true);
+                handler->sendCommand(CommandType::PAUSE);
+                ESP_LOGI("DST",
+                         "reloadTrackList: transfer restored paused state; queue is ready but playback is not started");
             }
 
             handler->trackPlayer->resetState();
             handler->reloadPreloadedTracks = false;
-            handler->sendCommand(CommandType::PLAYBACK_START);
             handler->device.player_state.track = handler->currentTracks[0];
+            sendStateAfterQueueLoad = true;
+            ESP_LOGI("DST",
+                     "reloadTrackList: assigned currentTracks[0] to player_state.track uri=%s provider=%s original_index=%u",
+                     handler->currentTracks[0].uri
+                     ? handler->currentTracks[0].uri
+                     : "(null)",
+                     handler->currentTracks[0].provider
+                     ? handler->currentTracks[0].provider
+                     : "(null)",
+                     (unsigned) handler->currentTracks[0].original_index);
         }
 
         if (!handler->offset) {
@@ -110,6 +325,9 @@ void DeviceStateHandler::reloadTrackList(void *data) {
             handler->putPlayerState(
                     PutStateReason::PutStateReason_PLAYER_STATE_CHANGED);
             handler->playerStateChanged = false;
+        } else if (sendStateAfterQueueLoad) {
+            handler->putPlayerState(
+                    PutStateReason::PutStateReason_PLAYER_STATE_CHANGED);
         }
     }
 
@@ -180,8 +398,8 @@ DeviceStateHandler::DeviceStateHandler(std::shared_ptr<cspot::Context> ctx,
 
             this->device.player_state.duration = track->trackInfo.duration;
             //    this->ctx->timeProvider->getSyncedTimestamp();
-            // putPlayerState(PutStateReason::PutStateReason_PICKER_OPENED);
             sendCommand(CommandType::PLAYBACK, trackQueue->preloadedTracks[0]);
+            putPlayerState();
         } else
             putPlayerState();
     };
@@ -190,7 +408,7 @@ DeviceStateHandler::DeviceStateHandler(std::shared_ptr<cspot::Context> ctx,
             ctx, trackQueue, onTrackEnd, onTrackChanged,
             &device.player_state.options.repeating_track);
 
-    auto connectStateSubscription = [this](MercurySession::Response res) {
+    auto connectStateSubscription = [this](const MercurySession::Response &res) {
         if (res.fail || !res.parts.size())
             return;
         if (strstr(res.mercuryHeader.uri, "v1/devices/")) {
@@ -219,7 +437,7 @@ DeviceStateHandler::DeviceStateHandler(std::shared_ptr<cspot::Context> ctx,
                                                 connectStateSubscription);
 
     // the device connection status gets reported trough "hm://social-connect",if active
-    auto socialConnectSubscription = [this](MercurySession::Response res) {
+    auto socialConnectSubscription = [this](const MercurySession::Response &res) {
         if (res.fail || !res.parts.size())
             return;
         if (res.parts[0].size()) {
@@ -389,11 +607,17 @@ void DeviceStateHandler::putDeviceState(PutStateReason put_state_reason) {
                 this->started_playing_at;
         device.has_player_state = true;
         device.player_state.has_position_as_of_timestamp = true;
-        device.player_state.position_as_of_timestamp =
-                this->ctx->timeProvider->getSyncedTimestamp() -
-                device.player_state.timestamp;
+        const uint64_t now = this->ctx->timeProvider->getSyncedTimestamp();
+        if (playerStateIsPaused(device.player_state)) {
+            device.player_state.timestamp = now;
+        } else if (device.player_state.has_timestamp) {
+            device.player_state.position_as_of_timestamp +=
+                    now - device.player_state.timestamp;
+            device.player_state.timestamp = now;
+        }
     } else
         device.has_player_state = false;
+    logPlayerState("putDeviceState", this, put_state_reason);
     device.player_state.next_tracks.funcs.encode =
             &cspot::TrackReference::pbEncodeProvidedTracks;
     device.player_state.next_tracks.arg = &queuePacket;
@@ -403,7 +627,7 @@ void DeviceStateHandler::putDeviceState(PutStateReason put_state_reason) {
     tempPutReq.device = Device_init_zero;
     pb_release(PutStateRequest_fields, &tempPutReq);
     auto parts = MercurySession::DataParts({putStateRequest});
-    auto responseLambda = [this](MercurySession::Response res) {
+    auto responseLambda = [](const MercurySession::Response &res) {
         if (res.fail || !res.parts.size())
             return;
     };
@@ -411,8 +635,15 @@ void DeviceStateHandler::putDeviceState(PutStateReason put_state_reason) {
                                 responseLambda, parts);
 }
 
-void DeviceStateHandler::putPlayerState(PutStateReason put_state_reason) {
+void DeviceStateHandler::putPlayerState(PutStateReason put_state_reason,
+                                        bool includeNextTracks) {
     if (this->trackQueue->preloadedTracks.empty()) {
+        // Full player-state PUT needs track metrics from the queue. When the
+        // queue is not ready yet (e.g. resume/pause right after transfer),
+        // still notify Connect so the phone UI and session do not hang.
+        ESP_LOGI("DST",
+                 "putPlayerState: no preloaded tracks; sending device state only");
+        putDeviceState(put_state_reason);
         return;
     }
     //std::scoped_lock lock(playerStateMutex);
@@ -429,31 +660,58 @@ void DeviceStateHandler::putPlayerState(PutStateReason put_state_reason) {
     tempPutReq.has_put_state_reason = true;
     tempPutReq.put_state_reason = put_state_reason;
     tempPutReq.last_command_message_id = last_message_id;
+    const auto &metrics = trackQueue->preloadedTracks[0]->trackMetrics;
+    const uint64_t now = this->ctx->timeProvider->getSyncedTimestamp();
+    const uint64_t trackStartedAt = metrics->trackHeaderTime != 0
+                                    ? metrics->trackHeaderTime
+                                    : this->started_playing_at;
     tempPutReq.has_started_playing_at = true;
-    tempPutReq.started_playing_at =
-            this->trackQueue->preloadedTracks[0]->trackMetrics->trackHeaderTime;
+    tempPutReq.started_playing_at = trackStartedAt;
     tempPutReq.has_has_been_playing_for_ms = true;
     tempPutReq.has_been_playing_for_ms =
-            this->ctx->timeProvider->getSyncedTimestamp() -
-            this->trackQueue->preloadedTracks[0]->trackMetrics->trackHeaderTime;
+            trackStartedAt != 0 ? now - trackStartedAt : 0;
     tempPutReq.has_client_side_timestamp = true;
-    tempPutReq.client_side_timestamp =
-            this->ctx->timeProvider->getSyncedTimestamp();
+    tempPutReq.client_side_timestamp = now;
     tempPutReq.has_only_write_player_state = true;
     tempPutReq.only_write_player_state = true;
+    const bool paused = playerStateIsPaused(device.player_state);
+    // Until startTrackPlaying() fires for the head, currentInterval->start
+    // is the *preload* time, not the playback start time. Wall-clock
+    // extrapolation in getPosition() would then report "time since preload"
+    // -- which makes the Spotify timeline show a stale position for the
+    // ~1-3s between skip_next and the first PCM frame on the new track.
+    // Report the stored position (0 for a freshly preloaded track,
+    // requestedPosition for a seek target) until real playback begins.
+    const bool playbackAnchored = metrics->hasStartedPlaying;
+    const uint64_t rawGetPosition = metrics->getPosition(paused);
+    const uint64_t position = playbackAnchored
+                              ? rawGetPosition
+                              : metrics->currentInterval->position;
+    ESP_LOGI("DST",
+             "putPlayerState pos: anchored=%s stored=%llu raw=%llu chosen=%llu "
+             "trackHeaderTime=%llu intervalStart=%llu intervalPos=%llu now=%llu",
+             boolStr(playbackAnchored),
+             (unsigned long long) metrics->currentInterval->position,
+             (unsigned long long) rawGetPosition,
+             (unsigned long long) position,
+             (unsigned long long) metrics->trackHeaderTime,
+             (unsigned long long) metrics->currentInterval->start,
+             (unsigned long long) metrics->currentInterval->position,
+             (unsigned long long) now);
     device.player_state.has_position_as_of_timestamp = true;
-    device.player_state.timestamp =
-            trackQueue->preloadedTracks[0]->trackMetrics->currentInterval->start;
-    device.player_state.position_as_of_timestamp =
-            (int64_t) trackQueue->preloadedTracks[0]->trackMetrics->getPosition();
+    device.player_state.timestamp = now;
+    device.player_state.position_as_of_timestamp = (int64_t) position;
     device.has_player_state = true;
     device.player_state.has_position_as_of_timestamp = true;
-    device.player_state.position_as_of_timestamp =
-            trackQueue->preloadedTracks[0]->trackMetrics->getPosition();
-    queuePacket = {&offset, &currentTracks};
-    device.player_state.next_tracks.funcs.encode =
-            &cspot::TrackReference::pbEncodeProvidedTracks;
-    device.player_state.next_tracks.arg = &queuePacket;
+    pb_callback_t originalNextTracks = device.player_state.next_tracks;
+    if (includeNextTracks) {
+        queuePacket = {&offset, &currentTracks};
+        device.player_state.next_tracks.funcs.encode =
+                &cspot::TrackReference::pbEncodeProvidedTracks;
+        device.player_state.next_tracks.arg = &queuePacket;
+    } else {
+        device.player_state.next_tracks = {};
+    }
 
     if (device.player_state.track.provider &&
         strcmp(device.player_state.track.provider, "autoplay") == 0) {
@@ -557,13 +815,15 @@ void DeviceStateHandler::putPlayerState(PutStateReason put_state_reason) {
 
         device.player_state.has_restrictions = true;
     }
+    logPlayerState("putPlayerState", this, put_state_reason);
     tempPutReq.device = this->device;
+    device.player_state.next_tracks = originalNextTracks;
     auto putStateRequest = pbEncode(PutStateRequest_fields, &tempPutReq);
     tempPutReq.device = Device_init_zero;
     pb_release(PutStateRequest_fields, &tempPutReq);
     auto parts = MercurySession::DataParts({putStateRequest});
 
-    auto responseLambda = [this](MercurySession::Response res) {
+    auto responseLambda = [](const MercurySession::Response &res) {
         if (res.fail || !res.parts.size())
             return;
     };
@@ -634,15 +894,21 @@ void DeviceStateHandler::skip(CommandType dir, bool notify) {
         trackPlayer->resetState();
 }
 
-void DeviceStateHandler::parseCommand(std::vector<uint8_t> &data) {
+void DeviceStateHandler::parseCommand(const std::vector<uint8_t> &data) {
     if (data.size() <= 2)
         return;
+    std::vector<uint8_t> commandData = data;
+    stripLargeCommandDataField(commandData);
     nlohmann::json jsonResult;
     try {
-        jsonResult = nlohmann::json::parse(data);
+        jsonResult = nlohmann::json::parse(commandData);
     } catch (const nlohmann::json::parse_error &) {
         ESP_LOGE("DST", "Failed to parse command");
         return;  // Parsing failed
+    } catch (const std::exception &e) {
+        ESP_LOGE("DST", "Failed to parse command (%u bytes): %s",
+                 (unsigned) commandData.size(), e.what());
+        return;
     }
     last_message_id = jsonResult.value("message_id", last_message_id);
 
@@ -650,6 +916,15 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t> &data) {
     if (command != jsonResult.end()) {
         if (command->find("endpoint") == command->end())
             return;
+        ESP_LOGI("DST", "player/command endpoint=%s is_active=%d preloaded=%u",
+                 command->at("endpoint").get<std::string>().c_str(),
+                 (int) this->is_active,
+                 (unsigned) this->trackQueue->preloadedTracks.size());
+        ESP_LOGI("DST", "player/command keys: options=%s context=%s logging=%s data=%s",
+                 boolStr(command->find("options") != command->end()),
+                 boolStr(command->find("context") != command->end()),
+                 boolStr(command->find("logging_params") != command->end()),
+                 boolStr(command->find("data") != command->end()));
         auto options = command->find("options");
         if (command->at("endpoint") == "transfer") {
             if (is_active)
@@ -666,8 +941,6 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t> &data) {
             if (this->playerContext->next_page_url != NULL)
                 unreference(&(this->playerContext->next_page_url));
             this->playerContext->radio_offset = 0;
-            this->device.player_state.has_is_playing = true;
-            this->device.player_state.is_playing = true;
             this->device.player_state.has_timestamp = true;
             this->device.player_state.timestamp =
                     this->ctx->timeProvider->getSyncedTimestamp();
@@ -691,7 +964,7 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t> &data) {
                             logging_params->at("interaction_ids")[0].get<std::string>()));
                 }
             }
-            auto responseHandler = [this](MercurySession::Response res) {
+            auto responseHandler = [this](const MercurySession::Response &res) {
                 if (res.fail || !res.parts.size())
                     return;
                 cspot::TrackReference::clearProvidedTracklist(&currentTracks);
@@ -722,6 +995,15 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t> &data) {
                 this->device.player_state = cluster.player_state;
                 cluster.player_state = PlayerState_init_zero;
                 pb_release(Cluster_fields, &cluster);
+                const bool transferPaused = playerStateIsPaused(this->device.player_state);
+                setPausedState(this->device.player_state, transferPaused);
+                const std::string positionStr =
+                        std::to_string(this->device.player_state.position_as_of_timestamp);
+                ESP_LOGI("DST",
+                         "transfer cluster loaded: paused=%s position=%s currentTracksBefore=%u",
+                         boolStr(transferPaused),
+                         positionStr.c_str(),
+                         (unsigned) this->currentTracks.size());
                 offsetFromStartInMillis = device.player_state.position_as_of_timestamp;
 
                 std::vector<uint8_t> random_bytes;
@@ -758,6 +1040,11 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t> &data) {
                                         responseHandler);
         } else if (this->is_active) {
             if (command->at("endpoint") == "play") {
+                setPausedState(device.player_state, false);
+                device.player_state.has_timestamp = true;
+                device.player_state.timestamp =
+                        this->ctx->timeProvider->getSyncedTimestamp();
+                started_playing_at = device.player_state.timestamp;
 #ifndef CONFIG_BELL_NOCODEC
                 handler->trackPlayer->stop();
                 sendCommand(CommandType::DEPLETED);
@@ -766,12 +1053,8 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t> &data) {
                     unreference(&(this->playerContext->next_page_url));
                 this->playerContext->radio_offset = 0;
                 trackQueue->preloadedTracks.clear();
-                uint8_t queued = 0;
                 ProvidedTrack track = ProvidedTrack_init_zero;
-                if (!this->device.player_state.is_playing) {
-                    this->device.player_state.is_playing = true;
-                    this->device.player_state.has_track = true;
-                }
+                this->device.player_state.has_track = true;
                 for (int i = 0; i < currentTracks.size(); i++) {
                     if (i > this->offset || currentTracks[i].provider == NULL ||
                         strcmp(currentTracks[i].provider, "queue") != 0) {
@@ -814,6 +1097,7 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t> &data) {
 
                 auto options = command->find("options");
                 int64_t playlist_offset = 0;
+                bool hasPlaylistOffset = false;
                 if (options != command->end()) {
                     if (options->find("player_options_override") != options->end() &&
                         options->at("player_options_override")
@@ -827,7 +1111,8 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t> &data) {
                         if (options->at("skip_to").size()) {
                             if (options->at("skip_to").find("track_index") !=
                                 options->at("skip_to").end()) {
-                                playlist_offset = options->at("skip_to").at("track_index");
+                                hasPlaylistOffset = readJsonIndex(
+                                        options->at("skip_to"), "track_index", playlist_offset);
                                 track.original_index = playlist_offset;
                             }
                             track.uri = PlayerContext::createStringReferenceIfFound(
@@ -837,6 +1122,14 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t> &data) {
                         }
                     }
                 }
+                std::string playlistOffsetStr = hasPlaylistOffset
+                                                ? std::to_string(playlist_offset)
+                                                : "(none)";
+                ESP_LOGI("DST",
+                         "play: skip_to.track_uri=%s skip_to.track_uid=%s skip_to.track_index=%s",
+                         track.uri ? track.uri : "(null)",
+                         track.uid ? track.uid : "(null)",
+                         playlistOffsetStr.c_str());
 
                 auto metadata = command->at("context").find("metadata");
                 if (metadata != command->at("context").end()) {
@@ -921,27 +1214,32 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t> &data) {
                     metadata_offset++;
                 }
 
-                if (command->at("context").find("pages") !=
-                    command->at("context").end() &&
-                    command->at("context").at("pages")[0]["tracks"].size() >
-                    playlist_offset) {
-                    //populate first tarck
+                nlohmann::json *contextTrack = nullptr;
+                uint8_t contextTrackPage = 0;
+                uint32_t contextTrackOffset = 0;
+                if (command->find("context") != command->end()) {
+                    contextTrack = findTrackInContext(command->at("context"),
+                                                      track.uri,
+                                                      track.uid,
+                                                      hasPlaylistOffset,
+                                                      playlist_offset,
+                                                      contextTrackPage,
+                                                      contextTrackOffset);
+                }
+
+                if (contextTrack != nullptr) {
+                    track.original_index = contextTrackOffset;
+                    track.page = contextTrackPage;
                     if (track.uri == NULL) {
                         track.uri = PlayerContext::createStringReferenceIfFound(
-                                command->at("context")["pages"][0]["tracks"][playlist_offset],
-                                "uri");
-                        track.uid = PlayerContext::createStringReferenceIfFound(
-                                command->at("context")["pages"][0]["tracks"][playlist_offset],
-                                "uid");
+                                *contextTrack, "uri");
                     }
-                    if (command->at("context")["pages"][0]["tracks"][playlist_offset]
-                                .find("metadata") !=
-                        command->at("context")["pages"][0]["tracks"][playlist_offset]
-                                .end()) {
-                        for (auto metadata_entry:
-                                command->at("context")["pages"][0]["tracks"][playlist_offset]
-                                        .at("metadata")
-                                        .items()) {
+                    if (track.uid == NULL) {
+                        track.uid = PlayerContext::createStringReferenceIfFound(
+                                *contextTrack, "uid");
+                    }
+                    if (contextTrack->find("metadata") != contextTrack->end()) {
+                        for (auto metadata_entry: contextTrack->at("metadata").items()) {
                             track.metadata[metadata_offset].key =
                                     strdup(metadata_entry.key().c_str());
                             track.metadata[metadata_offset].value =
@@ -949,6 +1247,18 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t> &data) {
                             metadata_offset++;
                         }
                     }
+                    ESP_LOGI("DST",
+                             "play: selected context track page=%u offset=%u uri=%s uid=%s",
+                             (unsigned) contextTrackPage,
+                             (unsigned) contextTrackOffset,
+                             track.uri ? track.uri : "(null)",
+                             track.uid ? track.uid : "(null)");
+                } else {
+                    ESP_LOGW("DST",
+                             "play: selected track not found in context pages (uri=%s uid=%s index=%s)",
+                             track.uri ? track.uri : "(null)",
+                             track.uid ? track.uid : "(null)",
+                             playlistOffsetStr.c_str());
                 }
                 track.full_metadata_count = metadata_offset;
                 track.metadata_count = metadata_offset;
@@ -965,19 +1275,47 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t> &data) {
                 if (track.uri) {
                     currentTracks.insert(currentTracks.begin(), track);
                     device.player_state.track = track;
-                } else
+                    ESP_LOGI("DST",
+                             "play: inserted track uri=%s provider=%s original_index=%u; currentTracks=%u",
+                             track.uri,
+                             track.provider ? track.provider : "(null)",
+                             (unsigned) track.original_index,
+                             (unsigned) currentTracks.size());
+                } else {
+                    ESP_LOGW("DST",
+                             "play: NO track.uri resolved! currentTracks left empty for context_uri=%s",
+                             device.player_state.context_uri
+                             ? device.player_state.context_uri
+                             : "(null)");
                     pb_release(ProvidedTrack_fields, &track);
+                }
                 offset = 0;
                 this->playerContext->resolveTracklist(metadata_map, reloadTrackList,
                                                       true, true);
             } else if (command->at("endpoint") == "pause") {
-                device.player_state.is_paused = true;
-                device.player_state.has_is_paused = true;
+                setPausedState(device.player_state, true);
                 this->putPlayerState();
                 sendCommand(CommandType::PAUSE);
             } else if (command->at("endpoint") == "resume") {
-                device.player_state.is_paused = false;
-                device.player_state.has_is_paused = true;
+                setPausedState(device.player_state, false);
+                if (!trackQueue->preloadedTracks.empty()) {
+                    // Keep the current head track in player_state so the app
+                    // does not show the next queue entry after resume.
+                    auto &head = trackQueue->preloadedTracks[0];
+                    device.player_state.track = head->ref;
+                    device.player_state.has_track = true;
+                    if (head->trackInfo.duration > 0) {
+                        device.player_state.duration = head->trackInfo.duration;
+                    }
+                    ESP_LOGI("DST",
+                             "resume: unpausing head uri=%s (do not reset player)",
+                             head->ref.uri ? head->ref.uri : "(null)");
+                    trackPlayer->start();
+                    // Do not resetState() or PLAYBACK_START here. resetState()
+                    // bumps TrackPlayer's tracksPlayed and EspPlayer treats
+                    // that as a new track -> onTrackEnd() -> skip(), so the UI
+                    // shows the next song while audio is still the current one.
+                }
                 this->putPlayerState();
                 sendCommand(CommandType::PLAY);
             } else if (command->at("endpoint") == "skip_next") {
@@ -1013,11 +1351,17 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t> &data) {
                     offset++;
                     trackPlayer->resetState();
                 }
+                // Push state right away so the Spotify app reflects the new
+                // track URI and position=0 immediately, instead of waiting
+                // up to ~1s for the next heartbeat (during which the app
+                // would otherwise show a stale timeline).
+                this->putPlayerState();
                 sendCommand(CommandType::SKIP_NEXT);
             } else if (command->at("endpoint") == "skip_prev") {
                 ctx->playbackMetrics->end_reason = PlaybackMetrics::BACKWARD_BTN;
                 needsToBeSkipped = false;
                 skip(CommandType::SKIP_PREV, false);
+                this->putPlayerState();
                 sendCommand(CommandType::SKIP_PREV);
 
             } else if (command->at("endpoint") == "seek_to") {
@@ -1090,7 +1434,6 @@ void DeviceStateHandler::parseCommand(std::vector<uint8_t> &data) {
                         break;
                     queuedOffset++;
                 }
-                auto tracks = command->find("next_tracks");
                 if (!command->at("next_tracks").size()) {
                     for (uint8_t i = offset; i < currentTracks.size(); i++) {
                         if (strcmp(currentTracks[i].provider, "queue") != 0)

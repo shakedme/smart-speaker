@@ -62,8 +62,7 @@ void Session::connectWithRandomAp() {
     };
 
     std::string apAddr = apResolver->fetchFirstApAddress();
-
-//  ESP_LOGI("Session", Connecting with AP <%s>", apAddr.c_str());
+    ESP_LOGI("Session", "Connecting to Spotify AP %s", apAddr.c_str());
     conn->connect(apAddr);
 
     this->connect(std::move(conn));
@@ -105,5 +104,7 @@ std::vector<uint8_t> Session::authenticate(const std::shared_ptr<LoginBlob> &blo
 }
 
 void Session::close() {
-    this->conn->close();
+    if (this->conn) {
+        this->conn->close();
+    }
 }

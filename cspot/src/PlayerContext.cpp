@@ -6,7 +6,10 @@
 #include "protobuf/connect.pb.h"  // for PutStateRequest, DeviceState, PlayerState...
 
 #include "BellLogger.h"  // for AbstractLogger
-#include "Logger.h"      // for CSPOT_LOG
+#include "Logger.h"  // for CSPOT_LOG
+#ifdef ESP_PLATFORM
+#include "esp_log.h"
+#endif
 #ifdef BELL_ONLY_CJSON
 #include "cJSON.h"
 #else
@@ -166,7 +169,7 @@ void PlayerContext::autoplayQuery(
       string_format("hm://autoplay-enabled/query?uri=%s", uri_to_use);
   CSPOT_LOG(debug, "Querying autoplay: %s", &requestUrl[0]);
   auto responseHandler = [this, metadata_map, responseFunction,
-                          secondTry](MercurySession::Response res) {
+                          secondTry](const MercurySession::Response &res) {
     if (res.fail || !res.parts.size() || !res.parts[0].size()) {
       if (!secondTry)
         return autoplayQuery(metadata_map, responseFunction, true);
@@ -218,7 +221,7 @@ void PlayerContext::resolveRadio(
     void (*responseFunction)(void*), char* url) {
   CSPOT_LOG(debug, "Resolve radio");
   auto responseHandler = [this, metadata_map,
-                          responseFunction](MercurySession::Response res) {
+                          responseFunction](const MercurySession::Response &res) {
     if (res.fail || !res.parts.size())
       return responseFunction((void*)radio_offset);
     if (!res.parts[0].size())
@@ -426,11 +429,20 @@ void PlayerContext::resolveTracklist(
   //if current track's provider is autoplay, skip loading the tracklist and query autoplay
   if (playerState->track.provider == NULL ||
       strcmp(playerState->track.provider, "autoplay") == 0) {
+#ifdef ESP_PLATFORM
+    ESP_LOGW("PlayerContext",
+             "resolveTracklist: track provider null or autoplay — autoplay path");
+#endif
     return autoplayQuery(metadata_map, responseFunction);
   } else
     radio_offset = 0;
-  if (playerState->context_uri == NULL)
+  if (playerState->context_uri == NULL) {
+#ifdef ESP_PLATFORM
+    ESP_LOGW("PlayerContext",
+             "resolveTracklist: context_uri is NULL — cannot context-resolve");
+#endif
     return responseFunction((void*)radio_offset);
+  }
   //if last track was no radio track, resolve tracklist
 
   std::string requestUrl = "hm://context-resolve/v1/%s";
@@ -441,8 +453,8 @@ void PlayerContext::resolveTracklist(
     requestUrl = string_format(requestUrl, playerState->context_uri);
   CSPOT_LOG(debug, "Resolve context, url: %s", &requestUrl[0]);
 
-  auto responseHandler = [this, metadata_map, responseFunction, changed_state,
-                          trackIsPartOfContext](MercurySession::Response res) {
+  auto responseHandler = [this, metadata_map, responseFunction,
+                          changed_state](const MercurySession::Response &res) {
     if (res.fail || !res.parts.size())
       return responseFunction((void*)radio_offset);
     if (!res.parts[0].size())
@@ -538,12 +550,19 @@ void PlayerContext::resolveTracklist(
         "Current tracklist size: %i, loading tracklist from page %i, offset %i",
         tracks->size(), pageIndex, offset);
 
-    offset = jsonToTracklist(
+    uint8_t tracksLoaded = jsonToTracklist(
         tracks, metadata_map, jsonResult["pages"][pageIndex]["tracks"],
         "context", offset, pageIndex, playerState->options.shuffling_context,
         foundTrack);
-    if (offset > 1) {
-      CSPOT_LOG(debug, "Tracklist populated with %i tracks", offset);
+    // jsonToTracklist returns the number of tracks copied this round. The old
+    // check `> 1` skipped the common case of exactly one song in the context,
+    // so reloadTrackList(NULL) never ran, preloadedTracks stayed empty, and
+    // no audio played after transfer.
+    if (tracksLoaded >= 1) {
+#ifdef ESP_PLATFORM
+      ESP_LOGI("PlayerContext", "context-resolve loaded %u track(s), queueing",
+               (unsigned) tracksLoaded);
+#endif
       return responseFunction(NULL);
     } else if (playerState->options.repeating_context) {
       jsonToTracklist(tracks, metadata_map,

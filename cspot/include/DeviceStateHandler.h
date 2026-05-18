@@ -69,7 +69,8 @@ namespace cspot {
         void setDeviceState(PutStateReason put_state_reason);
 
         void putPlayerState(PutStateReason member_type =
-        PutStateReason::PutStateReason_PLAYER_STATE_CHANGED);
+        PutStateReason::PutStateReason_PLAYER_STATE_CHANGED,
+                            bool includeNextTracks = true);
 
         void handleConnectState();
 
@@ -107,7 +108,7 @@ namespace cspot {
         std::mutex playerStateMutex;
         std::string context_uri, context_url;
 
-        void parseCommand(std::vector<uint8_t> &data);
+        void parseCommand(const std::vector<uint8_t> &data);
 
         void skip(CommandType dir, bool notify);
 

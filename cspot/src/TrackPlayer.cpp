@@ -353,12 +353,21 @@ void TrackPlayer::runTask() {
                                                        toWrite, tracksPlayed, skipped);
                             }
                             toWrite -= written;
+                            if (written == 0) {
+                                BELL_SLEEP_MS(10);
+                                continue;
+                            }
                         }
                         track->written_bytes += ret;
                     }
                 }
             }
-            tracksPlayed++;
+            // Only advance the PCM track id when a track finished naturally.
+            // resetState() exits this loop with eof=false; incrementing then
+            // makes EspPlayer think the track changed and can skip the queue.
+            if (eof) {
+                tracksPlayed++;
+            }
 #ifndef CONFIG_BELL_NOCODEC
             ov_clear(&vorbisFile);
 #endif

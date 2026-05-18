@@ -72,17 +72,26 @@ uint64_t TrackMetrics::getPosition(bool paused) {
 void TrackMetrics::startTrack() {
   trackHeaderTime = this->ctx->timeProvider->getSyncedTimestamp();
   audioKeyTime = trackHeaderTime - timestamp;
+  CSPOT_LOG(info, "startTrack ts=%llu",
+            (unsigned long long) trackHeaderTime);
 }
 
 void TrackMetrics::startTrackDecoding() {
   trackHeaderTime =
       this->ctx->timeProvider->getSyncedTimestamp() - trackHeaderTime;
+  CSPOT_LOG(info, "startTrackDecoding headerElapsed=%llu",
+            (unsigned long long) trackHeaderTime);
 }
 
 void TrackMetrics::startTrackPlaying(uint64_t pos) {
   trackLatency = this->ctx->timeProvider->getSyncedTimestamp() - audioKeyTime;
   currentInterval = std::make_shared<TrackInterval>(
       this->ctx->timeProvider->getSyncedTimestamp(), pos);
+  hasStartedPlaying = true;
+  CSPOT_LOG(info,
+            "startTrackPlaying pos=%llu start=%llu (now anchored)",
+            (unsigned long long) pos,
+            (unsigned long long) currentInterval->start);
 }
 
 void TrackMetrics::endTrack() {
@@ -272,7 +281,7 @@ appended_decision_id:;
   start_source = end_source;
 
 #ifndef CONFIG_HIDDEN
-  auto responseLambda = [=](MercurySession::Response res) {
+  auto responseLambda = [=](const MercurySession::Response &res) {
   };
 
   auto parts = MercurySession::DataParts({msg});

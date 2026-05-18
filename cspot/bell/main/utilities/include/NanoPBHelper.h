@@ -18,11 +18,11 @@ void packString(char*& dst, std::string stringToPack);
 std::vector<uint8_t> pbArrayToVector(pb_bytes_array_t* pbArray);
 
 template <typename T>
-T pbDecode(const pb_msgdesc_t* fields, std::vector<uint8_t>& data) {
+T pbDecode(const pb_msgdesc_t* fields, const std::vector<uint8_t>& data) {
 
   T result = {};
   // Create stream
-  pb_istream_t stream = pb_istream_from_buffer(&data[0], data.size());
+  pb_istream_t stream = pb_istream_from_buffer(data.data(), data.size());
 
   // Decode the message
   if (pb_decode(&stream, fields, &result) == false) {
@@ -34,9 +34,9 @@ T pbDecode(const pb_msgdesc_t* fields, std::vector<uint8_t>& data) {
 
 template <typename T>
 void pbDecode(T& result, const pb_msgdesc_t* fields,
-              std::vector<uint8_t>& data) {
+              const std::vector<uint8_t>& data) {
   // Create stream
-  pb_istream_t stream = pb_istream_from_buffer(&data[0], data.size());
+  pb_istream_t stream = pb_istream_from_buffer(data.data(), data.size());
 
   // Decode the message
   if (pb_decode(&stream, fields, &result) == false) {

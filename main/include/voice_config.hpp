@@ -1,7 +1,7 @@
 #pragma once
 
 // WebSocket Server Configuration
-#define CONFIG_WEBSOCKET_SERVER_URL "ws://172.20.10.2:8080/voice"
+#define CONFIG_WEBSOCKET_SERVER_URL "ws://192.168.1.124:8080/voice"
 
 // WebSocket Connection Settings
 #define CONFIG_WS_KEEPALIVE_INTERVAL_S  30
@@ -15,8 +15,8 @@
 #define MIC_BITS                    I2S_DATA_BIT_WIDTH_24BIT
 
 // WiFi Configuration (required for WebSocket connection)
-#define CONFIG_WIFI_SSID "iPhone"
-#define CONFIG_WIFI_PASSWORD "12345678"
+#define CONFIG_WIFI_SSID "Shaked"
+#define CONFIG_WIFI_PASSWORD "0543512375"
 
 // Hardware Pin Configuration - Updated for single SPH0645LM4H I2S MEMS microphone
 // Note: Using I2S1 for microphone to avoid conflict with I2S0 used for audio output (PCM5102A)

@@ -17,12 +17,14 @@ namespace btspeaker {
 
     static constexpr const char *TAG = "APP_MANAGER";
 
+    AppManager::~AppManager() = default;
+
     AppManager::AppManager() {
         ESP_LOGI(TAG, "🚀 Starting AppManager initialization");
 
         initNVS();
 
-        wifiManager = std::make_unique<WiFiManager>();
+        wifiManager = WiFiManager::create();
         wifiManager->connect(CONFIG_WIFI_SSID, CONFIG_WIFI_PASSWORD);
 
         audioSourceManager = std::make_unique<AudioSourceManager>(*wifiManager);

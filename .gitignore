@@ -17,6 +17,9 @@ __pycache__/
 # Build optimization
 precompiled_libs/
 .ccache/
+.cache/
+.clangd
+.clangd.cache/
 
 # IDE files
 .vscode/

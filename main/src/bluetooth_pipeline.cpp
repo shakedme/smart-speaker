@@ -22,7 +22,7 @@ namespace btspeaker {
         instance = this;
 
         bluetooth_service_cfg_t btCfg = {
-                .device_name = "ESP32_SPEAKER",
+                .device_name = "Rufus",
                 .remote_name = nullptr,
                 .mode = BLUETOOTH_A2DP_SINK,
                 .user_callback = {

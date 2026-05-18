@@ -141,12 +141,21 @@ void EspPlayer::feedData(uint8_t *data, size_t len, size_t trackId) {
 void EspPlayer::runTask() {
     ESP_LOGI("EspPlayer", "Starting EspPlayer keepalive task");
 
+    uint32_t logCounter = 0;
     while (isRunning) {
-        ESP_LOGI("EspPlayer", "Buffer size: %d bytes", this->audioSink->getBufferFillLevel());
-        if (this->audioSink->isPlaying()) {
-            this->handler->putPlayerState();
+        if ((logCounter++ % 5) == 0) {
+            ESP_LOGI("EspPlayer", "Buffer size: %d bytes", this->audioSink->getBufferFillLevel());
         }
-        BELL_SLEEP_MS(5000);
+        // Heartbeat while active, but do not re-encode next_tracks on every
+        // tick. Full queue state is sent from command/track-change paths; the
+        // heartbeat only needs position/playback freshness for Connect UI.
+        if (this->handler->is_active &&
+            !this->handler->trackQueue->preloadedTracks.empty()) {
+            this->handler->putPlayerState(
+                    PutStateReason::PutStateReason_PLAYER_STATE_CHANGED,
+                    false);
+        }
+        BELL_SLEEP_MS(1000);
     }
 
     ESP_LOGI("EspPlayer", "EspPlayer keepalive task exiting");

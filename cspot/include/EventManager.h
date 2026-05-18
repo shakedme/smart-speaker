@@ -19,7 +19,9 @@ struct TrackInterval {
   TrackInterval();
   TrackInterval(uint64_t start, uint64_t position) {
     this->start = start;
+    this->end = position;
     this->position = position;
+    this->length = 0;
   }
 };
 
@@ -42,6 +44,11 @@ class TrackMetrics {
            totalMsOfPlayedTrack = 0, totalAmountPlayed = 0, audioKeyTime = 0,
            trackHeaderTime = 0, written_bytes = 0, track_size = 0,
            timestamp = 0, trackLatency = 0;
+  // True once startTrackPlaying() has fired and currentInterval->start is
+  // anchored to real playback start. Before that, currentInterval->start is
+  // the *preload* time, so wall-clock extrapolation in getPosition() does
+  // not represent a real audio position.
+  bool hasStartedPlaying = false;
   std::vector<std::pair<uint64_t, uint64_t>> intervals;
   skip skipped_backward, skipped_forward;
 

@@ -17,6 +17,7 @@
 #include <string>
 #include <cstring>
 #include <random>
+#include <stdexcept>
 
 // cspot includes  
 #include "Utils.h"
@@ -34,6 +35,22 @@
 static const char *TAG = "SpotifyPipeline";
 
 namespace btspeaker {
+    namespace {
+        constexpr int kSpotifyConnectMaxAttempts = 5;
+        constexpr uint32_t kSpotifyConnectBaseBackoffMs = 500;
+        constexpr uint32_t kSpotifyConnectMaxBackoffMs = 8000;
+
+        uint32_t spotifyConnectBackoffMs(int attempt) {
+            uint32_t delay = kSpotifyConnectBaseBackoffMs;
+            for (int i = 1; i < attempt; i++) {
+                delay *= 2;
+                if (delay >= kSpotifyConnectMaxBackoffMs) {
+                    return kSpotifyConnectMaxBackoffMs;
+                }
+            }
+            return delay;
+        }
+    }
 
     SpotifyPipeline::SpotifyPipeline()
             : isPlaying(false),
@@ -359,19 +376,47 @@ namespace btspeaker {
                 }
             }
 
-            context = cspot::Context::createFromBlob(loginBlob);
-            if (!context) {
-                ESP_LOGE(TAG, "Failed to create Spotify context from blob");
-                vTaskDelete(nullptr);
-                return ESP_FAIL;
-            }
-            ESP_LOGI(TAG, "Connectin random access point");
-            context->session->connectWithRandomAp();
-            ESP_LOGI(TAG, "Authenticating with login blob");
-            context->config.authData = context->session->authenticate(loginBlob);
-            if (context->config.authData.size() == 0) {
-                ESP_LOGE(TAG, "Authentication failed - no auth data received");
-                return ESP_FAIL;
+            for (int attempt = 1; attempt <= kSpotifyConnectMaxAttempts; attempt++) {
+                try {
+                    context = cspot::Context::createFromBlob(loginBlob);
+                    if (!context) {
+                        ESP_LOGE(TAG, "Failed to create Spotify context from blob");
+                        vTaskDelete(nullptr);
+                        return ESP_FAIL;
+                    }
+
+                    ESP_LOGI(TAG,
+                             "Connecting to Spotify access point (attempt %d/%d)",
+                             attempt,
+                             kSpotifyConnectMaxAttempts);
+                    context->session->connectWithRandomAp();
+
+                    ESP_LOGI(TAG, "Authenticating with login blob");
+                    context->config.authData = context->session->authenticate(loginBlob);
+                    if (context->config.authData.empty()) {
+                        throw std::runtime_error("Authentication failed - no auth data received");
+                    }
+
+                    break;
+                } catch (const std::exception &e) {
+                    if (context && context->session) {
+                        context->session->close();
+                    }
+                    context.reset();
+
+                    if (attempt == kSpotifyConnectMaxAttempts) {
+                        throw;
+                    }
+
+                    const uint32_t delayMs = spotifyConnectBackoffMs(attempt);
+                    ESP_LOGW(TAG,
+                             "Spotify connect/auth attempt %d/%d failed: %s; retrying in %u ms",
+                             attempt,
+                             kSpotifyConnectMaxAttempts,
+                             e.what(),
+                             (unsigned) delayMs);
+                    vTaskDelay(pdMS_TO_TICKS(delayMs));
+                }
             }
             ESP_LOGI(TAG, "Authentication successful, initializing device state handler and audio sink");
             deviceStateHandler = std::make_shared<cspot::DeviceStateHandler>(context, [this]() {

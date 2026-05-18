@@ -120,6 +120,9 @@ void MercurySession::handleReconnection() {
 }
 
 void MercurySession::reconnect() {
+    uint32_t retryDelayMs = 1000;
+    constexpr uint32_t maxRetryDelayMs = 16000;
+
     while (isRunning) {
         try {
             this->shanConn = nullptr;
@@ -137,9 +140,23 @@ void MercurySession::reconnect() {
             isReconnecting = false;
             this->executeEstabilishedCallback = true;
             return;  // Successful connection, exit loop
+        } catch (const std::exception &e) {
+            CSPOT_LOG(error, "Cannot reconnect: %s; retrying in %u ms",
+                      e.what(), (unsigned) retryDelayMs);
+            BELL_SLEEP_MS(retryDelayMs);
+            retryDelayMs = retryDelayMs >= maxRetryDelayMs / 2
+                           ? maxRetryDelayMs
+                           : retryDelayMs * 2;
+            if (!isRunning) {  // Stop retrying if session is not running
+                return;
+            }
         } catch (...) {
-            CSPOT_LOG(error, "Cannot reconnect, will retry in 5s");
-            BELL_SLEEP_MS(1000);
+            CSPOT_LOG(error, "Cannot reconnect: unknown error; retrying in %u ms",
+                      (unsigned) retryDelayMs);
+            BELL_SLEEP_MS(retryDelayMs);
+            retryDelayMs = retryDelayMs >= maxRetryDelayMs / 2
+                           ? maxRetryDelayMs
+                           : retryDelayMs * 2;
             if (!isRunning) {  // Stop retrying if session is not running
                 return;
             }
@@ -185,7 +202,9 @@ void MercurySession::disconnect() {
     ESP_LOGD("MercSession", "Disconnecting mercury session");
     isRunning.store(false);
     std::scoped_lock lock(this->isRunningMutex);
-    conn->close();
+    if (conn) {
+        conn->close();
+    }
 }
 
 std::string MercurySession::getCountryCode() {

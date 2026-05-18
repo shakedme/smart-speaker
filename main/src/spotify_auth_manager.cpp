@@ -144,16 +144,8 @@ namespace btspeaker {
 
     esp_err_t SpotifyAuthManager::startZeroconfDiscovery() {
         ESP_LOGI(TAG, "Starting Spotify Connect Zeroconf discovery...");
-        ESP_LOGI(TAG, "Open Spotify app and look ESP32_SPEAKER in Connect devices");
-        
-        // Only create a new LoginBlob if we don't have a valid stored one
-        if (!loginBlob_ || !isAuthenticated_) {
-            ESP_LOGI(TAG, "🔧 DEBUG: Creating new LoginBlob for zeroconf (no stored auth)");
-            loginBlob_ = std::make_shared<cspot::LoginBlob>(std::string(btspeaker::SPOTIFY_DEVICE_NAME));
-        } else {
-            ESP_LOGI(TAG, "🔧 DEBUG: Using existing stored LoginBlob for zeroconf (username: %s)", 
-                     loginBlob_->getUserName().c_str());
-        }
+        ESP_LOGI(TAG, "Open Spotify app and look Rufus in Connect devices");
+
         esp_err_t ret = startHttpServer();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start HTTP server: %s", esp_err_to_name(ret));
@@ -296,7 +288,6 @@ namespace btspeaker {
 
             content[content_len] = '\0';
 
-            ESP_LOGI(TAG, "Received auth data: %s", content);
             try {
                 std::string content_str(content);
                 auto queryMap = parseFormData(content_str);
@@ -306,15 +297,11 @@ namespace btspeaker {
                     httpd_resp_send_500(req);
                     return ESP_FAIL;
                 }
-                ESP_LOGI(TAG, "Authentication parameters validated, loading into LoginBlob...");
-
                 mgr->loginBlob_->loadZeroconfQuery(queryMap);
                 ESP_LOGI(TAG, "LoginBlob loaded successfully");
 
                 sendAuthSuccessResponse(req);
                 free(content);
-
-                ESP_LOGI(TAG, "Authentication data received, deferring processing to separate task...");
                 if (!mgr->loginBlob_ || mgr->loginBlob_->authData.empty()) {
                     ESP_LOGE(TAG, "LoginBlob became invalid during processing");
                     return ESP_OK;
@@ -346,7 +333,6 @@ namespace btspeaker {
                 std::string key = param.substr(0, eq_pos);
                 std::string value = urlDecode(param.substr(eq_pos + 1));
                 queryMap[key] = value;
-                ESP_LOGD(TAG, "Parsed param: %s = %s", key.c_str(), value.c_str());
             }
             start = amp_pos + 1;
         }

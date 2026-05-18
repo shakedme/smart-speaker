@@ -7,12 +7,25 @@
 #include <cctype>     // for tolower
 #include <ostream>    // for operator<<, basic_ostream
 #include <stdexcept>  // for runtime_error
+#include <utility>
 
 #include "BellLogger.h"  // for AbstractLogger, BELL_LOG
 #include "BellSocket.h"  // for bell
 #include "BellUtils.h"   // for BELL_SLEEP_MS
 
+#ifdef error
+#undef error
+#endif
+
 using namespace bell;
+
+namespace {
+template <typename... Args>
+void logHttpClientError(const char* format, Args&&... args) {
+  bell::bellGlobalLogger->error(__FILE__, __LINE__, "httpClient", format,
+                                std::forward<Args>(args)...);
+}
+}  // namespace
 
 int HTTPClient::Response::connect(const std::string& url, size_t numHeaders) {
   try {
@@ -24,15 +37,15 @@ int HTTPClient::Response::connect(const std::string& url, size_t numHeaders) {
     // Open socket of type
     return this->socketStream.open(urlParser.host, urlParser.port,
                                    urlParser.schema == "https");
-  } catch (const std::invalid_argument& e) {
-    BELL_LOG(error, "httpClient", "Error while parsing URL: %s", e.what());
+  } catch (const std::invalid_argument& ex) {
+    logHttpClientError( "Error while parsing URL: %s", ex.what());
     return 1;
-  } catch (const std::runtime_error& e) {
-    BELL_LOG(error, "httpClient",
-             "Stream operation failed while connecting: %s", e.what());
+  } catch (const std::runtime_error& ex) {
+    logHttpClientError(
+             "Stream operation failed while connecting: %s", ex.what());
     return 1;
-  } catch (const std::exception& e) {
-    BELL_LOG(error, "httpClient", "Unexpected exception: %s", e.what());
+  } catch (const std::exception& ex) {
+    logHttpClientError( "Unexpected exception: %s", ex.what());
     return 2;
   }
 }
@@ -50,12 +63,12 @@ int HTTPClient::Response::reconnect() {
     BELL_SLEEP_MS(10);
     return this->socketStream.open(urlParser.host, urlParser.port,
                                    urlParser.schema == "https");
-  } catch (const std::runtime_error& e) {
-    BELL_LOG(error, "httpClient",
-             "Stream operation failed while reconnecting: %s", e.what());
+  } catch (const std::runtime_error& ex) {
+    logHttpClientError(
+             "Stream operation failed while reconnecting: %s", ex.what());
     return 1;
-  } catch (const std::exception& e) {
-    BELL_LOG(error, "httpClient", "Unexpected exception: %s", e.what());
+  } catch (const std::exception& ex) {
+    logHttpClientError( "Unexpected exception: %s", ex.what());
     return 2;
   }
 }
@@ -102,9 +115,9 @@ bool HTTPClient::Response::rawRequest(const std::string& url,
     }
 
     socketStream.flush();
-  } catch (const std::ios_base::failure& e) {
-    BELL_LOG(error, "httpClient",
-             "Stream operation failed while sending request: %s", e.what());
+  } catch (const std::ios_base::failure& ex) {
+    logHttpClientError(
+             "Stream operation failed while sending request: %s", ex.what());
     if (reconnect() != 0) {
       return false;  // If reconnection fails, return failure
     }
@@ -114,21 +127,21 @@ bool HTTPClient::Response::rawRequest(const std::string& url,
   // Parse response
   try {
     return readResponseHeaders();
-  } catch (const std::underflow_error& e) {
-    BELL_LOG(error, "httpClient", "Underflow error during response reading: %s",
-             e.what());
+  } catch (const std::underflow_error& ex) {
+    logHttpClientError( "Underflow error during response reading: %s",
+             ex.what());
     this->socketStream.flush();
     this->socketStream.close();
     return false;
-  } catch (const std::runtime_error& e) {
-    BELL_LOG(error, "httpClient", "Runtime error while receiving packet: %s",
-             e.what());
+  } catch (const std::runtime_error& ex) {
+    logHttpClientError( "Runtime error while receiving packet: %s",
+             ex.what());
     if (reconnect() != 0) {
       return false;
     }
     return rawRequest(url, method, content, headers);
-  } catch (const std::exception& e) {
-    BELL_LOG(error, "Unexpected exception: %s", e.what());
+  } catch (const std::exception& ex) {
+    logHttpClientError( "Unexpected exception: %s", ex.what());
     return false;
   }
 }

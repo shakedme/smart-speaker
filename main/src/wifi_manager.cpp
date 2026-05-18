@@ -12,6 +12,10 @@ extern "C" {
 
 namespace btspeaker {
 
+    std::unique_ptr<WiFiManager> WiFiManager::create() {
+        return std::make_unique<WiFiManager>();
+    }
+
     WiFiManager::WiFiManager()
             : status(Status::DISCONNECTED), wifiEventGroup(nullptr), staNetif(nullptr), retryCount(0),
               initialized(false) {

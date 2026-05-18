@@ -1,0 +1,71 @@
+---
+alwaysApply: true
+---
+# Coding Standards
+
+Write code that is concise, defensive, and performant. Optimization is a first-class priority: every change must consider CPU time, memory use, stack use, binary size, latency, and I/O cost.
+
+## Repository Context
+
+- This is an ESP32 smart speaker firmware/backend repository. Firmware code is built with ESP-IDF/ESP-ADF and includes Bluetooth audio, Spotify Connect, audio pipelines, Wi-Fi, WebSocket voice assistant flows, and embedded audio hardware integration.
+- Prefer simple, deterministic designs suitable for constrained embedded systems.
+- Keep abstractions thin. Avoid framework-style indirection unless it removes measurable duplication or risk.
+
+## C++ / C Best Practices
+
+- Prefer modern C++ with RAII, clear ownership, `const` correctness, narrow scopes, and explicit lifetimes.
+- Avoid raw owning pointers. Use references, values, `std::unique_ptr`, or existing ESP-IDF ownership patterns as appropriate.
+- Avoid exceptions and RTTI in firmware paths unless the project already enables and uses them safely.
+- Avoid dynamic allocation in hot paths, ISR-adjacent paths, audio callbacks, and frequently executed loops.
+- Use fixed-size buffers when bounds are known. Validate every length before copying, parsing, or indexing.
+- Prefer `std::array`, `std::span`, `string_view`, and explicit buffer sizes over unchecked pointer arithmetic when available.
+- Do not introduce global mutable state unless it models hardware/system state and is protected by clear ownership or synchronization.
+
+## Performance Rules
+
+- Treat audio, networking, and state-transition paths as latency-sensitive.
+- Minimize allocations, copies, lock contention, logging, and blocking calls in runtime paths.
+- Prefer zero-copy or bounded-copy flows for audio buffers and protocol frames.
+- Avoid unnecessary heap fragmentation. Reuse buffers deliberately and release resources predictably.
+- Keep stack usage conservative. Large buffers must be static, heap-backed with explicit ownership, or externally provided.
+- Do not add polling loops, sleeps, or retries without bounded timing and failure behavior.
+
+## Defensive Coding
+
+- Check all return values from ESP-IDF, FreeRTOS, socket/WebSocket, filesystem, NVS, audio, and C library calls.
+- Fail closed with explicit error handling. Never silently ignore initialization, allocation, parse, or I/O failures.
+- Validate external input from Bluetooth, Spotify, WebSocket, backend responses, configuration, NVS, and audio streams.
+- Make state machines explicit. Guard invalid transitions and log actionable errors without flooding logs.
+- Prefer early returns for invalid preconditions and cleanup paths that are easy to audit.
+
+## Memory Management
+
+- Memory management must be conservative, precise, and reviewable.
+- Document ownership transfer at API boundaries.
+- Pair every allocation/acquire with a clear release path, preferably RAII.
+- Avoid ambiguous borrowed pointers. Make borrowed lifetimes obvious in names, types, or comments.
+- Clear or reset sensitive credentials/tokens when no longer needed.
+- Do not retain pointers to transient buffers, stack memory, event payloads, or temporary strings.
+
+## Concurrency and Embedded Constraints
+
+- Keep task ownership, queue ownership, and callback threading assumptions explicit.
+- Do not block audio callbacks, event handlers, Wi-Fi callbacks, or high-priority tasks.
+- Protect shared state with the smallest practical synchronization scope.
+- Prefer message passing or queues over shared mutable state when crossing task boundaries.
+- Keep ISR-safe code minimal and only call APIs that are safe in that context.
+
+## Style and Change Discipline
+
+- Make the smallest correct change. Avoid broad refactors mixed with functional fixes.
+- Match existing naming, formatting, logging style, and ESP-IDF idioms.
+- Keep functions short and single-purpose. Remove dead code instead of commenting it out.
+- Add comments only where they clarify non-obvious constraints, hardware assumptions, timing, ownership, or performance tradeoffs.
+- Do not add dependencies unless they are essential, lightweight, and justified.
+- Do not change SDK config, partition layout, build flags, or hardware pins unless the task explicitly requires it.
+
+## Validation
+
+- Prefer compile-time checks, static assertions, bounds checks, and deterministic tests where practical.
+- Before finishing, consider whether the change affects boot, Wi-Fi, Bluetooth, Spotify auth, audio routing, microphone streaming, WebSocket flows, NVS persistence, or memory pressure.
+- When build/test commands are available, run the narrowest relevant command first, then the broader build if needed.

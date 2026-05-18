@@ -36,7 +36,7 @@ class MercurySession : public bell::Task, public cspot::Session {
     uint64_t sequenceId;
     bool fail = true;
   };
-  typedef std::function<void(const Response)> ResponseCallback;
+  typedef std::function<void(const Response&)> ResponseCallback;
   typedef std::function<void(bool, const std::vector<uint8_t>&)>
       AudioKeyCallback;
   typedef std::function<void()> ConnectionEstabilishedCallback;

@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <random>
+#include <stdexcept>
 
 #include "AccessKeyFetcher.h"
 #include "BellTask.h"
@@ -25,6 +26,120 @@
 #include "protobuf/metadata.pb.h"
 
 using namespace cspot;
+
+namespace {
+std::string responsePreview(std::string_view body) {
+  constexpr size_t kMaxPreviewLen = 240;
+  return std::string(body.substr(0, std::min(body.size(), kMaxPreviewLen)));
+}
+
+std::string extractUrlFromResponseText(std::string_view body) {
+  size_t pos = body.find("https://");
+  if (pos == std::string_view::npos) {
+    pos = body.find("http://");
+  }
+
+  if (pos == std::string_view::npos) {
+    return {};
+  }
+
+  size_t end = pos;
+  while (end < body.size()) {
+    const char c = body[end];
+    if (c == '"' || c == '\\' || c == ',' || c == '}' || c == ']') {
+      break;
+    }
+    end++;
+  }
+
+  return std::string(body.substr(pos, end - pos));
+}
+
+#ifdef BELL_ONLY_CJSON
+std::string extractUrlFromJsonValue(cJSON* item) {
+  if (item == nullptr) {
+    return {};
+  }
+
+  if (cJSON_IsString(item) && item->valuestring != nullptr &&
+      strncmp(item->valuestring, "http", 4) == 0) {
+    return std::string(item->valuestring);
+  }
+
+  if (cJSON_IsArray(item)) {
+    const int size = cJSON_GetArraySize(item);
+    for (int i = 0; i < size; i++) {
+      auto url = extractUrlFromJsonValue(cJSON_GetArrayItem(item, i));
+      if (!url.empty()) {
+        return url;
+      }
+    }
+    return {};
+  }
+
+  if (cJSON_IsObject(item)) {
+    static const char* kPreferredKeys[] = {"cdnurl", "cdnurls", "url", "urls"};
+    for (const char* key : kPreferredKeys) {
+      auto url = extractUrlFromJsonValue(cJSON_GetObjectItem(item, key));
+      if (!url.empty()) {
+        return url;
+      }
+    }
+
+    for (cJSON* child = item->child; child != nullptr; child = child->next) {
+      auto url = extractUrlFromJsonValue(child);
+      if (!url.empty()) {
+        return url;
+      }
+    }
+  }
+
+  return {};
+}
+#else
+std::string extractUrlFromJsonValue(const nlohmann::json& item) {
+  if (item.is_string()) {
+    auto value = item.get<std::string>();
+    if (value.rfind("http", 0) == 0) {
+      return value;
+    }
+    return {};
+  }
+
+  if (item.is_array()) {
+    for (const auto& child : item) {
+      auto url = extractUrlFromJsonValue(child);
+      if (!url.empty()) {
+        return url;
+      }
+    }
+    return {};
+  }
+
+  if (item.is_object()) {
+    static const char* kPreferredKeys[] = {"cdnurl", "cdnurls", "url", "urls"};
+    for (const char* key : kPreferredKeys) {
+      auto found = item.find(key);
+      if (found != item.end()) {
+        auto url = extractUrlFromJsonValue(*found);
+        if (!url.empty()) {
+          return url;
+        }
+      }
+    }
+
+    for (const auto& child : item.items()) {
+      auto url = extractUrlFromJsonValue(child.value());
+      if (!url.empty()) {
+        return url;
+      }
+    }
+  }
+
+  return {};
+}
+#endif
+}  // namespace
 
 namespace TrackDataUtils {
 bool countryListContains(char* countryList, const char* country) {
@@ -303,63 +418,73 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
   }
 
   try {
-    std::string requestUrl = string_format(
-        "https://api.spotify.com/v1/storage-resolve/files/audio/interactive/"
-        "%s?alt=json",
-        bytesToHexString(fileId).c_str());
-    
-    ESP_LOGD("TrackQueue", "Requesting CDN URL from: %s", requestUrl.c_str());
-    
-    // Add timeout and retry-friendly headers
-    auto req = bell::HTTPClient::get(
-        requestUrl, {
-          bell::HTTPClient::ValueHeader({"Authorization", "Bearer " + accessKey}),
-          bell::HTTPClient::ValueHeader({"Connection", "close"}), // Force connection close
-          bell::HTTPClient::ValueHeader({"User-Agent", "Spotify/8.8.0"})
-        }, 10000); // 10 second timeout
+    const std::string fileIdHex = bytesToHexString(fileId);
+    const std::vector<std::string> requestUrls = {
+        string_format(
+            "https://spclient.wg.spotify.com/storage-resolve/files/audio/"
+            "interactive/%s?product=0&alt=json",
+            fileIdHex.c_str()),
+        string_format(
+            "https://api.spotify.com/v1/storage-resolve/files/audio/"
+            "interactive/%s?alt=json",
+            fileIdHex.c_str()),
+    };
 
-    if (!req) {
-      throw std::runtime_error("HTTP request failed - null response");
-    }
+    std::string lastError;
+    for (const auto& requestUrl : requestUrls) {
+      ESP_LOGD("TrackQueue", "Requesting CDN URL from: %s", requestUrl.c_str());
 
-    // Wait for response
-    std::string_view result = req->body();
-    if (result.empty()) {
-      throw std::runtime_error("Empty response from Spotify API");
-    }
-    
-    ESP_LOGD("TrackQueue", "CDN response received, size: %d", result.size());
+      auto req = bell::HTTPClient::get(
+          requestUrl,
+          {bell::HTTPClient::ValueHeader({"Authorization", "Bearer " + accessKey}),
+           bell::HTTPClient::ValueHeader({"Connection", "close"}),
+           bell::HTTPClient::ValueHeader({"User-Agent", "Spotify/8.8.0"})},
+          10000);
 
+      if (!req) {
+        lastError = "HTTP request failed - null response";
+        continue;
+      }
+
+      std::string_view result = req->body();
+      if (result.empty()) {
+        lastError = "Empty response from Spotify API";
+        continue;
+      }
+
+      ESP_LOGD("TrackQueue", "CDN response received, size: %d", result.size());
+      cdnUrl = extractUrlFromResponseText(result);
 #ifdef BELL_ONLY_CJSON
-    cJSON* jsonResult = cJSON_Parse(result.data());
-    if (!jsonResult) {
-      throw std::runtime_error("Failed to parse JSON response");
-    }
-    
-    cJSON* cdnurlArray = cJSON_GetObjectItem(jsonResult, "cdnurl");
-    if (!cdnurlArray || !cJSON_IsArray(cdnurlArray) || cJSON_GetArraySize(cdnurlArray) == 0) {
-      cJSON_Delete(jsonResult);
-      throw std::runtime_error("Invalid JSON structure - missing cdnurl array");
-    }
-    
-    cJSON* firstUrl = cJSON_GetArrayItem(cdnurlArray, 0);
-    if (!firstUrl || !cJSON_IsString(firstUrl)) {
-      cJSON_Delete(jsonResult);
-      throw std::runtime_error("Invalid JSON structure - cdnurl not a string");
-    }
-    
-    cdnUrl = std::string(firstUrl->valuestring);
-    cJSON_Delete(jsonResult);
+      if (cdnUrl.empty()) {
+        cJSON* jsonResult = cJSON_Parse(result.data());
+        if (!jsonResult) {
+          lastError = "Failed to parse JSON response";
+          continue;
+        }
+
+        cdnUrl = extractUrlFromJsonValue(jsonResult);
+        cJSON_Delete(jsonResult);
+      }
 #else
-    auto jsonResult = nlohmann::json::parse(result);
-    if (!jsonResult.contains("cdnurl") || !jsonResult["cdnurl"].is_array() || jsonResult["cdnurl"].empty()) {
-      throw std::runtime_error("Invalid JSON structure - missing cdnurl array");
-    }
-    cdnUrl = jsonResult["cdnurl"][0];
+      if (cdnUrl.empty()) {
+        lastError = "No CDN URL found in storage-resolve response: " +
+                    responsePreview(result);
+        ESP_LOGW("TrackQueue", "%s", lastError.c_str());
+        continue;
+      }
 #endif
+      if (!cdnUrl.empty()) {
+        break;
+      }
+
+      lastError = "No CDN URL found in storage-resolve response: " +
+                  responsePreview(result);
+      ESP_LOGW("TrackQueue", "%s", lastError.c_str());
+    }
 
     if (cdnUrl.empty()) {
-      throw std::runtime_error("Empty CDN URL received");
+      throw std::runtime_error(lastError.empty() ? "Empty CDN URL received"
+                                                 : lastError.c_str());
     }
 
     state = State::READY;
@@ -410,7 +535,7 @@ void QueuedTrack::stepLoadMetadata(
                     bytesToHexString(gid.second).c_str());
 
   auto responseHandler = [this, pbTrack, pbEpisode, &trackListMutex,
-                          updateSemaphore](MercurySession::Response res) {
+                          updateSemaphore](const MercurySession::Response &res) {
     std::scoped_lock lock(trackListMutex);
 
     if (res.parts.size() == 0) {
@@ -425,10 +550,10 @@ void QueuedTrack::stepLoadMetadata(
     // Parse the metadata
     if (gid.first == SpotifyFileType::TRACK) {
       pb_release(Track_fields, pbTrack);
-      pbDecode(*pbTrack, Track_fields, res.parts[0]);
+      pbDecode(*pbTrack, Track_fields, const_cast<std::vector<uint8_t>&>(res.parts[0]));
     } else {
       pb_release(Episode_fields, pbEpisode);
-      pbDecode(*pbEpisode, Episode_fields, res.parts[0]);
+      pbDecode(*pbEpisode, Episode_fields, const_cast<std::vector<uint8_t>&>(res.parts[0]));
     }
 
     // Parse received metadata
@@ -486,8 +611,10 @@ void TrackQueue::runTask() {
       if (track) {
         if (this->processTrack(track))
           break;
+        BELL_SLEEP_MS(1);
       }
     }
+    BELL_SLEEP_MS(1);
   }
 }
 

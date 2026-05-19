@@ -52,6 +52,7 @@ PortAudioSink::~PortAudioSink() {
   Pa_Terminate();
 }
 
-void PortAudioSink::feedPCMFrames(const uint8_t* buffer, size_t bytes) {
+size_t PortAudioSink::feedPCMFrames(const uint8_t* buffer, size_t bytes) {
   Pa_WriteStream(stream, buffer, bytes / 4);
+  return bytes;
 }

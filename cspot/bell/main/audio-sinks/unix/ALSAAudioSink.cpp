@@ -77,7 +77,7 @@ void ALSAAudioSink::runTask() {
   }
 }
 
-void ALSAAudioSink::feedPCMFrames(const uint8_t* buffer, size_t bytes) {
+size_t ALSAAudioSink::feedPCMFrames(const uint8_t* buffer, size_t bytes) {
 
   buff.insert(buff.end(), buffer, buffer + bytes);
   while (buff.size() > this->buff_size) {
@@ -89,4 +89,5 @@ void ALSAAudioSink::feedPCMFrames(const uint8_t* buffer, size_t bytes) {
       usleep(100);
     };
   }
+  return bytes;
 }

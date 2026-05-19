@@ -11,7 +11,7 @@ public:
 
     virtual ~AudioSink() {}
 
-    virtual void feedPCMFrames(const uint8_t *buffer, size_t bytes) = 0;
+    virtual size_t feedPCMFrames(const uint8_t *buffer, size_t bytes) = 0;
 
     virtual void pause();
 
@@ -20,6 +20,8 @@ public:
     virtual void flush();
 
     virtual size_t getBufferFillLevel();
+
+    virtual size_t getBufferCapacity() { return 0; }
 
     virtual bool isPlaying();
 

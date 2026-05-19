@@ -5,7 +5,7 @@
 
 #include "../include/adf_audio_sink.hpp"
 #include "../include/audio_pipeline_util.hpp"
-#include "BellUtils.h"
+#include <algorithm>
 #include <stdexcept>
 
 extern "C" {
@@ -13,10 +13,17 @@ extern "C" {
 #include "ringbuf.h"
 #include "i2s_stream.h"
 #include "esp_log.h"
-#include "driver/i2s.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 }
 
 namespace btspeaker {
+
+    namespace {
+        size_t ringbufFilled(ringbuf_handle_t rb) {
+            return rb ? rb_bytes_filled(rb) : 0;
+        }
+    }
 
     ADFAudioSink::ADFAudioSink() :
             pipelineRunning_(false),
@@ -28,54 +35,76 @@ namespace btspeaker {
         ESP_LOGI(TAG, "ADFAudioSink destructor called");
     }
 
-    void ADFAudioSink::feedPCMFrames(const uint8_t *buffer, size_t bytes) {
+    size_t ADFAudioSink::feedPCMFrames(const uint8_t *buffer, size_t bytes) {
         if (!initialized_ || !buffer || bytes == 0) {
-            return;
+            return 0;
         }
 
-
         size_t offset = 0;
-        const size_t chunkSize = 256;
         auto raw = audioPipeline->i2SStreamReader.get();
-        while (offset < bytes) {
-            size_t toWrite = std::min(chunkSize, bytes - offset);
+        uint32_t backoffMs = 1;
 
-            size_t free_bytes = rb_bytes_available(audio_element_get_output_ringbuf(raw));
-            if (free_bytes < toWrite) {
-                BELL_SLEEP_MS(100);
+        while (offset < bytes) {
+            size_t toWrite = std::min(kWriteChunkSize, bytes - offset);
+
+            ringbuf_handle_t rb = audio_element_get_output_ringbuf(raw);
+            size_t free_bytes = rb ? rb_bytes_available(rb) : 0;
+            if (free_bytes == 0) {
+                vTaskDelay(pdMS_TO_TICKS(backoffMs));
+                if (backoffMs < 5) {
+                    backoffMs *= 2;
+                }
                 continue;
             }
 
+            if (free_bytes < toWrite) {
+                toWrite = free_bytes;
+            }
+            backoffMs = 1;
+
             int written = raw_stream_write(raw, (char *) (buffer + offset), toWrite);
-            if (written < 0) {
+            if (written <= 0) {
                 ESP_LOGE(TAG, "[RAW STREAM] Error writing to pipeline: %d", written);
                 break;
             }
-            if ((size_t) written != toWrite) {
-                ESP_LOGW(TAG, "[RAW STREAM] Partial write: %d/%zu bytes", written, toWrite);
-            }
 
-            offset += written;
+            offset += static_cast<size_t>(written);
         }
+
+        return offset;
     }
 
     size_t ADFAudioSink::getBufferFillLevel() {
-        if (!initialized_ || !audioPipeline || !audioPipeline->i2SStreamReader) {
+        if (!initialized_ || !audioPipeline) {
             return 0;
         }
-        // Get the ring buffer handle from the raw_stream reader element
-        ringbuf_handle_t rb = audio_element_get_output_ringbuf(audioPipeline->i2SStreamReader.get());
-        if (rb) {
-            return rb_bytes_filled(rb);
+
+        size_t filled = 0;
+        if (audioPipeline->i2SStreamReader) {
+            filled += ringbufFilled(
+                    audio_element_get_output_ringbuf(audioPipeline->i2SStreamReader.get()));
         }
-        return 0;
+        if (audioPipeline->i2SStreamWriter) {
+            filled += ringbufFilled(
+                    audio_element_get_input_ringbuf(audioPipeline->i2SStreamWriter.get()));
+        }
+        return filled;
+    }
+
+    size_t ADFAudioSink::getBufferCapacity() {
+        if (!initialized_ || !audioPipeline) {
+            return 0;
+        }
+
+        size_t capacity = kRawRingBufferSize + (128 * 1024);
+        return capacity;
     }
 
     void ADFAudioSink::setupPipeline() {
         ESP_LOGI(TAG, "Setting up ADF audio pipeline for Spotify");
         raw_stream_cfg_t raw_cfg = {
                 .type = AUDIO_STREAM_READER,
-                .out_rb_size = static_cast<int>(1024 * 2048) // 2MB ring buffer
+                .out_rb_size = static_cast<int>(kRawRingBufferSize)
         };
 
         audio_element_handle_t raw_handle = raw_stream_init(&raw_cfg);
@@ -93,17 +122,23 @@ namespace btspeaker {
         ESP_LOGI(TAG, "ADF audio pipeline setup completed");
     }
 
+    void ADFAudioSink::prepare() {
+        if (!initialized_) {
+            setupPipeline();
+        }
+    }
+
     void ADFAudioSink::start() {
         if (!initialized_) {
             setupPipeline();
         }
 
-        if (audioPipeline) {
+        if (audioPipeline && !pipelineRunning_) {
             audio_pipeline_run(audioPipeline->pipeline.get());
             pipelineRunning_ = true;
             isPlaying_.store(true);
             ESP_LOGI(TAG, "ADF audio pipeline started");
-        } else {
+        } else if (!audioPipeline) {
             ESP_LOGE(TAG, "Audio pipeline not initialized");
         }
     }
@@ -142,10 +177,8 @@ namespace btspeaker {
 
         ESP_LOGI(TAG, "Flushing audio pipeline buffers");
 
-        // Reset the raw stream ring buffer
         auto raw = audioPipeline->i2SStreamReader.get();
         if (raw) {
-            // Get the ringbuf and reset it
             ringbuf_handle_t rb = audio_element_get_input_ringbuf(raw);
             if (rb) {
                 rb_reset(rb);
@@ -156,7 +189,6 @@ namespace btspeaker {
             }
         }
 
-        // Reset I2S writer buffers
         if (audioPipeline->i2SStreamWriter) {
             ringbuf_handle_t rb = audio_element_get_input_ringbuf(audioPipeline->i2SStreamWriter.get());
             if (rb) {
@@ -173,6 +205,7 @@ namespace btspeaker {
             AudioPipelineUtil::cleanupPipeline(*audioPipeline);
         }
         initialized_ = false;
+        pipelineRunning_ = false;
         ESP_LOGI(TAG, "ADF audio pipeline cleanup complete");
     }
 

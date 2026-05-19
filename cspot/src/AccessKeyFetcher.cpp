@@ -11,6 +11,7 @@
 #include "HTTPClient.h"
 #include "Logger.h"            // for CSPOT_LOG
 #include "MercurySession.h"    // for MercurySession, MercurySession::Res...
+#include "PlayPathProfiler.h"
 #include "NanoPBExtensions.h"  // for bell::nanopb::encode...
 #include "NanoPBHelper.h"      // for pbEncode and pbDecode
 #include "Packet.h"            // for cspot
@@ -67,6 +68,7 @@ void AccessKeyFetcher::updateAccessKey() {
   }
 
   keyPending = true;
+  PlayPathProfiler::mark("access_key.fetch_start");
 
   // Prepare a protobuf login request
   static LoginRequest loginRequest = LoginRequest_init_zero;
@@ -135,5 +137,6 @@ void AccessKeyFetcher::updateAccessKey() {
     retryCount--;
   } while (retryCount >= 0 && !success);
 
+  PlayPathProfiler::mark(success ? "access_key.fetch_done" : "access_key.fetch_failed");
   keyPending = false;
 }

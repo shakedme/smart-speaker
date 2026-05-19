@@ -125,20 +125,33 @@ namespace btspeaker {
                                                         int channels,
                                                         int bitsPerSample) {
         int taskPriority;
+        uint32_t outRingBufferSize;
+        int i2sBufferLen;
+        uint32_t dmaFrameNum;
 
         switch (source) {
             case AudioSource::BLUETOOTH:
-                taskPriority = 25; // Lower priority for Bluetooth
+                taskPriority = 25;
+                outRingBufferSize = 64 * 1024;
+                i2sBufferLen = 12000;
+                dmaFrameNum = 512;
                 break;
             case AudioSource::SPOTIFY:
-                taskPriority = 26; // Lower priority for Spotify
+                taskPriority = 26;
+                outRingBufferSize = 128 * 1024;
+                // IDF5 I2S stream requires buffer_len % 12 == 0 (8192 is invalid)
+                i2sBufferLen = 8196;
+                dmaFrameNum = 1024;
                 break;
             case AudioSource::VOICE_RESPONSE:
-                taskPriority = 27; // Higher priority for voice
+                taskPriority = 27;
+                outRingBufferSize = 64 * 1024;
+                i2sBufferLen = 12000;
+                dmaFrameNum = 512;
                 break;
             default:
                 ESP_LOGE(TAG, "Unknown audio source %d", static_cast<int>(source));
-                return {}; // Return empty config on error
+                return {};
         }
 
         // Create standardized I2S configuration using board.h pins
@@ -149,7 +162,7 @@ namespace btspeaker {
                         .id = static_cast<i2s_port_t>(I2S_PORT),
                         .role = I2S_ROLE_MASTER,
                         .dma_desc_num = 16,
-                        .dma_frame_num = 512,
+                        .dma_frame_num = dmaFrameNum,
                         .auto_clear = true,
                         .auto_clear_before_cb = false,
                         .allow_pd = false,
@@ -177,7 +190,7 @@ namespace btspeaker {
                 .pdm_rx_cfg = {},
                 .use_alc = false,
                 .volume = DEFAULT_VOLUME,
-                .out_rb_size = 64 * 1024,
+                .out_rb_size = static_cast<int>(outRingBufferSize),
                 .task_stack = 4096,
                 .task_core = 0,
                 .task_prio = taskPriority,
@@ -186,7 +199,7 @@ namespace btspeaker {
                 .uninstall_drv = true,
                 .need_expand = false,
                 .expand_src_bits = static_cast<i2s_data_bit_width_t>(bitsPerSample),
-                .buffer_len = 12000
+                .buffer_len = i2sBufferLen
         };
 
         ESP_LOGD(TAG, "Created I2S config for source %d: %dHz, %dch, %dbit, prio=%d",

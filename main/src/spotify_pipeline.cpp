@@ -9,6 +9,8 @@
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "esp_heap_caps.h"
+#include "esp_pthread.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "cJSON.h"
@@ -39,6 +41,10 @@ namespace btspeaker {
         constexpr int kSpotifyConnectMaxAttempts = 5;
         constexpr uint32_t kSpotifyConnectBaseBackoffMs = 500;
         constexpr uint32_t kSpotifyConnectMaxBackoffMs = 8000;
+        // Above cspot_player (prio +4) so inbound commands aren't delayed by preload.
+        constexpr int kSpotifyMainTaskPriority =
+                CONFIG_ESP32_PTHREAD_TASK_PRIO_DEFAULT + 6;
+        constexpr int kSpotifyMainTaskCore = 1;
 
         uint32_t spotifyConnectBackoffMs(int attempt) {
             uint32_t delay = kSpotifyConnectBaseBackoffMs;
@@ -108,10 +114,10 @@ namespace btspeaker {
                 "spotify_main",
                 stackSizeWords,
                 this,
-                3,
+                kSpotifyMainTaskPriority,
                 taskStack,
                 taskBuffer,
-                0
+                kSpotifyMainTaskCore
         );
         if (packetHandlerTaskHandle == nullptr) {
             ESP_LOGE(TAG, "Failed to create Spotify main task");
@@ -316,6 +322,11 @@ namespace btspeaker {
                     if (pipeline->context && pipeline->context->session) {
                         try {
                             pipeline->context->session->handlePacket();
+                            if (pipeline->deviceStateHandler) {
+                                pipeline->deviceStateHandler->tryFlushDeferredPlayerState();
+                                pipeline->deviceStateHandler->tryProcessDeferredContextResolve();
+                                pipeline->deviceStateHandler->tryCompleteDeferredReload();
+                            }
                         } catch (const std::exception &e) {
                             ESP_LOGE(TAG, "Exception processing packet: %s", e.what());
                             std::string error_msg = e.what();
@@ -423,11 +434,17 @@ namespace btspeaker {
                 ESP_LOGI(TAG, "Spotify session disconnected");
                 isRunning_ = false;
             });
-            audioSink->start();
+            audioSink->prepare();
             ESP_LOGI(TAG, "Creating ESP player");
             espPlayer = std::make_unique<EspPlayer>(audioSink, deviceStateHandler);
+            audioSink->start();
+            audioSink->pause();
             ESP_LOGI(TAG, "Starting session task");
             context->session->startTask();
+            // Ensure modem sleep stays off while Spotify Connect is active.
+            if (esp_wifi_set_ps(WIFI_PS_NONE) == ESP_OK) {
+                ESP_LOGI(TAG, "WiFi power save disabled for Spotify session");
+            }
             ESP_LOGI(TAG, "CSpot components initialized successfully");
             return ESP_OK;
         } catch (const std::exception &e) {

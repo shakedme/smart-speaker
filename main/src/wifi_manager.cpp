@@ -220,6 +220,7 @@ namespace btspeaker {
         if (eventBase == WIFI_EVENT && eventId == WIFI_EVENT_STA_START) {
             ESP_LOGI(self->TAG, "WiFi started");
         } else if (eventBase == WIFI_EVENT && eventId == WIFI_EVENT_STA_DISCONNECTED) {
+            esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
             if (self->retryCount < MAX_RETRY) {
                 esp_wifi_connect();
                 self->retryCount++;
@@ -236,6 +237,14 @@ namespace btspeaker {
         } else if (eventBase == IP_EVENT && eventId == IP_EVENT_STA_GOT_IP) {
             auto *event = (ip_event_got_ip_t *) eventData;
             ESP_LOGI(self->TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+            // Modem sleep delays inbound TCP (Spotify Connect commands) by seconds.
+            const esp_err_t psErr = esp_wifi_set_ps(WIFI_PS_NONE);
+            if (psErr != ESP_OK) {
+                ESP_LOGW(self->TAG, "Failed to disable WiFi power save: %s",
+                         esp_err_to_name(psErr));
+            } else {
+                ESP_LOGI(self->TAG, "WiFi power save disabled for low-latency streaming");
+            }
             self->retryCount = 0;
             xEventGroupSetBits(self->wifiEventGroup, WIFI_MGR_CONNECTED_BIT);
             self->status = Status::CONNECTED;

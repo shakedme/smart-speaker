@@ -1,17 +1,23 @@
 #include "CDNAudioFile.h"
 
 #include <string.h>          // for memcpy
+#include <algorithm>         // for std::min
 #include <functional>        // for __base
 #include <initializer_list>  // for initializer_list
 #include <map>               // for operator!=, operator==
 #include <string_view>       // for string_view
 #include <type_traits>       // for remove_extent_t
 
+#ifdef ESP_PLATFORM
+#include <esp_log.h>
+#endif
+
 #include "AccessKeyFetcher.h"  // for AccessKeyFetcher
 #include "BellLogger.h"        // for AbstractLogger
 #include "Crypto.h"
 #include "Logger.h"            // for CSPOT_LOG
 #include "Packet.h"            // for cspot
+#include "PlayPathProfiler.h"
 #include "SocketStream.h"      // for SocketStream
 #include "Utils.h"             // for bigNumAdd, bytesToHexString, string...
 #include "WrappedSemaphore.h"  // for WrappedSemaphore
@@ -28,6 +34,7 @@ CDNAudioFile::CDNAudioFile(const std::string& cdnUrl,
                            const std::vector<uint8_t>& audioKey)
     : cdnUrl(cdnUrl), audioKey(audioKey) {
   this->crypto = std::make_unique<Crypto>();
+  this->prefetchBuffer = std::vector<uint8_t>(HTTP_BUFFER_SIZE);
 }
 
 size_t CDNAudioFile::getPosition() {
@@ -37,6 +44,8 @@ size_t CDNAudioFile::getPosition() {
 void CDNAudioFile::seek(size_t newPos) {
   this->enableRequestMargin = true;
   this->position = newPos;
+  this->prefetchPosition = SIZE_MAX;
+  this->prefetchCapacity = 0;
 }
 
 #ifndef CONFIG_BELL_NOCODEC
@@ -44,41 +53,108 @@ void CDNAudioFile::seek(size_t newPos) {
   * @brief Opens connection to the provided cdn url, and fetches track metadata.
   */
 void CDNAudioFile::openStream() {
-  CSPOT_LOG(info, "Opening HTTP stream to %s", this->cdnUrl.c_str());
-
-  // Open connection, read first 128 bytes
-  this->httpConnection = bell::HTTPClient::get(
-      this->cdnUrl,
-      {bell::HTTPClient::RangeHeader::range(0, OPUS_HEADER_SIZE - 1)}, 20);
-  if (!httpConnection->stream().isOpen()) {
-    this->openStream();
+  if (streamOpen_) {
     return;
   }
+  PlayPathProfiler::mark("cdn.open_stream_begin");
+  for (int attempt = 0; attempt < 3 && !streamOpen_; ++attempt) {
+    if (openStreamAttempt()) {
+      break;
+    }
+    httpConnection.reset();
+  }
+  if (!streamOpen_) {
+    PlayPathProfiler::mark("cdn.open_stream_failed");
+    CSPOT_LOG(error, "Failed to open CDN stream after retries");
+  }
+}
 
-  this->httpConnection->stream().read((char*)header.data(), OPUS_HEADER_SIZE);
+bool CDNAudioFile::openStreamAttempt() {
+  CSPOT_LOG(info, "Opening HTTP stream to %s", this->cdnUrl.c_str());
+
+  auto connection = bell::HTTPClient::get(
+      this->cdnUrl,
+      {bell::HTTPClient::RangeHeader::range(0, OPUS_HEADER_SIZE - 1)}, 20);
+  if (!connection || !connection->stream().isOpen()) {
+    return false;
+  }
+  httpConnection.reset();
+  httpConnection = std::move(connection);
+
+  auto& stream = httpConnection->stream();
+  stream.read((char*)header.data(), OPUS_HEADER_SIZE);
+  if (stream.fail() || stream.gcount() != OPUS_HEADER_SIZE) {
+    return false;
+  }
+
   this->totalFileSize =
       this->httpConnection->totalLength() - SPOTIFY_OPUS_HEADER;
 
   this->decrypt(header.data(), OPUS_HEADER_SIZE, 0);
 
-  // Location must be dividable by 16
   size_t footerStartLocation =
       (this->totalFileSize - OPUS_FOOTER_PREFFERED + SPOTIFY_OPUS_HEADER) -
       (this->totalFileSize - OPUS_FOOTER_PREFFERED + SPOTIFY_OPUS_HEADER) % 16;
 
   this->footer = std::vector<uint8_t>(
       this->totalFileSize - footerStartLocation + SPOTIFY_OPUS_HEADER);
-  this->httpConnection->get(
-      cdnUrl, {bell::HTTPClient::RangeHeader::last(footer.size())});
+  if (!this->httpConnection->get(
+          cdnUrl, {bell::HTTPClient::RangeHeader::last(footer.size())})) {
+    return false;
+  }
 
-  this->httpConnection->stream().read((char*)footer.data(),
-                                      this->footer.size());
+  stream.read((char*)footer.data(), this->footer.size());
+  if (stream.fail() ||
+      static_cast<size_t>(stream.gcount()) != this->footer.size()) {
+    return false;
+  }
 
   this->decrypt(footer.data(), footer.size(), footerStartLocation);
   CSPOT_LOG(info, "Header and footer bytes received");
+  PlayPathProfiler::mark("cdn.open_stream_done");
+  streamOpen_ = true;
   this->position = 0;
   this->lastRequestPosition = 0;
   this->lastRequestCapacity = 0;
+  this->prefetchPosition = SIZE_MAX;
+  this->prefetchCapacity = 0;
+  return true;
+}
+
+void CDNAudioFile::prefetchNextSegment() {
+  if (prefetchPosition != SIZE_MAX) {
+    return;
+  }
+
+  const size_t remaining =
+      (lastRequestPosition + lastRequestCapacity) - position;
+  if (remaining > kPrefetchLowWaterBytes) {
+    return;
+  }
+
+  size_t nextPos = lastRequestPosition + lastRequestCapacity;
+  nextPos -= nextPos % 16;
+  if (nextPos >= totalFileSize) {
+    return;
+  }
+
+  const size_t endPosition =
+      std::min(nextPos + HTTP_BUFFER_SIZE - 1, totalFileSize + SPOTIFY_OPUS_HEADER - 1);
+  if (!this->httpConnection->get(
+          cdnUrl,
+          {bell::HTTPClient::RangeHeader::range(nextPos, endPosition)})) {
+    return;
+  }
+
+  prefetchPosition = nextPos;
+  prefetchCapacity = this->httpConnection->contentLength();
+  if (prefetchCapacity > prefetchBuffer.size()) {
+    prefetchBuffer.resize(prefetchCapacity);
+  }
+
+  this->httpConnection->stream().read((char*)prefetchBuffer.data(),
+                                        prefetchCapacity);
+  this->decrypt(prefetchBuffer.data(), prefetchCapacity, prefetchPosition);
 }
 
 size_t CDNAudioFile::readBytes(uint8_t* dst, size_t bytes) {
@@ -128,6 +204,7 @@ size_t CDNAudioFile::readBytes(uint8_t* dst, size_t bytes) {
     memcpy(dst, this->httpBuffer.data() + offsetPosition - lastRequestPosition,
            toRead);
     position += toRead;
+    prefetchNextSegment();
 
     return toRead;
   } else {
@@ -136,6 +213,18 @@ size_t CDNAudioFile::readBytes(uint8_t* dst, size_t bytes) {
       requestPosition = (offsetPosition - SEEK_MARGIN_SIZE) -
                         ((offsetPosition - SEEK_MARGIN_SIZE) % 16);
       this->enableRequestMargin = false;
+    }
+
+    if (prefetchPosition != SIZE_MAX && requestPosition == prefetchPosition) {
+      httpBuffer.swap(prefetchBuffer);
+      if (prefetchBuffer.size() < HTTP_BUFFER_SIZE) {
+        prefetchBuffer.resize(HTTP_BUFFER_SIZE);
+      }
+      lastRequestPosition = prefetchPosition;
+      lastRequestCapacity = prefetchCapacity;
+      prefetchPosition = SIZE_MAX;
+      prefetchCapacity = 0;
+      return readBytes(dst, bytes);
     }
 
     this->httpConnection->get(
@@ -163,25 +252,43 @@ size_t CDNAudioFile::readBytes(uint8_t* dst, size_t bytes) {
  * @return Pointer to the beginning of the HTTP buffer where the track header data is stored.
  */
 uint8_t* CDNAudioFile::openStream(ssize_t& header_size) {
-
-  // Open connection, fill first buffer
-  this->httpConnection = bell::HTTPClient::get(
-      this->cdnUrl,
-      {bell::HTTPClient::RangeHeader::range(0, HTTP_BUFFER_SIZE - 1)}, 20);
-  if (!httpConnection->stream().isOpen()) {
-    return this->openStream(header_size);
+  if (streamOpen_) {
+    header_size = static_cast<ssize_t>(this->position);
+    return &httpBuffer[0];
   }
-  this->lastRequestPosition = 0;
-  this->lastRequestCapacity = this->httpConnection->contentLength();
-  this->totalFileSize = this->httpConnection->totalLength();
+  PlayPathProfiler::mark("cdn.open_stream_begin");
 
-  this->httpConnection->stream().read((char*)this->httpBuffer.data(),
-                                      lastRequestCapacity);
-  this->decrypt(this->httpBuffer.data(), lastRequestCapacity,
-                this->lastRequestPosition);
-  this->position = getHeader();
-  header_size = this->position;
-  return &httpBuffer[0];
+  for (int attempt = 0; attempt < 3 && !streamOpen_; ++attempt) {
+    auto connection = bell::HTTPClient::get(
+        this->cdnUrl,
+        {bell::HTTPClient::RangeHeader::range(0, HTTP_BUFFER_SIZE - 1)}, 20);
+    if (!connection || !connection->stream().isOpen()) {
+      continue;
+    }
+    httpConnection.reset();
+    httpConnection = std::move(connection);
+    auto& stream = httpConnection->stream();
+    this->lastRequestPosition = 0;
+    this->lastRequestCapacity = this->httpConnection->contentLength();
+    this->totalFileSize = this->httpConnection->totalLength();
+
+    stream.read((char*)this->httpBuffer.data(), lastRequestCapacity);
+    if (stream.fail() ||
+        static_cast<size_t>(stream.gcount()) != lastRequestCapacity) {
+      continue;
+    }
+    this->decrypt(this->httpBuffer.data(), lastRequestCapacity,
+                  this->lastRequestPosition);
+    this->position = getHeader();
+    header_size = this->position;
+    PlayPathProfiler::mark("cdn.open_stream_done");
+    streamOpen_ = true;
+    return &httpBuffer[0];
+  }
+
+  PlayPathProfiler::mark("cdn.open_stream_failed");
+  header_size = -1;
+  return nullptr;
 }
 
 /**

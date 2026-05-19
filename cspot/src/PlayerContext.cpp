@@ -1,5 +1,7 @@
 #include "PlayerContext.h"
 #include <cstring>
+#include <cstdio>
+#include <string>
 #include <utility>
 #include <vector>
 #include "MercurySession.h"
@@ -7,6 +9,7 @@
 
 #include "BellLogger.h"  // for AbstractLogger
 #include "Logger.h"  // for CSPOT_LOG
+#include "PlayPathProfiler.h"
 #ifdef ESP_PLATFORM
 #include "esp_log.h"
 #endif
@@ -408,6 +411,231 @@ uint8_t PlayerContext::jsonToTracklist(
   return copiedTracks;
 }
 
+static void buildFastPlayAlternativeIndex(
+    std::vector<uint32_t>& alternativeIndex,
+    nlohmann::json::value_type& jsonTracks,
+    ProvidedTrack& headTrack) {
+  alternativeIndex.clear();
+  alternativeIndex.reserve(jsonTracks.size());
+  for (size_t i = 0; i < jsonTracks.size(); ++i) {
+    alternativeIndex.push_back(static_cast<uint32_t>(i));
+    if (headTrack.uri != nullptr && jsonTracks.at(i).contains("uri") &&
+        jsonTracks.at(i)["uri"].get<std::string>() == headTrack.uri) {
+      headTrack.original_index = static_cast<uint32_t>(i);
+    }
+  }
+}
+
+bool PlayerContext::applyContextResponsePayload(
+    const std::vector<uint8_t>& payload,
+    const std::vector<std::pair<std::string, std::string>>& metadata_map,
+    void (*responseFunction)(void*), bool changed_state,
+    bool trackIsPartOfContext) {
+  auto jsonResult = nlohmann::json::parse(payload);
+  uint8_t pageIndex = 0;
+  uint32_t offset = 0;
+  bool smartShuffledTrack = false, foundTrack = false;
+  const bool fastHeadMerge =
+      trackIsPartOfContext && tracks->size() == 1 && tracks->at(0).uri;
+  std::vector<ProvidedTrack>::iterator trackref = tracks->begin();
+  if (tracks->size() && !fastHeadMerge) {
+    trackref = tracks->end() - 1;
+    while (trackref != tracks->begin()) {
+      smartShuffledTrack = false;
+      if (trackref->removed == NULL) {
+        if (strcmp(trackref->provider, "context") == 0) {
+          for (int i = 0; i < trackref->full_metadata_count; i++) {
+            if (strcmp(trackref->metadata[i].key, "provider") == 0 &&
+                !playerState->options.context_enhancement_count) {
+              smartShuffledTrack = true;
+              break;
+            }
+          }
+          break;
+        }
+      }
+      CSPOT_LOG(debug, "trackref: %s", trackref->uri);
+      trackref--;
+    }
+    if (trackref->removed != NULL) {
+      if (tracks->size() == 1)
+        responseFunction((void*)radio_offset);
+      else
+        autoplayQuery(metadata_map, responseFunction);
+      return true;
+    }
+    CSPOT_LOG(debug, "Last track in tracklist: %s", trackref->uri);
+    if (!smartShuffledTrack ||
+        playerState->options.context_enhancement_count) {
+      for (pageIndex = 0; pageIndex < jsonResult["pages"].size(); pageIndex++) {
+        offset = 0;
+        for (auto track : jsonResult["pages"][pageIndex]["tracks"]) {
+          if (strcmp(track["uri"].get<std::string>().c_str(), trackref->uri) ==
+              0) {
+            foundTrack = true;
+            break;
+          }
+          if (foundTrack)
+            break;
+          offset++;
+        }
+        if (foundTrack)
+          break;
+      }
+    }
+  }
+  if (!foundTrack) {
+    pageIndex = 0;
+    offset = 0;
+  }
+  CSPOT_LOG(debug, "Context at page %i, offset %i", pageIndex, offset);
+  if (changed_state) {
+    if (fastHeadMerge && !playerState->options.shuffling_context) {
+      buildFastPlayAlternativeIndex(
+          alternative_index, jsonResult["pages"][pageIndex]["tracks"],
+          tracks->at(0));
+    } else {
+      createIndexBasedOnTracklist(
+          tracks, jsonResult["pages"][pageIndex]["tracks"],
+          playerState->options.shuffling_context, pageIndex);
+
+      if (playerState->options.shuffling_context && tracks->size()) {
+        trackref = tracks->begin();
+        while (trackref != tracks->end() && trackref->removed != NULL) {
+          trackref++;
+        }
+        if (trackref != tracks->end() &&
+            alternative_index.size() >
+                static_cast<size_t>(trackref - tracks->begin()) &&
+            alternative_index[trackref - tracks->begin()] != offset) {
+          for (auto& index_ : alternative_index) {
+            if (index_ == offset) {
+              index_ = alternative_index[trackref - tracks->begin()];
+              alternative_index[trackref - tracks->begin()] = offset;
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (*index > 5) {
+    cspot::TrackReference::deleteTracksInRange(tracks, 0, *index - 5);
+    *index = 4;
+  }
+  CSPOT_LOG(debug,
+            "Current tracklist size: %i, loading tracklist from page %i, offset %i",
+            tracks->size(), pageIndex, offset);
+
+  uint8_t tracksLoaded = jsonToTracklist(
+      tracks, metadata_map, jsonResult["pages"][pageIndex]["tracks"], "context",
+      offset, pageIndex, playerState->options.shuffling_context, fastHeadMerge);
+  if (tracksLoaded >= 1) {
+#ifdef ESP_PLATFORM
+    ESP_LOGI("PlayerContext", "context-resolve loaded %u track(s), queueing",
+             (unsigned) tracksLoaded);
+#endif
+    char detail[32];
+    snprintf(detail, sizeof(detail), "tracks=%u", (unsigned) tracksLoaded);
+    PlayPathProfiler::mark("context_resolve.queueing", detail);
+    responseFunction(NULL);
+    return true;
+  }
+  if (playerState->options.repeating_context) {
+    jsonToTracklist(tracks, metadata_map,
+                    jsonResult["pages"][pageIndex]["tracks"], "context", 0,
+                    pageIndex, playerState->options.shuffling_context);
+    return true;
+  }
+  autoplayQuery(metadata_map, responseFunction);
+  return true;
+}
+
+bool PlayerContext::processDeferredContextResolve() {
+  DeferredContextResolve work;
+  {
+    std::scoped_lock lock(deferredContextMutex_);
+    if (!hasDeferredContext_) {
+      return false;
+    }
+    work = std::move(deferredContext_);
+    hasDeferredContext_ = false;
+  }
+
+  PlayPathProfiler::mark("context_resolve.deferred_parse_start");
+  if (work.payload.empty()) {
+    return true;
+  }
+
+  applyContextResponsePayload(work.payload, work.metadata_map,
+                              work.responseFunction, work.changed_state,
+                              work.trackIsPartOfContext);
+  return true;
+}
+
+void PlayerContext::cancelDeferredContextResolve() {
+  std::scoped_lock lock(deferredContextMutex_);
+  if (!hasDeferredContext_) {
+    return;
+  }
+  deferredContext_.payload.clear();
+  deferredContext_.metadata_map.clear();
+  deferredContext_.responseFunction = nullptr;
+  hasDeferredContext_ = false;
+  PlayPathProfiler::mark("play.deferred_context_cancelled");
+}
+
+bool PlayerContext::queueDeferredEmbeddedPages(
+    const std::vector<uint8_t>& rawPlayPayload, size_t pagesArrayStart,
+    size_t afterPagesArray,
+    std::vector<std::pair<std::string, std::string>> metadata_map,
+    void (*responseFunction)(void*), bool changed_state,
+    bool trackIsPartOfContext) {
+  if (pagesArrayStart >= rawPlayPayload.size() ||
+      afterPagesArray <= pagesArrayStart ||
+      afterPagesArray > rawPlayPayload.size()) {
+#ifdef ESP_PLATFORM
+    ESP_LOGW("PlayerContext",
+             "queueDeferredEmbeddedPages: invalid pages span [%u, %u) size=%u",
+             (unsigned) pagesArrayStart, (unsigned) afterPagesArray,
+             (unsigned) rawPlayPayload.size());
+#endif
+    return false;
+  }
+
+  static const char prefix[] = "{\"pages\":";
+  std::vector<uint8_t> payload;
+  payload.reserve(sizeof(prefix) - 1 + (afterPagesArray - pagesArrayStart) + 1);
+  payload.insert(payload.end(), prefix, prefix + sizeof(prefix) - 1);
+  payload.insert(payload.end(),
+                 rawPlayPayload.begin() +
+                     static_cast<std::ptrdiff_t>(pagesArrayStart),
+                 rawPlayPayload.begin() +
+                     static_cast<std::ptrdiff_t>(afterPagesArray));
+  payload.push_back('}');
+
+#ifdef ESP_PLATFORM
+  ESP_LOGI("PlayerContext",
+           "queueDeferredEmbeddedPages: pages_bytes=%u payload_bytes=%u",
+           (unsigned) (afterPagesArray - pagesArrayStart),
+           (unsigned) payload.size());
+#endif
+  PlayPathProfiler::mark("play.embedded_pages_queued",
+                         std::to_string(payload.size()).c_str());
+
+  {
+    std::scoped_lock lock(deferredContextMutex_);
+    deferredContext_.payload = std::move(payload);
+    deferredContext_.metadata_map = std::move(metadata_map);
+    deferredContext_.responseFunction = responseFunction;
+    deferredContext_.changed_state = changed_state;
+    deferredContext_.trackIsPartOfContext = trackIsPartOfContext;
+    hasDeferredContext_ = true;
+  }
+  return true;
+}
+
 void PlayerContext::resolveTracklist(
     std::vector<std::pair<std::string, std::string>> metadata_map,
     void (*responseFunction)(void*), bool changed_state,
@@ -452,124 +680,36 @@ void PlayerContext::resolveTracklist(
   else
     requestUrl = string_format(requestUrl, playerState->context_uri);
   CSPOT_LOG(debug, "Resolve context, url: %s", &requestUrl[0]);
+  PlayPathProfiler::mark("context_resolve.request", requestUrl.c_str());
 
-  auto responseHandler = [this, metadata_map, responseFunction,
-                          changed_state](const MercurySession::Response &res) {
-    if (res.fail || !res.parts.size())
+  auto responseHandler = [this, metadata_map, responseFunction, changed_state,
+                          trackIsPartOfContext](const MercurySession::Response &res) {
+    if (res.fail || !res.parts.size()) {
+      PlayPathProfiler::mark("context_resolve.response_empty");
       return responseFunction((void*)radio_offset);
-    if (!res.parts[0].size())
+    }
+    if (!res.parts[0].size()) {
+      PlayPathProfiler::mark("context_resolve.response_empty");
       return responseFunction((void*)radio_offset);
-    auto jsonResult = nlohmann::json::parse(res.parts[0]);
-    uint8_t pageIndex = 0;
-    uint32_t offset = 0;
-    bool smartShuffledTrack = false, foundTrack = false;
-    std::vector<ProvidedTrack>::iterator trackref = tracks->begin();
-    if (tracks->size()) {
-      // do all the look up magic before deleting tracks
-      trackref = tracks->end() - 1;
-      //if last track in tracklist was a queued track/delimiter, try to look for a normal track as lookup reference
-      while (trackref != tracks->begin()) {
-        smartShuffledTrack = false;
-        if (trackref->removed == NULL) {  // is not a delimiter
-          if (strcmp(trackref->provider, "context") == 0) {
-            for (int i = 0; i < trackref->full_metadata_count; i++) {
-              if (strcmp(trackref->metadata[i].key, "provider") == 0 &&
-                  !playerState->options
-                       .context_enhancement_count) {  //was a smart_shuffle-track, but smart_shuffle is no more
-                smartShuffledTrack = true;
-                break;
-              }
-            }
-            break;
-          }
-        }
-        CSPOT_LOG(debug, "trackref: %s", trackref->uri);
-        trackref--;
-      }
-      if (trackref->removed != NULL) {
-        if (tracks->size() == 1)
-          return responseFunction((void*)radio_offset);
-        else
-          return autoplayQuery(metadata_map, responseFunction);
-      }
-      CSPOT_LOG(debug, "Last track in tracklist: %s", trackref->uri);
-      if (!smartShuffledTrack ||
-          playerState->options.context_enhancement_count) {
-        for (pageIndex = 0; pageIndex < jsonResult["pages"].size();
-             pageIndex++) {
-          offset = 0;
-          for (auto track : jsonResult["pages"][pageIndex]["tracks"]) {
-            if (strcmp(track["uri"].get<std::string>().c_str(),
-                       trackref->uri) == 0) {
-              foundTrack = true;
-              break;
-            }
-            //??if(foundTrack) break;
-            if (foundTrack)
-              break;
-            offset++;
-          }
-          if (foundTrack)
-            break;
-        }
-        //if trackreference was found
-      }
     }
-    if (!foundTrack) {
-      pageIndex = 0;
-      offset = 0;
-    }
-    CSPOT_LOG(debug, "Context at page %i, offset %i", pageIndex, offset);
-    //delete tracks ?
-    //if tracklist is in a new state, create index based on tracklist
-    if (changed_state) {
-      createIndexBasedOnTracklist(
-          tracks, jsonResult["pages"][pageIndex]["tracks"],
-          playerState->options.shuffling_context, pageIndex);
+    PlayPathProfiler::mark("context_resolve.response_received");
 
-      //if smart_shuffle is tur
-      if (playerState->options.shuffling_context) {
-        if (alternative_index[trackref - tracks->begin()] != offset) {
-          for (auto& index_ : alternative_index)
-            if (index_ == offset) {
-              index_ = alternative_index[trackref - tracks->begin()];
-              alternative_index[trackref - tracks->begin()] = offset;
-              break;
-            }
-        }
-      }
-    }
-
-    // remove played tracks, keep 5 tracks in memory
-    if (*index > 5) {
-      cspot::TrackReference::deleteTracksInRange(tracks, 0, *index - 5);
-      *index = 4;
-    }
-    CSPOT_LOG(
-        debug,
-        "Current tracklist size: %i, loading tracklist from page %i, offset %i",
-        tracks->size(), pageIndex, offset);
-
-    uint8_t tracksLoaded = jsonToTracklist(
-        tracks, metadata_map, jsonResult["pages"][pageIndex]["tracks"],
-        "context", offset, pageIndex, playerState->options.shuffling_context,
-        foundTrack);
-    // jsonToTracklist returns the number of tracks copied this round. The old
-    // check `> 1` skipped the common case of exactly one song in the context,
-    // so reloadTrackList(NULL) never ran, preloadedTracks stayed empty, and
-    // no audio played after transfer.
-    if (tracksLoaded >= 1) {
 #ifdef ESP_PLATFORM
-      ESP_LOGI("PlayerContext", "context-resolve loaded %u track(s), queueing",
-               (unsigned) tracksLoaded);
+    {
+      std::scoped_lock lock(deferredContextMutex_);
+      deferredContext_.payload = res.parts[0];
+      deferredContext_.metadata_map = metadata_map;
+      deferredContext_.responseFunction = responseFunction;
+      deferredContext_.changed_state = changed_state;
+      deferredContext_.trackIsPartOfContext = trackIsPartOfContext;
+      hasDeferredContext_ = true;
+      PlayPathProfiler::mark("context_resolve.deferred_queued");
+      return;
+    }
+#else
+    applyContextResponsePayload(res.parts[0], metadata_map, responseFunction,
+                                changed_state, trackIsPartOfContext);
 #endif
-      return responseFunction(NULL);
-    } else if (playerState->options.repeating_context) {
-      jsonToTracklist(tracks, metadata_map,
-                      jsonResult["pages"][pageIndex]["tracks"], "context", 0,
-                      pageIndex, playerState->options.shuffling_context);
-    } else
-      return autoplayQuery(metadata_map, responseFunction);
   };
   ctx->session->execute(MercurySession::RequestType::GET, requestUrl,
                         responseHandler);

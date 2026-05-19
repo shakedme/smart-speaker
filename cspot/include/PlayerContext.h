@@ -37,6 +37,21 @@ struct PlayerContext {
       std::vector<std::pair<std::string, std::string>> metadata_map,
       void (*responseFunction)(void*), bool state_changed = false,
       bool trackIsPartOfContext = false);
+  bool processDeferredContextResolve();
+  void cancelDeferredContextResolve();
+
+  bool queueDeferredEmbeddedPages(
+      const std::vector<uint8_t>& rawPlayPayload, size_t pagesArrayStart,
+      size_t afterPagesArray,
+      std::vector<std::pair<std::string, std::string>> metadata_map,
+      void (*responseFunction)(void*), bool changed_state,
+      bool trackIsPartOfContext);
+
+  bool applyContextResponsePayload(
+      const std::vector<uint8_t>& payload,
+      const std::vector<std::pair<std::string, std::string>>& metadata_map,
+      void (*responseFunction)(void*), bool changed_state,
+      bool trackIsPartOfContext);
   uint8_t jsonToTracklist(
       std::vector<ProvidedTrack>* tracks,
       std::vector<std::pair<std::string, std::string>> metadata_map,
@@ -58,6 +73,18 @@ struct PlayerContext {
   std::vector<uint32_t> alternative_index;
   char* next_page_url = NULL;
   std::string context_uri;
+
+  struct DeferredContextResolve {
+    std::vector<uint8_t> payload;
+    std::vector<std::pair<std::string, std::string>> metadata_map;
+    void (*responseFunction)(void*) = nullptr;
+    bool changed_state = false;
+    bool trackIsPartOfContext = false;
+  };
+  std::mutex deferredContextMutex_;
+  DeferredContextResolve deferredContext_;
+  bool hasDeferredContext_ = false;
+
   ~PlayerContext() {
     if (next_page_url != NULL)
       free(next_page_url);

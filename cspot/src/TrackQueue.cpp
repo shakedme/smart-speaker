@@ -2,6 +2,7 @@
 #include <pb_decode.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -12,9 +13,12 @@
 #include "BellTask.h"
 #include "BellUtils.h"  // for BELL_SLEEP_MS
 #include "CDNAudioFile.h"
+#include "CdnUrlCache.h"
 #include "CSpotContext.h"
+#include "DeviceStateHandler.h"
 #include "HTTPClient.h"
 #include "Logger.h"
+#include "PlayPathProfiler.h"
 #include "Utils.h"
 #include "WrappedSemaphore.h"
 #ifdef BELL_ONLY_CJSON
@@ -22,6 +26,9 @@
 #else
 #include "nlohmann/json.hpp"      // for basic_json<>::object_t, basic_json
 #include "nlohmann/json_fwd.hpp"  // for json
+#endif
+#ifdef ESP_PLATFORM
+#include <esp_log.h>
 #endif
 #include "protobuf/metadata.pb.h"
 
@@ -250,6 +257,8 @@ QueuedTrack::QueuedTrack(
   if (!strstr(ref.uri, "spotify:delimiter")) {
     this->gid = base62Decode(ref.uri);
     state = State::QUEUED;
+    PlayPathProfiler::mark("track.queued",
+                             PlayPathProfiler::shortTrackRef(ref.uri));
   } else {
     state = State::FAILED;
     playableSemaphore->give();
@@ -277,7 +286,55 @@ std::shared_ptr<cspot::CDNAudioFile> QueuedTrack::getAudioFile() {
     return nullptr;
   }
 
+  if (warmedAudioFile) {
+    return warmedAudioFile;
+  }
+
   return std::make_shared<cspot::CDNAudioFile>(cdnUrl, audioKey);
+}
+
+void QueuedTrack::warmCdnStream() {
+  std::lock_guard<std::mutex> lock(warmMutex_);
+  if (state != State::READY || streamOpened || cdnUrl.empty()) {
+    return;
+  }
+
+  try {
+    warmedAudioFile = std::make_shared<cspot::CDNAudioFile>(cdnUrl, audioKey);
+    PlayPathProfiler::mark("track.cdn_warm_begin",
+                           PlayPathProfiler::shortTrackRef(ref.uri));
+#ifndef CONFIG_BELL_NOCODEC
+    warmedAudioFile->openStream();
+#else
+    ssize_t headerSize = 0;
+    if (warmedAudioFile->openStream(headerSize) == nullptr) {
+      warmedAudioFile.reset();
+      streamOpened = false;
+      ESP_LOGW("TrackQueue", "CDN warm failed for %s",
+               PlayPathProfiler::shortTrackRef(ref.uri));
+      return;
+    }
+#endif
+    streamOpened = warmedAudioFile->isStreamOpen();
+    if (!streamOpened) {
+      warmedAudioFile.reset();
+      ESP_LOGW("TrackQueue", "CDN warm failed for %s",
+               PlayPathProfiler::shortTrackRef(ref.uri));
+      return;
+    }
+    PlayPathProfiler::mark("track.cdn_warm_done",
+                           PlayPathProfiler::shortTrackRef(ref.uri));
+  } catch (const std::exception& ex) {
+    warmedAudioFile.reset();
+    streamOpened = false;
+    ESP_LOGW("TrackQueue", "CDN warm exception for %s: %s",
+             PlayPathProfiler::shortTrackRef(ref.uri), ex.what());
+  } catch (...) {
+    warmedAudioFile.reset();
+    streamOpened = false;
+    ESP_LOGW("TrackQueue", "CDN warm unknown exception for %s",
+             PlayPathProfiler::shortTrackRef(ref.uri));
+  }
 }
 
 void QueuedTrack::stepParseMetadata(Track* pbTrack, Episode* pbEpisode) {
@@ -289,6 +346,8 @@ void QueuedTrack::stepParseMetadata(Track* pbTrack, Episode* pbEpisode) {
 
   if (gid.first == SpotifyFileType::TRACK) {
     ESP_LOGI("TrackQueue", "Track name: %s", pbTrack->name);
+    PlayPathProfiler::mark("track.metadata_done",
+                             PlayPathProfiler::shortTrackRef(ref.uri));
 //    ESP_LOGI("TrackQueue", "Track duration: %d", pbTrack->duration);
 
     // Check if we can play the track, if not, try alternatives
@@ -366,6 +425,8 @@ void QueuedTrack::stepParseMetadata(Track* pbTrack, Episode* pbEpisode) {
 void QueuedTrack::stepLoadAudioFile(
     std::mutex& trackListMutex,
     std::shared_ptr<bell::WrappedSemaphore> updateSemaphore) {
+  PlayPathProfiler::mark("track.audio_key_request",
+                         PlayPathProfiler::shortTrackRef(ref.uri));
   // Request audio key
   this->pendingAudioKeyRequest = ctx->session->requestAudioKey(
       trackId, fileId,
@@ -375,6 +436,8 @@ void QueuedTrack::stepLoadAudioFile(
 
         if (success) {
           ESP_LOGD("TrackQueue", "Got audio key");
+          PlayPathProfiler::mark("track.audio_key_done",
+                                 PlayPathProfiler::shortTrackRef(this->ref.uri));
           this->audioKey =
               std::vector<uint8_t>(audioKey.begin() + 4, audioKey.end());
 
@@ -402,10 +465,14 @@ void QueuedTrack::stepLoadAudioFile(
 void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
   if (accessKey.size() == 0) {
     ESP_LOGD("TrackQueue", "Waiting for access key...");
+    PlayPathProfiler::mark("track.cdn_waiting_access_key",
+                           PlayPathProfiler::shortTrackRef(ref.uri));
     return;
   }
 
   // Request CDN URL with retry logic
+  PlayPathProfiler::mark("track.cdn_request",
+                         PlayPathProfiler::shortTrackRef(ref.uri));
   ESP_LOGD("TrackQueue", "Received access key, fetching CDN URL... (attempt %d/5)", retries + 1);
 
   // Check retry limit
@@ -419,7 +486,13 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
 
   try {
     const std::string fileIdHex = bytesToHexString(fileId);
-    const std::vector<std::string> requestUrls = {
+    std::string lastError;
+    if (CdnUrlCache::lookup(fileIdHex, cdnUrl)) {
+      state = State::READY;
+      retries = 0;
+      ESP_LOGD("TrackQueue", "CDN URL cache hit for file %s", fileIdHex.c_str());
+    } else {
+      const std::vector<std::string> requestUrls = {
         string_format(
             "https://spclient.wg.spotify.com/storage-resolve/files/audio/"
             "interactive/%s?product=0&alt=json",
@@ -428,10 +501,9 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
             "https://api.spotify.com/v1/storage-resolve/files/audio/"
             "interactive/%s?alt=json",
             fileIdHex.c_str()),
-    };
+      };
 
-    std::string lastError;
-    for (const auto& requestUrl : requestUrls) {
+      for (const auto& requestUrl : requestUrls) {
       ESP_LOGD("TrackQueue", "Requesting CDN URL from: %s", requestUrl.c_str());
 
       auto req = bell::HTTPClient::get(
@@ -480,18 +552,24 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
       lastError = "No CDN URL found in storage-resolve response: " +
                   responsePreview(result);
       ESP_LOGW("TrackQueue", "%s", lastError.c_str());
+      }
     }
 
     if (cdnUrl.empty()) {
-      throw std::runtime_error(lastError.empty() ? "Empty CDN URL received"
-                                                 : lastError.c_str());
+      throw std::runtime_error(lastError.empty() ? std::string("Empty CDN URL received")
+                                                 : lastError);
     }
 
     state = State::READY;
     retries = 0; // Reset retry count on success
+    CdnUrlCache::store(bytesToHexString(fileId), cdnUrl);
+    PlayPathProfiler::mark("track.cdn_done",
+                           PlayPathProfiler::shortTrackRef(ref.uri));
     
   } catch (const std::exception& e) {
-    ESP_LOGW("TrackQueue", "Network error fetching CDN URL (attempt %d/5): %s", retries + 1, e.what());
+    const char* errMsg = e.what();
+    ESP_LOGW("TrackQueue", "Network error fetching CDN URL (attempt %d/5): %s",
+             retries + 1, (errMsg != nullptr && errMsg[0] != '\0') ? errMsg : "unknown error");
     retries++;
     
     // Record retry time for exponential backoff
@@ -522,6 +600,13 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
   
   ESP_LOGD("TrackQueue", "Signaling playableSemaphore (track state: %s)",
            state == State::READY ? "READY" : "FAILED");
+  if (state == State::READY) {
+    char detail[64];
+    snprintf(detail, sizeof(detail), "track=%s",
+             PlayPathProfiler::shortTrackRef(ref.uri));
+    PlayPathProfiler::mark("track.ready_signal", detail);
+    notifyPlayHeadTrackReady();
+  }
   playableSemaphore->give();
 }
 
@@ -533,6 +618,8 @@ void QueuedTrack::stepLoadMetadata(
       string_format("hm://metadata/3/%s/%s",
                     gid.first == SpotifyFileType::TRACK ? "track" : "episode",
                     bytesToHexString(gid.second).c_str());
+  PlayPathProfiler::mark("track.metadata_request",
+                         PlayPathProfiler::shortTrackRef(ref.uri));
 
   auto responseHandler = [this, pbTrack, pbEpisode, &trackListMutex,
                           updateSemaphore](const MercurySession::Response &res) {
@@ -609,6 +696,11 @@ void TrackQueue::runTask() {
 
     for (auto& track : trackQueue) {
       if (track) {
+        if (headOnlyPreloadMode.load()) {
+          if (trackQueue.empty() || track != trackQueue.front()) {
+            continue;
+          }
+        }
         if (this->processTrack(track))
           break;
         BELL_SLEEP_MS(1);

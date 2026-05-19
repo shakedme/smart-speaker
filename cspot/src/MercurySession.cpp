@@ -14,6 +14,11 @@
 #endif
 
 #include <esp_log.h>
+#ifdef ESP_PLATFORM
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include <inttypes.h>
+#endif
 #include "BellLogger.h"         // for AbstractLogger
 #include "BellTask.h"           // for Task
 #include "BellUtils.h"          // for BELL_SLEEP_MS
@@ -56,8 +61,8 @@ T extractData(const std::vector<uint8_t> &data, size_t &pos) {
 }
 
 MercurySession::MercurySession(std::shared_ptr<TimeProvider> timeProvider)
-        : bell::Task("mercury_dispatcher", 8 * 1024, 3,
-                     1) {  //double the size for reconnecting
+        : bell::Task("mercury_dispatcher", 8 * 1024, 6,
+                     1) {  // prio above cspot_player so recv isn't starved during preload
     responseSemaphore = std::make_shared<bell::WrappedSemaphore>();
     this->timeProvider = timeProvider;
 }
@@ -89,6 +94,11 @@ bool MercurySession::processPackets() {
             this->lastPingTimestamp = timeProvider->getSyncedTimestamp();
             this->shanConn->sendPacket(0x49, packet.data);
         } else if (packet.data.size()) {
+            if (static_cast<RequestType>(packet.command) == RequestType::SUBRES) {
+                ESP_LOGI("MercSession",
+                         "SUBRES TCP packet received (t=%" PRIu32 "ms)",
+                         (uint32_t) (xTaskGetTickCount() * portTICK_PERIOD_MS));
+            }
             std::unique_lock<std::mutex> lock(queueMutex);
             this->packetQueue.push_back(packet);
             lock.unlock();  // Optional, the destructor will unlock it
@@ -183,19 +193,13 @@ bool MercurySession::triggerTimeout() {
 }
 
 void MercurySession::unregister(uint64_t sequenceId) {
-    auto callback = this->callbacks.find(sequenceId);
-
-    if (callback != this->callbacks.end()) {
-        this->callbacks.erase(callback);
-    }
+    std::scoped_lock lock(callbacksMutex);
+    this->callbacks.erase(sequenceId);
 }
 
 void MercurySession::unregisterAudioKey(uint32_t sequenceId) {
-    auto callback = this->audioKeyCallbacks.find(sequenceId);
-
-    if (callback != this->audioKeyCallbacks.end()) {
-        this->audioKeyCallbacks.erase(callback);
-    }
+    std::scoped_lock lock(callbacksMutex);
+    this->audioKeyCallbacks.erase(sequenceId);
 }
 
 void MercurySession::disconnect() {
@@ -213,86 +217,114 @@ std::string MercurySession::getCountryCode() {
 
 void MercurySession::handlePacket() {
     this->responseSemaphore->wait();
-    std::unique_lock<std::mutex> lock(queueMutex);
-    if (!packetQueue.size())
-        return;
-    Packet packet = std::move(*packetQueue.begin());
-    packetQueue.pop_front();
-    lock.unlock();  // Optional, the destructor will unlock it
-
-    // Clean up old partial responses to prevent memory leaks
-    if (partials.size() > 10) {
-        ESP_LOGD("MercurySession", "Too many partial responses (%d), cleaning up old ones", partials.size());
-        // Keep only the last 5 partials
-        partials.erase(partials.begin(), partials.end() - 5);
-    }
-
-    if (executeEstabilishedCallback && this->connectionReadyCallback != nullptr) {
-        executeEstabilishedCallback = false;
-        this->connectionReadyCallback();
-    }
-
-    switch (static_cast<RequestType>(packet.command)) {
-        case RequestType::COUNTRY_CODE_RESPONSE: {
-            ESP_LOGD("MercurySession", "Received country code response");
-            this->countryCode = std::string();
-            this->countryCode.resize(2);
-            memcpy(this->countryCode.data(), packet.data.data(), 2);
-            ESP_LOGD("MercSession", "Received country code %s", this->countryCode.c_str());
-            break;
-        }
-        case RequestType::AUDIO_KEY_FAILURE_RESPONSE:
-        case RequestType::AUDIO_KEY_SUCCESS_RESPONSE: {
-            ESP_LOGD("MercurySession", "Received audio key response");
-            // this->lastRequestTimestamp = -1;
-
-            // First four bytes mark the sequence id
-            auto seqId = ntohl(extract<uint32_t>(packet.data, 0));
-
-            if (this->audioKeyCallbacks.count(seqId) > 0) {
-                auto success = static_cast<RequestType>(packet.command) ==
-                               RequestType::AUDIO_KEY_SUCCESS_RESPONSE;
-                this->audioKeyCallbacks[seqId](success, packet.data);
+    while (true) {
+        Packet packet;
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+            if (!packetQueue.size()) {
+                return;
             }
-            break;
+            packet = std::move(*packetQueue.begin());
+            packetQueue.pop_front();
         }
-        case RequestType::SEND:
-        case RequestType::SUB:
-        case RequestType::UNSUB: {
-            auto response = this->decodeResponse(packet.data);
-            if (!response.fail) {
-                if (this->callbacks.count(response.sequenceId)) {
-                    uint64_t tempSequenceId = response.sequenceId;
-                    this->callbacks[response.sequenceId](response);
-                    this->callbacks.erase(this->callbacks.find(tempSequenceId));
-                }
-                pb_release(Header_fields, &response.mercuryHeader);
+
+        // Clean up old partial responses to prevent memory leaks
+        if (partials.size() > 10) {
+            ESP_LOGD("MercurySession", "Too many partial responses (%d), cleaning up old ones", partials.size());
+            // Keep only the last 5 partials
+            partials.erase(partials.begin(), partials.end() - 5);
+        }
+
+        if (executeEstabilishedCallback && this->connectionReadyCallback != nullptr) {
+            executeEstabilishedCallback = false;
+            this->connectionReadyCallback();
+        }
+
+        switch (static_cast<RequestType>(packet.command)) {
+            case RequestType::COUNTRY_CODE_RESPONSE: {
+                ESP_LOGD("MercurySession", "Received country code response");
+                this->countryCode = std::string();
+                this->countryCode.resize(2);
+                memcpy(this->countryCode.data(), packet.data.data(), 2);
+                ESP_LOGD("MercSession", "Received country code %s", this->countryCode.c_str());
+                break;
             }
-            ESP_LOGD("MercurySession", "Internal memory after SEND/SUB/UNSUB: %d, partials count: %d",
-                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL), partials.size());
-            break;
-        }
-        case RequestType::SUBRES: {
-            ESP_LOGD("MercurySession", "Received Mercury subscription response");
-            ESP_LOGD("MercurySession", "Internal memory before SUBRES: %d, partials count: %d",
-                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL), partials.size());
-            auto response = decodeResponse(packet.data);
-            if (!response.fail) {
-                std::string uri(response.mercuryHeader.uri);
-                for (const auto &[subUri, callback]: subscriptions) {
-                    if (uri.find(subUri) != std::string::npos) {
-                        callback(response);
-                        break;
+            case RequestType::AUDIO_KEY_FAILURE_RESPONSE:
+            case RequestType::AUDIO_KEY_SUCCESS_RESPONSE: {
+                ESP_LOGD("MercurySession", "Received audio key response");
+                auto seqId = ntohl(extract<uint32_t>(packet.data, 0));
+
+                AudioKeyCallback audioCallback;
+                {
+                    std::scoped_lock lock(callbacksMutex);
+                    auto it = this->audioKeyCallbacks.find(seqId);
+                    if (it != this->audioKeyCallbacks.end()) {
+                        audioCallback = std::move(it->second);
+                        this->audioKeyCallbacks.erase(it);
                     }
                 }
-                pb_release(Header_fields, &response.mercuryHeader);
+                if (audioCallback) {
+                    const auto success = static_cast<RequestType>(packet.command) ==
+                                         RequestType::AUDIO_KEY_SUCCESS_RESPONSE;
+                    audioCallback(success, packet.data);
+                }
+                break;
             }
-            ESP_LOGD("MercurySession", "Internal memory after SUBRES: %d, partials count: %d",
-                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL), partials.size());
-            break;
+            case RequestType::SEND:
+            case RequestType::SUB:
+            case RequestType::UNSUB: {
+                auto response = this->decodeResponse(packet.data);
+                if (!response.fail) {
+                    ResponseCallback callback;
+                    {
+                        std::scoped_lock lock(callbacksMutex);
+                        const auto it = this->callbacks.find(response.sequenceId);
+                        if (it != this->callbacks.end()) {
+                            callback = std::move(it->second);
+                            this->callbacks.erase(response.sequenceId);
+                        }
+                    }
+                    if (callback) {
+                        callback(response);
+                    }
+                    pb_release(Header_fields, &response.mercuryHeader);
+                }
+                ESP_LOGD("MercurySession", "Internal memory after SEND/SUB/UNSUB: %d, partials count: %d",
+                         heap_caps_get_free_size(MALLOC_CAP_INTERNAL), partials.size());
+                break;
+            }
+            case RequestType::SUBRES: {
+                auto response = decodeResponse(packet.data);
+                if (!response.fail) {
+                    std::string uri(response.mercuryHeader.uri);
+                    if (uri.find("player/command") != std::string::npos) {
+                        ESP_LOGI("MercSession",
+                                 "player/command SUBRES received (t=%" PRIu32 "ms)",
+                                 (uint32_t) (xTaskGetTickCount() *
+                                             portTICK_PERIOD_MS));
+                    }
+                    ResponseCallback subscriptionCallback;
+                    {
+                        std::scoped_lock lock(callbacksMutex);
+                        for (const auto &[subUri, callback]: subscriptions) {
+                            if (uri.find(subUri) != std::string::npos) {
+                                subscriptionCallback = callback;
+                                break;
+                            }
+                        }
+                    }
+                    if (subscriptionCallback) {
+                        subscriptionCallback(response);
+                    }
+                    pb_release(Header_fields, &response.mercuryHeader);
+                }
+                ESP_LOGD("MercurySession", "Internal memory after SUBRES: %d, partials count: %d",
+                         heap_caps_get_free_size(MALLOC_CAP_INTERNAL), partials.size());
+                break;
+            }
+            default:
+                break;
         }
-        default:
-            break;
     }
 }
 
@@ -300,13 +332,16 @@ void MercurySession::failAllPending() {
     Response response = {};
     response.fail = true;
 
-    // Fail all callbacks
-    for (auto &it: this->callbacks) {
-        it.second(response);
+    std::unordered_map<uint64_t, ResponseCallback> pendingCallbacks;
+    {
+        std::scoped_lock lock(callbacksMutex);
+        pendingCallbacks = std::move(this->callbacks);
+        this->callbacks.clear();
     }
 
-    // Remove references
-    this->callbacks = {};
+    for (auto &it: pendingCallbacks) {
+        it.second(response);
+    }
 }
 
 MercurySession::Response MercurySession::decodeResponse(
@@ -386,6 +421,7 @@ MercurySession::Response MercurySession::decodeResponse(
 
 void MercurySession::addSubscriptionListener(const std::string &uri,
                                              ResponseCallback subscription) {
+    std::scoped_lock lock(callbacksMutex);
     this->subscriptions.insert({uri, subscription});
 }
 
@@ -411,14 +447,17 @@ uint64_t MercurySession::executeSubscription(RequestType method,
     }
 
     if (method == RequestType::SUB) {
+        std::scoped_lock lock(callbacksMutex);
         this->subscriptions.insert({uri, subscription});
     }
 
     auto headerBytes = pbEncode(Header_fields, &tempMercuryHeader);
     pb_release(Header_fields, &tempMercuryHeader);
 
-    if (callback != nullptr)
+    if (callback != nullptr) {
+        std::scoped_lock lock(callbacksMutex);
         this->callbacks.insert({sequenceId, callback});
+    }
 
     // Prepare the data packet structure:
     // [Sequence size] [SequenceId] [0x1] [Payloads number] [Header size] [Header] [Payloads (size + data)]
@@ -481,7 +520,10 @@ uint32_t MercurySession::requestAudioKey(const std::vector<uint8_t> &trackId,
     auto buffer = fileId;
 
     // Store callback
-    this->audioKeyCallbacks.insert({this->audioKeySequence, audioCallback});
+    {
+        std::scoped_lock lock(callbacksMutex);
+        this->audioKeyCallbacks.insert({this->audioKeySequence, audioCallback});
+    }
 
     // Structure: [FILEID] [TRACKID] [4 BYTES SEQUENCE ID] [0x00, 0x00]
     buffer.insert(buffer.end(), trackId.begin(), trackId.end());

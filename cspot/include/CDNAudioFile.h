@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cstddef>  // for size_t
+#include <cstddef>  // for size_t, SIZE_MAX
 #include <cstdint>  // for uint8_t
 #include <memory>   // for shared_ptr, unique_ptr
 #include <string>   // for string
@@ -73,14 +73,17 @@ class CDNAudioFile {
   */
   void seek(size_t position);
 
+  bool isStreamOpen() const { return streamOpen_; }
+
   long getHeader();
 
  private:
+  bool streamOpen_ = false;
   const int OPUS_HEADER_SIZE = 8 * 1024;
   const int OPUS_FOOTER_PREFFERED = 1024 * 12;  // 12K should be safe
   const int SEEK_MARGIN_SIZE = 1024 * 4;
 
-  const int HTTP_BUFFER_SIZE = 1024 * 14;
+  const int HTTP_BUFFER_SIZE = 1024 * 32;
   const int SPOTIFY_OPUS_HEADER = 167;
 
 #ifndef CONFIG_BELL_NOCODEC
@@ -105,6 +108,14 @@ class CDNAudioFile {
   size_t lastRequestCapacity = 0;
 
   bool enableRequestMargin = false;
+
+  static constexpr size_t kPrefetchLowWaterBytes = 8 * 1024;
+  std::vector<uint8_t> prefetchBuffer;
+  size_t prefetchPosition = SIZE_MAX;
+  size_t prefetchCapacity = 0;
+
+  void prefetchNextSegment();
+  bool openStreamAttempt();
 
   std::string cdnUrl;
   std::vector<uint8_t> audioKey;

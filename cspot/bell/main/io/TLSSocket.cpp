@@ -44,7 +44,12 @@ void bell::TLSSocket::open(const std::string &hostUrl, uint16_t port) {
     if (ret != 0) {
         ESP_LOGE("TLSSocket", "Connection failed for %s:%d with error %d\n",
                  hostUrl.c_str(), port, ret);
-        //    throw std::runtime_error("Connection failed");
+#ifdef ESP_PLATFORM
+        close();
+        return;
+#else
+        throw std::runtime_error("Connection failed");
+#endif
     }
 
     ret = mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT,
@@ -52,7 +57,12 @@ void bell::TLSSocket::open(const std::string &hostUrl, uint16_t port) {
                                       MBEDTLS_SSL_PRESET_DEFAULT);
     if (ret != 0) {
         ESP_LOGE("TLSSocket", "SSL config setup failed: %d\n", ret);
+#ifdef ESP_PLATFORM
+        close();
+        return;
+#else
         throw std::runtime_error("SSL configuration failed");
+#endif
     }
 
     if (bell::X509Bundle::shouldVerify()) {
@@ -66,7 +76,13 @@ void bell::TLSSocket::open(const std::string &hostUrl, uint16_t port) {
     mbedtls_ssl_setup(&ssl, &conf);
 
     if ((ret = mbedtls_ssl_set_hostname(&ssl, hostUrl.c_str())) != 0) {
+#ifdef ESP_PLATFORM
+        ESP_LOGE("TLSSocket", "Failed to set SSL hostname: %d", ret);
+        close();
+        return;
+#else
         throw std::runtime_error("Failed to set SSL hostname");
+#endif
     }
 
     mbedtls_ssl_set_bio(&ssl, &server_fd, mbedtls_net_send, mbedtls_net_recv,
@@ -78,11 +94,21 @@ void bell::TLSSocket::open(const std::string &hostUrl, uint16_t port) {
     while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
         if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
             ESP_LOGE("TLSSocket", "SSL handshake failed with error %d\n", ret);
+#ifdef ESP_PLATFORM
+            close();
+            return;
+#else
             throw std::runtime_error("SSL handshake failed");
+#endif
         }
         if (--retries <= 0) {
             ESP_LOGE("TLSSocket", "SSL handshake retry limit reached");
+#ifdef ESP_PLATFORM
+            close();
+            return;
+#else
             throw std::runtime_error("SSL handshake retries exhausted");
+#endif
         }
         BELL_SLEEP_MS(10);  // Delay between retries
     }
@@ -90,6 +116,9 @@ void bell::TLSSocket::open(const std::string &hostUrl, uint16_t port) {
 }
 
 ssize_t bell::TLSSocket::read(uint8_t *buf, size_t len) {
+    if (isClosed || len == 0) {
+        return -1;
+    }
     int ret;
     do {
         ret = mbedtls_ssl_read(&ssl, buf, len);

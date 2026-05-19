@@ -92,7 +92,7 @@ class ALSAAudioSink : public AudioSink, public bell::Task {
  public:
   ALSAAudioSink();
   ~ALSAAudioSink();
-  void feedPCMFrames(const uint8_t* buffer, size_t bytes);
+  size_t feedPCMFrames(const uint8_t* buffer, size_t bytes);
   void runTask();
 
  private:

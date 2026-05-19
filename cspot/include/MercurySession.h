@@ -138,6 +138,7 @@ class MercurySession : public bell::Task, public cspot::Session {
   std::string countryCode = "";
 
   std::mutex queueMutex;
+  std::mutex callbacksMutex;
   std::mutex isRunningMutex;
   std::condition_variable queueCV;  // For synchronization with waits
   std::atomic<bool> isRunning = false;

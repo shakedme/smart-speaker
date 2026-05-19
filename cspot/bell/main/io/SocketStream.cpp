@@ -18,7 +18,21 @@ int SocketBuffer::open(const std::string& hostname, int port, bool isSSL) {
     internalSocket = std::make_unique<bell::TCPSocket>();
   }
 
-  internalSocket->open(hostname, port);
+  try {
+    internalSocket->open(hostname, port);
+  } catch (const std::exception& ex) {
+    internalSocket->close();
+    internalSocket = nullptr;
+    return -1;
+  } catch (...) {
+    internalSocket = nullptr;
+    return -1;
+  }
+
+  if (!internalSocket->isOpen()) {
+    internalSocket = nullptr;
+    return -1;
+  }
   return 0;
 }
 

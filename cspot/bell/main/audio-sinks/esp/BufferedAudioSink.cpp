@@ -27,8 +27,9 @@ void BufferedAudioSink::startI2sFeed(size_t buf_size) {
                           tskNO_AFFINITY);
 }
 
-void BufferedAudioSink::feedPCMFrames(const uint8_t* buffer, size_t bytes) {
+size_t BufferedAudioSink::feedPCMFrames(const uint8_t* buffer, size_t bytes) {
   feedPCMFramesInternal(buffer, bytes);
+  return bytes;
 }
 
 void BufferedAudioSink::feedPCMFramesInternal(const void* pvItem,

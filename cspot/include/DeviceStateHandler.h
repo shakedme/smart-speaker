@@ -7,6 +7,7 @@
 #pragma once
 
 #include <stdint.h>    // for uint8_t, uint32_t
+#include <atomic>
 #include <deque>       //for deque..
 #include <functional>  //for function
 #include <memory>      // for shared_ptr
@@ -22,10 +23,18 @@
 #include "protobuf/connect.pb.h"  // for PutStateRequest, DeviceState, PlayerState...
 
 namespace cspot {
-    struct Context;
-    struct PlayerContext;
+struct Context;
+struct PlayerContext;
 
-    class DeviceStateHandler {
+void notifyPlayHeadTrackReady();
+void notifyPlayFirstAudio();
+
+enum class PutStateMode {
+    Full,
+    Minimal,
+};
+
+class DeviceStateHandler {
     public:
         //Command Callback Structure
         enum CommandType {
@@ -69,14 +78,30 @@ namespace cspot {
         void setDeviceState(PutStateReason put_state_reason);
 
         void putPlayerState(PutStateReason member_type =
-        PutStateReason::PutStateReason_PLAYER_STATE_CHANGED,
-                            bool includeNextTracks = true);
+                                    PutStateReason::PutStateReason_PLAYER_STATE_CHANGED,
+                            PutStateMode mode = PutStateMode::Full);
+
+        void putPlayerState(PutStateReason member_type,
+                            bool includeNextTracks,
+                            bool refreshRestrictions);
 
         void handleConnectState();
 
         void sendCommand(CommandType, CommandData data = {});
 
         static void reloadTrackList(void *);
+
+        void tryCompleteDeferredReload();
+
+        void tryProcessDeferredContextResolve();
+
+        void tryFlushDeferredPlayerState();
+
+        void notifyHeadTrackReady();
+
+        void notifyPlayFirstAudio();
+
+        void topUpSkipPreload();
 
         Device device = Device_init_zero;
 
@@ -90,8 +115,14 @@ namespace cspot {
 
         bool is_active = false;
         bool reloadPreloadedTracks = true;
+        bool deferredReloadTrackList = false;
+        bool skipNextReloadStartup = false;
+        bool skipLikePlayStartup = false;
+        bool reloadHeadTrackReady = false;
+        bool deferTopUpPreload = false;
         bool needsToBeSkipped = true;
         bool playerStateChanged = false;
+        std::atomic<bool> pendingMinimalPlayerState{false};
 
         std::shared_ptr<cspot::TrackPlayer> trackPlayer;
         std::shared_ptr<cspot::TrackQueue> trackQueue;
@@ -110,6 +141,10 @@ namespace cspot {
 
         void parseCommand(const std::vector<uint8_t> &data);
 
+        void handleActivePlayCommandFast(const std::vector<uint8_t> &rawData,
+                                         const std::string &resolvedTrackUri,
+                                         const std::string &skipUid);
+
         void skip(CommandType dir, bool notify);
 
         void unreference(char **string) {
@@ -120,5 +155,6 @@ namespace cspot {
         }
 
         std::atomic<bool> resolvingContext = false;
+        std::atomic<bool> deferContextResolveParse = false;
     };
 }  // namespace cspot

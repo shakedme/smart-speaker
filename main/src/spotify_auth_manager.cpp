@@ -340,7 +340,9 @@ namespace btspeaker {
     }
 
     bool SpotifyAuthManager::validateAuthParams(const std::map<std::string, std::string> &queryMap) {
-        return queryMap.find("blob") != queryMap.end() && queryMap.find("clientKey") != queryMap.end();
+        return queryMap.find("blob") != queryMap.end() &&
+               queryMap.find("clientKey") != queryMap.end() &&
+               queryMap.find("userName") != queryMap.end();
     }
 
     void SpotifyAuthManager::sendAuthSuccessResponse(httpd_req_t *req) {

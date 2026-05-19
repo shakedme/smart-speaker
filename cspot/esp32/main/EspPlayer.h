@@ -17,27 +17,39 @@ namespace cspot {
 
 class EspPlayer : public bell::Task {
 public:
+    static constexpr size_t kPreBufferBytes = 52000;
+    static constexpr size_t kPlayStartPreBufferBytes = 16384;
+
     EspPlayer(std::shared_ptr<AudioSink> sink,
               std::shared_ptr<cspot::DeviceStateHandler> handler);
+
+    ~EspPlayer();
 
     void disconnect();
 
 private:
-    void runTask() override; // Simple keepalive task
-    std::string currentTrackId;
+    static constexpr uint32_t kPositionSyncIntervalMs = 1000;
+
+    void runTask() override;
+    size_t feedData(uint8_t *data, size_t len, size_t trackId);
+    void tryStartPlayback();
+    void anchorTrackPlayback(size_t trackId);
+    void processPendingTrackEnd();
+    void notifyPlayerState();
+    void sendPlayerStateHeartbeat();
+
     std::shared_ptr<cspot::DeviceStateHandler> handler;
     std::shared_ptr<AudioSink> audioSink;
     std::deque<std::shared_ptr<cspot::QueuedTrack>> tracks = {};
-
-    void feedData(uint8_t *data, size_t len, size_t trackId);
 
     std::atomic<bool> isPaused = false;
     std::atomic<bool> playlistEnd = false;
     std::atomic<bool> isRunning = true;
     std::atomic<bool> isPreBuffered = false;
-    size_t currentTrackHash = 0;
+    std::atomic<bool> pendingTrackEnd = false;
+    bool logFirstAudioPending_ = false;
+    bool reducedPrebufferActive_ = false;
     size_t lastTrackHash = 0;
-    
-    // Track state management
+
     std::mutex trackMutex;
 };

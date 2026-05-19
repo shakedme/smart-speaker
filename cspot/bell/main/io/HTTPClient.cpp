@@ -1,5 +1,7 @@
 #include "HTTPClient.h"
 
+#include <stdarg.h>   // for va_list, va_start, va_end
+#include <stdio.h>    // for vsnprintf
 #include <string.h>   // for memcpy
 #include <algorithm>  // for transform
 #include <algorithm>
@@ -13,6 +15,12 @@
 #include "BellSocket.h"  // for bell
 #include "BellUtils.h"   // for BELL_SLEEP_MS
 
+#include "BellUtils.h"   // for BELL_SLEEP_MS
+
+#ifdef ESP_PLATFORM
+#include "esp_log.h"
+#endif
+
 #ifdef error
 #undef error
 #endif
@@ -20,10 +28,34 @@
 using namespace bell;
 
 namespace {
-template <typename... Args>
-void logHttpClientError(const char* format, Args&&... args) {
-  bell::bellGlobalLogger->error(__FILE__, __LINE__, "httpClient", format,
-                                std::forward<Args>(args)...);
+void logHttpClientError(const char* format, ...) {
+  if (format == nullptr) {
+#ifdef ESP_PLATFORM
+    ESP_LOGE("httpClient", "HTTP client error");
+#endif
+    return;
+  }
+
+  va_list args;
+  va_start(args, format);
+#ifdef ESP_PLATFORM
+  char message[256];
+  vsnprintf(message, sizeof(message), format, args);
+  ESP_LOGE("httpClient", "%s", message);
+#else
+  char message[512];
+  vsnprintf(message, sizeof(message), format, args);
+  if (bell::bellGlobalLogger != nullptr) {
+    bell::bellGlobalLogger->error(__FILE__, __LINE__, "httpClient", "%s",
+                                  message);
+  }
+#endif
+  va_end(args);
+}
+
+const char* safeExceptionMessage(const std::exception& ex) {
+  const char* message = ex.what();
+  return (message != nullptr && message[0] != '\0') ? message : "unknown error";
 }
 }  // namespace
 
@@ -35,17 +67,23 @@ int HTTPClient::Response::connect(const std::string& url, size_t numHeaders) {
     phResponseHeaders = new phr_header[maxHeaders];
 
     // Open socket of type
-    return this->socketStream.open(urlParser.host, urlParser.port,
-                                   urlParser.schema == "https");
+    const int openErr = this->socketStream.open(
+        urlParser.host, urlParser.port, urlParser.schema == "https");
+    if (openErr != 0) {
+      logHttpClientError("Stream operation failed while connecting: %s",
+                         "connection failed");
+      return 1;
+    }
+    return 0;
   } catch (const std::invalid_argument& ex) {
-    logHttpClientError( "Error while parsing URL: %s", ex.what());
+    logHttpClientError("Error while parsing URL: %s", safeExceptionMessage(ex));
     return 1;
   } catch (const std::runtime_error& ex) {
-    logHttpClientError(
-             "Stream operation failed while connecting: %s", ex.what());
+    logHttpClientError("Stream operation failed while connecting: %s",
+                       safeExceptionMessage(ex));
     return 1;
   } catch (const std::exception& ex) {
-    logHttpClientError( "Unexpected exception: %s", ex.what());
+    logHttpClientError("Unexpected exception: %s", safeExceptionMessage(ex));
     return 2;
   }
 }
@@ -64,11 +102,11 @@ int HTTPClient::Response::reconnect() {
     return this->socketStream.open(urlParser.host, urlParser.port,
                                    urlParser.schema == "https");
   } catch (const std::runtime_error& ex) {
-    logHttpClientError(
-             "Stream operation failed while reconnecting: %s", ex.what());
+    logHttpClientError("Stream operation failed while reconnecting: %s",
+                       safeExceptionMessage(ex));
     return 1;
   } catch (const std::exception& ex) {
-    logHttpClientError( "Unexpected exception: %s", ex.what());
+    logHttpClientError("Unexpected exception: %s", safeExceptionMessage(ex));
     return 2;
   }
 }
@@ -116,8 +154,8 @@ bool HTTPClient::Response::rawRequest(const std::string& url,
 
     socketStream.flush();
   } catch (const std::ios_base::failure& ex) {
-    logHttpClientError(
-             "Stream operation failed while sending request: %s", ex.what());
+    logHttpClientError("Stream operation failed while sending request: %s",
+                       safeExceptionMessage(ex));
     if (reconnect() != 0) {
       return false;  // If reconnection fails, return failure
     }
@@ -128,20 +166,20 @@ bool HTTPClient::Response::rawRequest(const std::string& url,
   try {
     return readResponseHeaders();
   } catch (const std::underflow_error& ex) {
-    logHttpClientError( "Underflow error during response reading: %s",
-             ex.what());
+    logHttpClientError("Underflow error during response reading: %s",
+                       safeExceptionMessage(ex));
     this->socketStream.flush();
     this->socketStream.close();
     return false;
   } catch (const std::runtime_error& ex) {
-    logHttpClientError( "Runtime error while receiving packet: %s",
-             ex.what());
+    logHttpClientError("Runtime error while receiving packet: %s",
+                       safeExceptionMessage(ex));
     if (reconnect() != 0) {
       return false;
     }
     return rawRequest(url, method, content, headers);
   } catch (const std::exception& ex) {
-    logHttpClientError( "Unexpected exception: %s", ex.what());
+    logHttpClientError("Unexpected exception: %s", safeExceptionMessage(ex));
     return false;
   }
 }

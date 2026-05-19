@@ -71,6 +71,9 @@ class QueuedTrack {
   int64_t written_bytes = 0;
   std::shared_ptr<cspot::TrackMetrics> trackMetrics;
 
+  void warmCdnStream();
+  bool isStreamOpened() const { return streamOpened; }
+
   // Will return nullptr if the track is not ready
   std::shared_ptr<cspot::CDNAudioFile> getAudioFile();
 
@@ -96,6 +99,9 @@ class QueuedTrack {
 
   std::vector<uint8_t> trackId, fileId, audioKey;
   std::string cdnUrl;
+  std::shared_ptr<cspot::CDNAudioFile> warmedAudioFile;
+  bool streamOpened = false;
+  std::mutex warmMutex_;
   std::pair<SpotifyFileType, std::vector<uint8_t>> gid = {
       SpotifyFileType::UNKNOWN,
       {}};
@@ -113,6 +119,7 @@ class TrackQueue : public bell::Task {
   std::atomic<bool> notifyPending = false;
   std::deque<std::shared_ptr<QueuedTrack>> preloadedTracks;
   bool repeat = false;
+  std::atomic<bool> headOnlyPreloadMode{false};
 
   void runTask() override;
   void stopTask();

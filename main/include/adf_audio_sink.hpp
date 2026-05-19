@@ -26,12 +26,14 @@ namespace btspeaker {
     public:
         ADFAudioSink();
 
-        void feedPCMFrames(const uint8_t *buffer, size_t bytes) override;
+        size_t feedPCMFrames(const uint8_t *buffer, size_t bytes) override;
 
         ~ADFAudioSink() override;
 
         // Helper methods
         void setupPipeline();
+
+        void prepare();
 
         void cleanupPipeline();
 
@@ -53,8 +55,12 @@ namespace btspeaker {
 
         size_t getBufferFillLevel() override;
 
+        size_t getBufferCapacity() override;
+
     private:
         static constexpr const char *TAG = "ADF_AUDIO_SINK";
+        static constexpr size_t kRawRingBufferSize = 512 * 1024;
+        static constexpr size_t kWriteChunkSize = 8192;
 
         std::unique_ptr<I2SAudioPipeline> audioPipeline;
 

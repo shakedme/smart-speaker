@@ -73,6 +73,9 @@ LoginBlob::LoginBlob(const std::string& name) {
 std::vector<uint8_t> LoginBlob::decodeBlob(
     const std::vector<uint8_t>& blob, const std::vector<uint8_t>& sharedKey) {
   // 0:16 - iv; 17:-20 - blob; -20:0 - checksum
+  if (blob.size() < 36) {
+    throw std::runtime_error("Login blob too short for primary decode");
+  }
   auto iv = std::vector<uint8_t>(blob.begin(), blob.begin() + 16);
   auto encrypted = std::vector<uint8_t>(blob.begin() + 16, blob.end() - 20);
   auto checksum = std::vector<uint8_t>(blob.end() - 20, blob.end());
@@ -98,7 +101,7 @@ std::vector<uint8_t> LoginBlob::decodeBlob(
 
   // Check checksum
   if (mac != checksum) {
-    CSPOT_LOG(error, "Mac doesn't match!");
+    throw std::runtime_error("Login blob checksum mismatch");
   }
 
   encryptionKey =
@@ -141,10 +144,13 @@ std::vector<uint8_t> LoginBlob::decodeBlobSecondary(
 
   crypto->aesECBdecrypt(key, blobData);
 
-  auto l = blobData.size();
+  const size_t l = blobData.size();
+  if (l < 17) {
+    throw std::runtime_error("Login blob too short for secondary decode");
+  }
 
-  for (int i = 0; i < l - 16; i++) {
-    blobData[l - i - 1] ^= blobData[l - i - 17];
+  for (size_t i = 0; i + 16 < l; ++i) {
+    blobData[l - 1 - i] ^= blobData[l - 17 - i];
   }
 
   return blobData;
@@ -158,6 +164,10 @@ void LoginBlob::loadZeroconf(const std::vector<uint8_t>& blob,
   auto partDecoded = this->decodeBlob(blob, sharedKey);
   auto loginData = this->decodeBlobSecondary(partDecoded, username, deviceId);
 
+  if (loginData.empty()) {
+    throw std::runtime_error("Login blob decode produced empty payload");
+  }
+
   // Parse blob
   blobSkipPosition = 1;
   blobSkipPosition += readBlobInt(loginData);
@@ -165,6 +175,10 @@ void LoginBlob::loadZeroconf(const std::vector<uint8_t>& blob,
   this->authType = readBlobInt(loginData);
   blobSkipPosition += 1;
   auto authSize = readBlobInt(loginData);
+  if (authSize == 0 ||
+      blobSkipPosition + authSize > loginData.size()) {
+    throw std::runtime_error("Login blob auth payload size invalid");
+  }
   this->username = username;
   this->authData =
       std::vector<uint8_t>(loginData.begin() + blobSkipPosition,
@@ -292,15 +306,27 @@ std::string LoginBlob::toJson() {
 
 void LoginBlob::loadZeroconfQuery(
     std::map<std::string, std::string>& queryParams) {
-  // Get all urlencoded params
-  auto username = queryParams["userName"];
-  auto blobString = queryParams["blob"];
-  auto clientKeyString = queryParams["clientKey"];
-  auto deviceName = queryParams["deviceName"];
+  auto usernameIt = queryParams.find("userName");
+  auto blobIt = queryParams.find("blob");
+  auto clientKeyIt = queryParams.find("clientKey");
+  if (usernameIt == queryParams.end() || blobIt == queryParams.end() ||
+      clientKeyIt == queryParams.end()) {
+    throw std::runtime_error("Missing zeroconf auth parameters");
+  }
+
+  const auto& username = usernameIt->second;
+  const auto& blobString = blobIt->second;
+  const auto& clientKeyString = clientKeyIt->second;
+  if (username.empty() || blobString.empty() || clientKeyString.empty()) {
+    throw std::runtime_error("Empty zeroconf auth parameter");
+  }
 
   // client key and bytes are urlencoded
   auto clientKeyBytes = crypto->base64Decode(clientKeyString);
   auto blobBytes = crypto->base64Decode(blobString);
+  if (clientKeyBytes.empty() || blobBytes.empty()) {
+    throw std::runtime_error("Invalid zeroconf auth encoding");
+  }
 
   // Generated secret based on earlier generated DH
   auto secretKey = crypto->dhCalculateShared(clientKeyBytes);

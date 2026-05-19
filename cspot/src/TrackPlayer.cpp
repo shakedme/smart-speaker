@@ -1,6 +1,7 @@
 #include "TrackPlayer.h"
 
 #include <mutex>        // for mutex, scoped_lock
+#include <cstdio>
 #include <string>       // for string
 #include <type_traits>  // for remove_extent_t
 #include <vector>       // for vector, vector<>::value_type
@@ -8,9 +9,15 @@
 #include "BellLogger.h"  // for AbstractLogger
 #include "BellUtils.h"   // for BELL_SLEEP_MS
 #include "CSpotContext.h"
+
+extern "C" {
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+}
 #include "EventManager.h"
 #include "Logger.h"            // for CSPOT_LOG
 #include "Packet.h"            // for cspot
+#include "PlayPathProfiler.h"
 #include "TrackQueue.h"        // for CDNTrackStream, CDNTrackStream::TrackInfo
 #include "WrappedSemaphore.h"  // for WrappedSemaphore
 #include <esp_log.h>
@@ -64,7 +71,7 @@ TrackPlayer::TrackPlayer(std::shared_ptr<cspot::Context> ctx,
                          TrackEndedCallback onTrackEnd,
                          TrackChangedCallback onTrackChanged,
                          bool *repeating_track)
-        : bell::Task("cspot_player", 60 * 1024, 2, 1) {
+        : bell::Task("cspot_player", 60 * 1024, 4, 1) {
     this->ctx = ctx;
     this->onTrackEnd = onTrackEnd;
     this->onTrackChanged = onTrackChanged;
@@ -121,6 +128,7 @@ void TrackPlayer::resetState(bool paused) {
     std::scoped_lock lock(dataOutMutex);
 
     ESP_LOGI("TrackPlayer", "Resetting state");
+    PlayPathProfiler::mark("track_player.reset_state");
 }
 
 void TrackPlayer::seekMs(size_t ms, bool loading) {
@@ -146,7 +154,9 @@ void TrackPlayer::runTask() {
 
     while (isRunning) {
         bool properStream = true;
+        PlayPathProfiler::mark("track_player.wait_playable");
         this->trackQueue->playableSemaphore->wait();
+        PlayPathProfiler::mark("track_player.playable_received");
 
         // Last track was interrupted, reset to default
         if (pendingReset) {
@@ -159,7 +169,7 @@ void TrackPlayer::runTask() {
 
         // Wait 800ms. If next reset is requested in meantime, restart the queue.
         // Gets rid of excess actions during rapid queueing
-        BELL_SLEEP_MS(50);
+        BELL_SLEEP_MS(20);
 
         if (pendingReset) {
             continue;
@@ -172,8 +182,17 @@ void TrackPlayer::runTask() {
                 // Reset required
                 track = nullptr;
             }
-            BELL_SLEEP_MS(100);
+            PlayPathProfiler::mark("track_player.consume_empty");
+            BELL_SLEEP_MS(20);
             continue;
+        }
+
+        {
+            char detail[64];
+            snprintf(detail, sizeof(detail), "track=%s state=%d",
+                     PlayPathProfiler::shortTrackRef(newTrack->ref.uri),
+                     (int) newTrack->state);
+            PlayPathProfiler::mark("track_player.consume_track", detail);
         }
 
         track = newTrack;
@@ -181,16 +200,29 @@ void TrackPlayer::runTask() {
 
         inFuture = trackOffset > 0;
         uint8_t retries = 10;
+        const uint32_t readyWaitStartMs = esp_log_timestamp();
         while (track->state != QueuedTrack::State::READY &&
                track->state != QueuedTrack::State::FAILED && retries-- > 0) {
-            BELL_SLEEP_MS(100);
+            BELL_SLEEP_MS(20);
         }
         if (track->state != QueuedTrack::State::READY) {
+            char detail[64];
+            snprintf(detail, sizeof(detail), "state=%d waited_ms=%u",
+                     (int) track->state,
+                     (unsigned) (esp_log_timestamp() - readyWaitStartMs));
+            PlayPathProfiler::mark("track_player.ready_wait_failed", detail);
             ESP_LOGE("TrackPlayer", "Track failed to load, final state: %i, skipping it", (int) track->state);
             if (track->ref.removed != NULL)
                 this->onTrackChanged(track, false);
             this->onTrackEnd(true);
             continue;
+        }
+        {
+            char detail[64];
+            snprintf(detail, sizeof(detail), "track=%s waited_ms=%u",
+                     PlayPathProfiler::shortTrackRef(track->ref.uri),
+                     (unsigned) (esp_log_timestamp() - readyWaitStartMs));
+            PlayPathProfiler::mark("track_player.ready_confirmed", detail);
         }
         
         track->playingTrackIndex = tracksPlayed;
@@ -204,10 +236,31 @@ void TrackPlayer::runTask() {
             currentTrackStream = track->getAudioFile();
             // Open the stream
 #ifndef CONFIG_BELL_NOCODEC
-            currentTrackStream->openStream();
+            if (currentTrackStream && !currentTrackStream->isStreamOpen()) {
+                PlayPathProfiler::mark("track_player.open_stream_begin",
+                                       PlayPathProfiler::shortTrackRef(track->ref.uri));
+                currentTrackStream->openStream();
+                PlayPathProfiler::mark("track_player.open_stream_done",
+                                       PlayPathProfiler::shortTrackRef(track->ref.uri));
+            } else if (currentTrackStream && currentTrackStream->isStreamOpen()) {
+                PlayPathProfiler::mark("track_player.open_stream_skip",
+                                       "already_warmed");
+            }
 #else
             ssize_t start_offset = 0;
-            uint8_t* headerBuf = currentTrackStream->openStream(start_offset);
+            uint8_t* headerBuf = nullptr;
+            if (currentTrackStream && !currentTrackStream->isStreamOpen()) {
+                PlayPathProfiler::mark("track_player.open_stream_begin",
+                                       PlayPathProfiler::shortTrackRef(track->ref.uri));
+                headerBuf = currentTrackStream->openStream(start_offset);
+                PlayPathProfiler::mark("track_player.open_stream_done",
+                                       PlayPathProfiler::shortTrackRef(track->ref.uri));
+            } else if (currentTrackStream && currentTrackStream->isStreamOpen()) {
+                PlayPathProfiler::mark("track_player.open_stream_skip",
+                                       "already_warmed");
+                start_offset = static_cast<ssize_t>(currentTrackStream->getPosition());
+                headerBuf = currentTrackStream->openStream(start_offset);
+            }
             if (start_offset < 0) {
               ESP_LOGE("TrackPlayer", "Track failed to load, skipping it");
               this->onTrackEnd(true);
@@ -221,6 +274,8 @@ void TrackPlayer::runTask() {
             track->trackMetrics->track_size = currentTrackStream->getSize();
 
             this->onTrackChanged(track, true);
+            PlayPathProfiler::mark("track_player.decoding_started",
+                                   PlayPathProfiler::shortTrackRef(track->ref.uri));
             startPaused = false;
 
 #ifndef CONFIG_BELL_NOCODEC
@@ -232,7 +287,7 @@ void TrackPlayer::runTask() {
               size_t written = dataCallback(headerBuf + (start_offset - toWrite),
                                             toWrite, tracksPlayed, 0);
               if (written == 0) {
-                BELL_SLEEP_MS(10);
+                vTaskDelay(1);
               }
               toWrite -= written;
             }
@@ -354,7 +409,7 @@ void TrackPlayer::runTask() {
                             }
                             toWrite -= written;
                             if (written == 0) {
-                                BELL_SLEEP_MS(10);
+                                vTaskDelay(1);
                                 continue;
                             }
                         }

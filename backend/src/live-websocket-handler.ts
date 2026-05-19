@@ -21,11 +21,11 @@ interface ControlMessage {
 }
 
 // VAD constants
-const VAD_SENSITIVITY = 0.3; // 0.0 (lowest) to 1.0 (highest)
+const VAD_SENSITIVITY = 0.2; // 0.0 (lowest) to 1.0 (highest)
 const VAD_SILENCE_TIMEOUT_MS = 2400; // Time of silence before processing
 const CONVERSATION_TIMEOUT_MS = 5000; // Time to keep conversation session alive with no user input
 const WAKE_WORD_WINDOW_MS = 1500; // Reduced from 3000ms for lower latency
-const WAKE_WORD_SENSITIVITY = 1; // Lower = more sensitive
+const WAKE_WORD_SENSITIVITY = 0.4; // Lower = more sensitive
 
 export class LiveWebSocketHandler {
     private ws: WebSocket;
@@ -103,9 +103,17 @@ export class LiveWebSocketHandler {
         }
     }
 
+    private isValidAudioData(data: Buffer): boolean {
+        return data.some(byte => byte !== 0);
+    }
+
     private handleAudioData(data: Buffer): void {
+        if (!this.isValidAudioData(data)) {
+            this.log('warn', 'Invalid audio data received. Skipping...');
+            return;
+        }
+
         if (!this.wakeWordDetected && !this.responseSession) {
-            this.log("info", `Wake word not detected yet. Buffering audio...`);
             this.addToWakeWordBuffer(data);
             this.wakeWordProcessBuffer = Buffer.concat([this.wakeWordProcessBuffer, data]);
             this.processWakeWordDetection();
@@ -126,7 +134,7 @@ export class LiveWebSocketHandler {
             }
 
             const voiceProbability = this.cobra.process(audioFrameInt16);
-
+            this.log('debug', `Voice probability: ${voiceProbability}`);
             if (voiceProbability > VAD_SENSITIVITY) {
                 this.log('debug', `Voice activity detected with probability: ${voiceProbability}`);
                 this.voiceActivityDetected = true;
@@ -182,9 +190,7 @@ export class LiveWebSocketHandler {
                     this.resetSilenceTimer();
                 }
                 break;
-            } else {
-                this.log('info', `No wake word detected in current frame.`);
-            }
+            } 
         }
     }
 
@@ -513,7 +519,7 @@ export class LiveWebSocketHandler {
     }
 
     private log(level: 'info' | 'warn' | 'error' | 'debug', message: string): void {
-        console.log(`[${level.toUpperCase()}] ${message}`);
+        console.log(`[${level.toUpperCase()}] [${Date.now()}] ${message}`);
     }
 
     private async resolveSpotifyUri(query: string): Promise<string | null> {

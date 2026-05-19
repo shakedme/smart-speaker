@@ -75,6 +75,8 @@ namespace btspeaker {
         startSource(source);
         currentSource = source;
         ESP_LOGI(TAG, "Successfully switched to source %d", (int) source);
+        ESP_LOGI(TAG, "[AUDIO_SRC_DIAG] active playback source is now %d (0=NONE 2=BT 3=SPOTIFY 1=VOICE)",
+                 (int) source);
         return ESP_OK;
     }
 

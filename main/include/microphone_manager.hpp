@@ -48,6 +48,21 @@ namespace btspeaker {
         static constexpr float F_NORM = CUTOFF_HZ / SAMPLE_RATE;  // ≈0.003125
         static constexpr float Q_FACTOR = 0.707f;            // Butterworth-style two-pole (~1/√2)
         static constexpr int SAMPLE_COUNT = AUDIO_BUFFER_SIZE / sizeof(int32_t);
+        static constexpr int MIC_DIAG_INTERVAL_MS = 5000;
+
+        void logMicDiagnostics(int64_t now_us,
+                               uint32_t loop_count,
+                               uint32_t callback_count,
+                               uint64_t total_bytes_read,
+                               uint64_t total_bytes_out,
+                               uint32_t i2s_errors,
+                               uint32_t zero_reads,
+                               uint64_t sum_i2s_read_us,
+                               uint32_t max_i2s_read_us,
+                               uint64_t sum_process_us,
+                               uint32_t max_process_us,
+                               uint64_t sum_callback_us,
+                               uint32_t max_callback_us) const;
 
         float delay_lines[2] = {0.0f, 0.0f};
         float coeffs[5];                        // b0,b1,b2,a1,a2

@@ -35,6 +35,8 @@ public:
     void setVolume(uint8_t volume);
     [[nodiscard]] uint8_t getVolume() const { return volume; }
 
+    [[nodiscard]] AudioSource getCurrentSource() const { return currentSource; }
+
     esp_err_t queueVoiceResponseChunk(const uint8_t* audio_data, size_t length);
     esp_err_t stopVoiceResponse();
 

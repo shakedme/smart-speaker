@@ -2,11 +2,14 @@
 #include "../include/voice_config.hpp"
 #include "../include/memory_utils.hpp"
 #include <cmath>
+#include <cstdint>
 #include <stdexcept>
 #include "esp_dsp.h"
 
 extern "C" {
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "board.h"
 #include "i2s_stream.h"
 #include "audio_common.h"
@@ -123,6 +126,55 @@ namespace btspeaker {
         vTaskDelete(nullptr);
     }
 
+    void MicrophoneManager::logMicDiagnostics(const int64_t now_us,
+                                              const uint32_t loop_count,
+                                              const uint32_t callback_count,
+                                              const uint64_t total_bytes_read,
+                                              const uint64_t total_bytes_out,
+                                              const uint32_t i2s_errors,
+                                              const uint32_t zero_reads,
+                                              const uint64_t sum_i2s_read_us,
+                                              const uint32_t max_i2s_read_us,
+                                              const uint64_t sum_process_us,
+                                              const uint32_t max_process_us,
+                                              const uint64_t sum_callback_us,
+                                              const uint32_t max_callback_us) const {
+        const uint32_t avg_i2s_read_us = loop_count > 0
+                                         ? static_cast<uint32_t>(sum_i2s_read_us / loop_count)
+                                         : 0;
+        const uint32_t avg_process_us = loop_count > 0
+                                        ? static_cast<uint32_t>(sum_process_us / loop_count)
+                                        : 0;
+        const uint32_t avg_callback_us = callback_count > 0
+                                         ? static_cast<uint32_t>(sum_callback_us / callback_count)
+                                         : 0;
+        const uint32_t effective_hz = (MIC_DIAG_INTERVAL_MS > 0 && total_bytes_out > 0)
+                                      ? static_cast<uint32_t>(
+                                              (total_bytes_out * 1000ULL) /
+                                              (static_cast<uint64_t>(MIC_DIAG_INTERVAL_MS) * 2ULL))
+                                      : 0;
+
+        ESP_LOGI(TAG,
+                 "[MIC_DIAG] loops=%lu cb=%lu in_bytes=%lu out_bytes=%lu ~%luHz@16k/mono "
+                 "i2s_us(avg=%lu max=%lu) proc_us(avg=%lu max=%lu) cb_us(avg=%lu max=%lu) "
+                 "i2s_err=%lu zero_rd=%lu dram=%lu",
+                 static_cast<unsigned long>(loop_count),
+                 static_cast<unsigned long>(callback_count),
+                 static_cast<unsigned long>(total_bytes_read),
+                 static_cast<unsigned long>(total_bytes_out),
+                 static_cast<unsigned long>(effective_hz),
+                 static_cast<unsigned long>(avg_i2s_read_us),
+                 static_cast<unsigned long>(max_i2s_read_us),
+                 static_cast<unsigned long>(avg_process_us),
+                 static_cast<unsigned long>(max_process_us),
+                 static_cast<unsigned long>(avg_callback_us),
+                 static_cast<unsigned long>(max_callback_us),
+                 static_cast<unsigned long>(i2s_errors),
+                 static_cast<unsigned long>(zero_reads),
+                 static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
+        (void) now_us;
+    }
+
     void MicrophoneManager::runAudioProcessing() {
         ESP_LOGI(TAG, "Audio processing task started with direct I2S channel reading (mono output)");
 
@@ -145,22 +197,113 @@ namespace btspeaker {
             i2s_channel_read(i2s_rx_handle_, raw_buffer, AUDIO_BUFFER_SIZE, &bytes_read, pdMS_TO_TICKS(10));
         }
 
-        while (recording_) {
-            // Read audio directly from I2S channel
-            size_t bytes_read;
-            esp_err_t ret = i2s_channel_read(i2s_rx_handle_, raw_buffer, AUDIO_BUFFER_SIZE, &bytes_read,
-                                             portMAX_DELAY);
+        int64_t diag_window_start_us = esp_timer_get_time();
+        uint32_t diag_loops = 0;
+        uint32_t diag_callbacks = 0;
+        uint64_t diag_bytes_read = 0;
+        uint64_t diag_bytes_out = 0;
+        uint32_t diag_i2s_errors = 0;
+        uint32_t diag_zero_reads = 0;
+        uint64_t diag_sum_i2s_read_us = 0;
+        uint32_t diag_max_i2s_read_us = 0;
+        uint64_t diag_sum_process_us = 0;
+        uint32_t diag_max_process_us = 0;
+        uint64_t diag_sum_callback_us = 0;
+        uint32_t diag_max_callback_us = 0;
 
-            if (ret == ESP_OK && bytes_read > 0) {
+        while (recording_) {
+            const int64_t loop_start_us = esp_timer_get_time();
+
+            size_t bytes_read = 0;
+            const esp_err_t ret = i2s_channel_read(i2s_rx_handle_, raw_buffer, AUDIO_BUFFER_SIZE, &bytes_read,
+                                                   portMAX_DELAY);
+            const int64_t after_read_us = esp_timer_get_time();
+            const uint32_t i2s_read_us = static_cast<uint32_t>(after_read_us - loop_start_us);
+
+            diag_loops++;
+            diag_sum_i2s_read_us += i2s_read_us;
+            if (i2s_read_us > diag_max_i2s_read_us) {
+                diag_max_i2s_read_us = i2s_read_us;
+            }
+
+            if (ret != ESP_OK) {
+                diag_i2s_errors++;
+                ESP_LOGW(TAG, "[MIC_DIAG] i2s_channel_read failed: %s", esp_err_to_name(ret));
+            } else if (bytes_read == 0) {
+                diag_zero_reads++;
+            } else {
+                diag_bytes_read += bytes_read;
+
                 if (audioCallback_) {
-                    size_t processed_bytes = processMonoAudio(raw_buffer, processed_buffer, bytes_read);
+                    const int64_t before_process_us = after_read_us;
+                    const size_t processed_bytes = processMonoAudio(raw_buffer, processed_buffer, bytes_read);
+                    const int64_t after_process_us = esp_timer_get_time();
+                    const uint32_t process_us = static_cast<uint32_t>(after_process_us - before_process_us);
+
+                    diag_sum_process_us += process_us;
+                    if (process_us > diag_max_process_us) {
+                        diag_max_process_us = process_us;
+                    }
+
                     if (processed_bytes > 0) {
+                        const int64_t before_callback_us = after_process_us;
                         audioCallback_(processed_buffer, processed_bytes);
+                        const int64_t after_callback_us = esp_timer_get_time();
+                        const uint32_t callback_us = static_cast<uint32_t>(after_callback_us - before_callback_us);
+
+                        diag_callbacks++;
+                        diag_bytes_out += processed_bytes;
+                        diag_sum_callback_us += callback_us;
+                        if (callback_us > diag_max_callback_us) {
+                            diag_max_callback_us = callback_us;
+                        }
+
+                        if (callback_us > 50000) {
+                            ESP_LOGW(TAG, "[MIC_DIAG] slow upstream callback %lu us for %u bytes",
+                                     static_cast<unsigned long>(callback_us),
+                                     static_cast<unsigned>(processed_bytes));
+                        }
                     }
                 }
             }
 
-            vTaskDelay(pdMS_TO_TICKS(1)); // Minimal delay for maximum audio responsiveness
+            if (i2s_read_us > 200000) {
+                ESP_LOGW(TAG, "[MIC_DIAG] slow i2s read %lu us, bytes=%u",
+                         static_cast<unsigned long>(i2s_read_us),
+                         static_cast<unsigned>(bytes_read));
+            }
+
+            const int64_t now_us = esp_timer_get_time();
+            if ((now_us - diag_window_start_us) >= (MIC_DIAG_INTERVAL_MS * 1000LL)) {
+                logMicDiagnostics(now_us,
+                                  diag_loops,
+                                  diag_callbacks,
+                                  diag_bytes_read,
+                                  diag_bytes_out,
+                                  diag_i2s_errors,
+                                  diag_zero_reads,
+                                  diag_sum_i2s_read_us,
+                                  diag_max_i2s_read_us,
+                                  diag_sum_process_us,
+                                  diag_max_process_us,
+                                  diag_sum_callback_us,
+                                  diag_max_callback_us);
+                diag_window_start_us = now_us;
+                diag_loops = 0;
+                diag_callbacks = 0;
+                diag_bytes_read = 0;
+                diag_bytes_out = 0;
+                diag_i2s_errors = 0;
+                diag_zero_reads = 0;
+                diag_sum_i2s_read_us = 0;
+                diag_max_i2s_read_us = 0;
+                diag_sum_process_us = 0;
+                diag_max_process_us = 0;
+                diag_sum_callback_us = 0;
+                diag_max_callback_us = 0;
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(1));
         }
 
         free(raw_buffer);

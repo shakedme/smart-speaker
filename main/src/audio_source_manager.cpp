@@ -264,6 +264,13 @@ namespace btspeaker {
         return ESP_OK;
     }
 
+    bool AudioSourceManager::isVoiceResponsePlaybackIdle() const {
+        if (currentSource != AudioSource::VOICE_RESPONSE || !llmPipeline) {
+            return true;
+        }
+        return llmPipeline->isPlaybackIdle();
+    }
+
 
     esp_err_t AudioSourceManager::spotifyPlay(const std::string &uri) {
         if (!isInitialized || !spotifyPipeline) {

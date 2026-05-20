@@ -31,6 +31,10 @@ namespace btspeaker {
 
         esp_err_t writeAudioToPipeline(const uint8_t *data, size_t length);
 
+        [[nodiscard]] size_t getBufferFillLevel() const;
+
+        [[nodiscard]] bool isPlaybackIdle() const;
+
         void setupPipeline() override;
 
         void cleanupPipeline() override;
@@ -40,6 +44,10 @@ namespace btspeaker {
         static constexpr int DEFAULT_SAMPLE_RATE = 24000; // Gemini typical output
         static constexpr int DEFAULT_CHANNELS = 1;
         static constexpr int DEFAULT_BITS = 16;
+        static constexpr size_t kRawRingBufferSize = 512 * 1024;
+        static constexpr size_t kWriteChunkSize = 8192;
+        // ~50 ms of 24 kHz mono 16-bit PCM
+        static constexpr size_t kPlaybackIdleThresholdBytes = 2400;
 
         std::unique_ptr<I2SAudioPipeline> audioPipeline;
     };

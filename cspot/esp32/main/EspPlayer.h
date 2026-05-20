@@ -17,8 +17,8 @@ namespace cspot {
 
 class EspPlayer : public bell::Task {
 public:
-    static constexpr size_t kPreBufferBytes = 52000;
-    static constexpr size_t kPlayStartPreBufferBytes = 16384;
+    static constexpr size_t kPreBufferBytes = 192 * 1024;
+    static constexpr size_t kPlayStartPreBufferBytes = 128 * 1024;
 
     EspPlayer(std::shared_ptr<AudioSink> sink,
               std::shared_ptr<cspot::DeviceStateHandler> handler);

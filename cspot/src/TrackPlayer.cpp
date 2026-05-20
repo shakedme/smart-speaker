@@ -1,4 +1,5 @@
 #include "TrackPlayer.h"
+#include "cspot_task_config.h"
 
 #include <mutex>        // for mutex, scoped_lock
 #include <cstdio>
@@ -71,7 +72,7 @@ TrackPlayer::TrackPlayer(std::shared_ptr<cspot::Context> ctx,
                          TrackEndedCallback onTrackEnd,
                          TrackChangedCallback onTrackChanged,
                          bool *repeating_track)
-        : bell::Task("cspot_player", 60 * 1024, 4, 1) {
+        : bell::Task("cspot_player", 60 * 1024, 4, CSPOT_PLAYER_CORE) {
     this->ctx = ctx;
     this->onTrackEnd = onTrackEnd;
     this->onTrackChanged = onTrackChanged;
@@ -409,7 +410,7 @@ void TrackPlayer::runTask() {
                             }
                             toWrite -= written;
                             if (written == 0) {
-                                vTaskDelay(1);
+                                vTaskDelay(pdMS_TO_TICKS(10));
                                 continue;
                             }
                         }

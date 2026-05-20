@@ -34,6 +34,7 @@ console.log('📊 Environment:', process.env.NODE_ENV || 'development');
 
 wss.on('connection', (ws, request) => {
     const clientIP = request.socket.remoteAddress;
+    request.socket.setNoDelay(true);
     console.log(`🔗 New WebSocket connection from ${clientIP}`);
 
     // Create handler for this connection

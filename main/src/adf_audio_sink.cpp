@@ -13,6 +13,7 @@ extern "C" {
 #include "ringbuf.h"
 #include "i2s_stream.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 }
@@ -20,9 +21,40 @@ extern "C" {
 namespace btspeaker {
 
     namespace {
+        constexpr int kPlaybackDiagIntervalMs = 5000;
+        constexpr uint32_t kRingbufBlockWarnMs = 50;
+        constexpr uint32_t kRingbufMaxBackoffMs = 10;
+        constexpr uint32_t kFeedBackpressureReturnMs = 25;
+
         size_t ringbufFilled(ringbuf_handle_t rb) {
             return rb ? rb_bytes_filled(rb) : 0;
         }
+    }
+
+    void ADFAudioSink::maybeLogPlaybackDiagnostics() {
+        const int64_t now_us = esp_timer_get_time();
+        if (lastDiagLogUs_ != 0 &&
+            (now_us - lastDiagLogUs_) < (kPlaybackDiagIntervalMs * 1000LL)) {
+            return;
+        }
+        lastDiagLogUs_ = now_us;
+
+        const uint32_t blocks = ringbufBlockCount_.exchange(0, std::memory_order_relaxed);
+        const uint32_t max_wait = ringbufBlockMaxWaitMs_.exchange(0, std::memory_order_relaxed);
+        const uint32_t short_writes = feedShortWriteCount_.exchange(0, std::memory_order_relaxed);
+        const size_t min_fill = minFillBytes_.exchange(SIZE_MAX, std::memory_order_relaxed);
+        const size_t fill = getBufferFillLevel();
+        const size_t capacity = getBufferCapacity();
+
+        ESP_LOGI(TAG,
+                 "[PLAYBACK_DIAG] fill=%u/%u min_fill=%u rb_block=%lu rb_block_max_ms=%lu short_write=%lu playing=%d",
+                 static_cast<unsigned>(fill),
+                 static_cast<unsigned>(capacity),
+                 static_cast<unsigned>(min_fill == SIZE_MAX ? 0 : min_fill),
+                 static_cast<unsigned long>(blocks),
+                 static_cast<unsigned long>(max_wait),
+                 static_cast<unsigned long>(short_writes),
+                 isPlaying_.load() ? 1 : 0);
     }
 
     ADFAudioSink::ADFAudioSink() :
@@ -43,6 +75,7 @@ namespace btspeaker {
         size_t offset = 0;
         auto raw = audioPipeline->i2SStreamReader.get();
         uint32_t backoffMs = 1;
+        const int64_t feed_start_us = esp_timer_get_time();
 
         while (offset < bytes) {
             size_t toWrite = std::min(kWriteChunkSize, bytes - offset);
@@ -50,9 +83,28 @@ namespace btspeaker {
             ringbuf_handle_t rb = audio_element_get_output_ringbuf(raw);
             size_t free_bytes = rb ? rb_bytes_available(rb) : 0;
             if (free_bytes == 0) {
+                const int64_t block_start_us = esp_timer_get_time();
                 vTaskDelay(pdMS_TO_TICKS(backoffMs));
-                if (backoffMs < 5) {
+                const uint32_t waited_ms = static_cast<uint32_t>(
+                        (esp_timer_get_time() - block_start_us) / 1000);
+                ringbufBlockCount_.fetch_add(1, std::memory_order_relaxed);
+                uint32_t prev_max = ringbufBlockMaxWaitMs_.load(std::memory_order_relaxed);
+                while (waited_ms > prev_max &&
+                       !ringbufBlockMaxWaitMs_.compare_exchange_weak(
+                               prev_max, waited_ms, std::memory_order_relaxed)) {
+                }
+                if (waited_ms >= kRingbufBlockWarnMs) {
+                    ESP_LOGW(TAG, "[PLAYBACK_DIAG] ringbuf full, waited %lu ms",
+                             static_cast<unsigned long>(waited_ms));
+                }
+                if (((esp_timer_get_time() - feed_start_us) / 1000) >= kFeedBackpressureReturnMs) {
+                    break;
+                }
+                if (backoffMs < kRingbufMaxBackoffMs) {
                     backoffMs *= 2;
+                    if (backoffMs > kRingbufMaxBackoffMs) {
+                        backoffMs = kRingbufMaxBackoffMs;
+                    }
                 }
                 continue;
             }
@@ -69,7 +121,17 @@ namespace btspeaker {
             }
 
             offset += static_cast<size_t>(written);
+            if (static_cast<size_t>(written) < toWrite) {
+                feedShortWriteCount_.fetch_add(1, std::memory_order_relaxed);
+            }
         }
+
+        const size_t fill = getBufferFillLevel();
+        size_t prev_min = minFillBytes_.load(std::memory_order_relaxed);
+        while (fill < prev_min &&
+               !minFillBytes_.compare_exchange_weak(prev_min, fill, std::memory_order_relaxed)) {
+        }
+        maybeLogPlaybackDiagnostics();
 
         return offset;
     }
@@ -96,7 +158,7 @@ namespace btspeaker {
             return 0;
         }
 
-        size_t capacity = kRawRingBufferSize + (128 * 1024);
+        size_t capacity = kRawRingBufferSize + (256 * 1024);
         return capacity;
     }
 

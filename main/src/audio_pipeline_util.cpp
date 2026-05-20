@@ -127,6 +127,7 @@ namespace btspeaker {
         int taskPriority;
         uint32_t outRingBufferSize;
         int i2sBufferLen;
+        uint32_t dmaDescNum;
         uint32_t dmaFrameNum;
 
         switch (source) {
@@ -134,19 +135,22 @@ namespace btspeaker {
                 taskPriority = 25;
                 outRingBufferSize = 64 * 1024;
                 i2sBufferLen = 12000;
+                dmaDescNum = 16;
                 dmaFrameNum = 512;
                 break;
             case AudioSource::SPOTIFY:
                 taskPriority = 26;
-                outRingBufferSize = 128 * 1024;
+                outRingBufferSize = 256 * 1024;
                 // IDF5 I2S stream requires buffer_len % 12 == 0 (8192 is invalid)
                 i2sBufferLen = 8196;
-                dmaFrameNum = 1024;
+                dmaDescNum = 16;
+                dmaFrameNum = 1023;
                 break;
             case AudioSource::VOICE_RESPONSE:
                 taskPriority = 27;
                 outRingBufferSize = 64 * 1024;
                 i2sBufferLen = 12000;
+                dmaDescNum = 16;
                 dmaFrameNum = 512;
                 break;
             default:
@@ -161,7 +165,7 @@ namespace btspeaker {
                 .chan_cfg = {
                         .id = static_cast<i2s_port_t>(I2S_PORT),
                         .role = I2S_ROLE_MASTER,
-                        .dma_desc_num = 16,
+                        .dma_desc_num = dmaDescNum,
                         .dma_frame_num = dmaFrameNum,
                         .auto_clear = true,
                         .auto_clear_before_cb = false,

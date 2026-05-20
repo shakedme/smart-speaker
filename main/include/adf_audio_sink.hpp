@@ -69,6 +69,13 @@ namespace btspeaker {
         std::atomic<bool> initialized_;
         std::atomic<bool> isPlaying_ = false;
 
+        void maybeLogPlaybackDiagnostics();
+
+        std::atomic<uint32_t> ringbufBlockCount_{0};
+        std::atomic<uint32_t> ringbufBlockMaxWaitMs_{0};
+        std::atomic<uint32_t> feedShortWriteCount_{0};
+        std::atomic<size_t> minFillBytes_{SIZE_MAX};
+        int64_t lastDiagLogUs_{0};
     };
 
 } // namespace btspeaker

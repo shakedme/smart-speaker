@@ -1,4 +1,5 @@
 #include "TrackQueue.h"
+#include "cspot_task_config.h"
 #include <pb_decode.h>
 
 #include <algorithm>
@@ -658,7 +659,7 @@ void QueuedTrack::stepLoadMetadata(
 }
 
 TrackQueue::TrackQueue(std::shared_ptr<cspot::Context> ctx)
-    : bell::Task("CSpotTrackQueue", 1024 * 48, 2, 1), ctx(ctx) {
+    : bell::Task("CSpotTrackQueue", 1024 * 48, 2, CSPOT_TRACK_QUEUE_CORE), ctx(ctx) {
   accessKeyFetcher = std::make_shared<cspot::AccessKeyFetcher>(ctx);
   processSemaphore = std::make_shared<bell::WrappedSemaphore>();
   playableSemaphore = std::make_shared<bell::WrappedSemaphore>();

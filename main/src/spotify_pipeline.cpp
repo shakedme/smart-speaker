@@ -1,4 +1,5 @@
 #include "../include/spotify_pipeline.hpp"
+#include "../include/task_affinity.hpp"
 #include "../include/spotify_config.hpp"
 #include "../include/adf_audio_sink.hpp"
 #include "include/spotify_auth_manager.hpp"
@@ -41,10 +42,6 @@ namespace btspeaker {
         constexpr int kSpotifyConnectMaxAttempts = 5;
         constexpr uint32_t kSpotifyConnectBaseBackoffMs = 500;
         constexpr uint32_t kSpotifyConnectMaxBackoffMs = 8000;
-        // Above cspot_player (prio +4) so inbound commands aren't delayed by preload.
-        constexpr int kSpotifyMainTaskPriority =
-                CONFIG_ESP32_PTHREAD_TASK_PRIO_DEFAULT + 6;
-        constexpr int kSpotifyMainTaskCore = 1;
 
         uint32_t spotifyConnectBackoffMs(int attempt) {
             uint32_t delay = kSpotifyConnectBaseBackoffMs;
@@ -114,10 +111,10 @@ namespace btspeaker {
                 "spotify_main",
                 stackSizeWords,
                 this,
-                kSpotifyMainTaskPriority,
+                kSpotifyMainPriority,
                 taskStack,
                 taskBuffer,
-                kSpotifyMainTaskCore
+                kSpotifyMainCore
         );
         if (packetHandlerTaskHandle == nullptr) {
             ESP_LOGE(TAG, "Failed to create Spotify main task");

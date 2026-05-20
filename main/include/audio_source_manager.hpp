@@ -40,6 +40,8 @@ public:
     esp_err_t queueVoiceResponseChunk(const uint8_t* audio_data, size_t length);
     esp_err_t stopVoiceResponse();
 
+    [[nodiscard]] bool isVoiceResponsePlaybackIdle() const;
+
 private:
     // Core pipeline components
     std::unique_ptr<BluetoothPipeline> btPipeline;

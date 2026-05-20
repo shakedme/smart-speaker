@@ -7,6 +7,8 @@ set(PROJECT_SRCS
         src/esp_raii_wrapper.cpp
         src/bluetooth_pipeline.cpp
         src/app_manager.cpp
+        src/task_affinity.cpp
+        src/ima_adpcm.cpp
         src/llm_pipeline.cpp
         src/websocket_voice_client.cpp
         src/voice_assistant_manager.cpp

@@ -1,6 +1,11 @@
 ---
 alwaysApply: true
 ---
+
+*** 
+!!! Always compile after editing firmware to validate results. You must source the env using 'source $ADF_PATH/export.sh'.
+***
+
 # Coding Standards
 
 Write code that is concise, defensive, and performant. Optimization is a first-class priority: every change must consider CPU time, memory use, stack use, binary size, latency, and I/O cost.

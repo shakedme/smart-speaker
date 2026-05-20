@@ -43,6 +43,8 @@ namespace btspeaker {
 
         [[nodiscard]] bool isConnected() const { return status == Status::CONNECTED; }
 
+        void setStatusCallback(StatusCallback callback);
+
     private:
         static constexpr const char *TAG = "WIFI_MGR";
         static constexpr int WIFI_MGR_CONNECTED_BIT = BIT0;

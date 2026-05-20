@@ -8,12 +8,11 @@ CONFIG_COMPILER_CXX_EXCEPTIONS_EMG_POOL_SIZE=1024
 # esp_codec_dev on IDF 5.3+ uses the new I2C master driver by default
 # CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE is not set
 
-# The cspot_player Vorbis decode task is pinned to CPU1 (priority 2) and a
-# single ov_read call can monopolize the core for several seconds while
-# refilling an empty sink (e.g. right after a skip_next flushes the pipeline).
-# That's expected for a heavy audio decoder, but it starves IDLE1 and trips the
-# task watchdog. Disable the IDLE1 WDT check and bump the timeout so the
-# decoder can run uninterrupted without breaking real liveness monitoring on
-# CPU0 (where networking, control, and our own MAIN task live).
+# CPU headroom for concurrent Spotify decode, mic capture, and WebSocket uplink.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP32_DEFAULT_CPU_FREQ_240=y
+
+# cspot_player may run on core 1 below mic_audio; heavy decode can starve IDLE1.
+# Disable IDLE1 WDT check and bump timeout so decode does not false-trigger WDT.
 # CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 is not set
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=10

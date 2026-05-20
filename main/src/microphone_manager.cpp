@@ -1,6 +1,8 @@
 #include "../include/microphone_manager.hpp"
+#include "../include/task_affinity.hpp"
 #include "../include/voice_config.hpp"
 #include "../include/memory_utils.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
@@ -20,12 +22,24 @@ extern "C" {
 
 namespace btspeaker {
 
+    namespace {
+        void *allocateMicBuffer(size_t size) {
+            void *ptr = heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            if (!ptr) {
+                ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            }
+            return ptr;
+        }
+    } // namespace
+
     MicrophoneManager::MicrophoneManager()
             : recording_(false), audioTaskHandle_(nullptr) {
         ESP_LOGI(TAG, "MicrophoneManager created for SPH0645LM4H I2S MEMS microphone (mono output)");
         dsps_biquad_gen_hpf_f32(coeffs, F_NORM, Q_FACTOR);
-        floatBuffer = static_cast<float *>(heap_caps_malloc(SAMPLE_COUNT * sizeof(float),
-                                                            MALLOC_CAP_SPIRAM));
+        floatBuffer = static_cast<float *>(allocateMicBuffer(SAMPLE_COUNT * sizeof(float)));
+        if (!floatBuffer) {
+            throw std::runtime_error("Failed to allocate microphone processing buffer");
+        }
     }
 
     MicrophoneManager::~MicrophoneManager() {
@@ -74,11 +88,10 @@ namespace btspeaker {
                 "mic_audio",
                 stackSizeWords,
                 this,
-                5,    // Priority
+                kMicAudioPriority,
                 taskStack,
                 taskBuffer,
-                1     // Pin to core 1 (app core), may help with memory allocation
-        );
+                kCaptureCore);
 
         if (audioTaskHandle_ == nullptr) {
             ESP_LOGE(TAG, "Failed to create microphone audio task");
@@ -114,6 +127,10 @@ namespace btspeaker {
 
         stopRecording();
         cleanupPipeline();
+        if (floatBuffer) {
+            heap_caps_free(floatBuffer);
+            floatBuffer = nullptr;
+        }
     }
 
     void MicrophoneManager::setAudioCallback(AudioDataCallback callback) {
@@ -178,13 +195,13 @@ namespace btspeaker {
     void MicrophoneManager::runAudioProcessing() {
         ESP_LOGI(TAG, "Audio processing task started with direct I2S channel reading (mono output)");
 
-        auto *raw_buffer = static_cast<uint8_t *>(heap_caps_malloc(AUDIO_BUFFER_SIZE, MALLOC_CAP_SPIRAM));
-        auto *processed_buffer = static_cast<uint8_t *>(heap_caps_malloc(AUDIO_BUFFER_SIZE, MALLOC_CAP_SPIRAM));
+        auto *raw_buffer = static_cast<uint8_t *>(allocateMicBuffer(AUDIO_BUFFER_SIZE));
+        auto *processed_buffer = static_cast<uint8_t *>(allocateMicBuffer(AUDIO_BUFFER_SIZE));
 
         if (!raw_buffer || !processed_buffer) {
             ESP_LOGE(TAG, "Failed to allocate audio buffers");
-            if (raw_buffer) free(raw_buffer);
-            if (processed_buffer) free(processed_buffer);
+            if (raw_buffer) heap_caps_free(raw_buffer);
+            if (processed_buffer) heap_caps_free(processed_buffer);
             return;
         }
 
@@ -302,12 +319,10 @@ namespace btspeaker {
                 diag_sum_callback_us = 0;
                 diag_max_callback_us = 0;
             }
-
-            vTaskDelay(pdMS_TO_TICKS(1));
         }
 
-        free(raw_buffer);
-        free(processed_buffer);
+        heap_caps_free(raw_buffer);
+        heap_caps_free(processed_buffer);
         ESP_LOGI(TAG, "Audio processing task ended");
     }
 
@@ -381,11 +396,17 @@ namespace btspeaker {
             return 0;
         }
 
+        const size_t sample_count = std::min(raw_bytes / sizeof(int32_t),
+                                             static_cast<size_t>(SAMPLE_COUNT));
+        if (sample_count == 0) {
+            return 0;
+        }
+
         const auto *raw_samples = reinterpret_cast<const int32_t *>(raw_data);
         auto *output_samples = reinterpret_cast<int16_t *>(processed_data);
 
         // Convert int32 to float and normalize
-        for (size_t i = 0; i < SAMPLE_COUNT; i++) {
+        for (size_t i = 0; i < sample_count; i++) {
             int32_t sample = raw_samples[i];
             // Convert to float normalized to [-1, 1] range
             floatBuffer[i] = (float) (sample >> 14) / 32768.0f;
@@ -393,7 +414,7 @@ namespace btspeaker {
 
         esp_err_t ret = dsps_biquad_f32_ae32(floatBuffer,
                                              floatBuffer,
-                                             static_cast<int>(SAMPLE_COUNT),
+                                             static_cast<int>(sample_count),
                                              coeffs,
                                              delay_lines);
         if (ret != ESP_OK) {
@@ -404,7 +425,7 @@ namespace btspeaker {
         float minInt = -32768.0f; // Minimum value for int16_t
 
         // Convert back to int16
-        for (size_t i = 0; i < SAMPLE_COUNT; i++) {
+        for (size_t i = 0; i < sample_count; i++) {
             // Scale back to int16 range
             float filtered_sample = floatBuffer[i] * maxInt;
 
@@ -415,7 +436,7 @@ namespace btspeaker {
             output_samples[i] = (int16_t) filtered_sample;
         }
 
-        return SAMPLE_COUNT * sizeof(int16_t);
+        return sample_count * sizeof(int16_t);
     }
 
 } // namespace btspeaker 

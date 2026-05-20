@@ -1,11 +1,11 @@
 #pragma once
 
-#include <memory>
 #include <string>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include "../include/esp_websocket_client.h"
+#include "../include/ima_adpcm.hpp"
 
 extern "C" {
 #include "esp_err.h"
@@ -32,8 +32,8 @@ namespace btspeaker {
             int keepaliveIntervalS = 30;
             int pingIntervalS = 10;
             size_t chunkSize = 4096;
-            int reconnectTimeoutMs = 5000;
-            int maxReconnectAttempts = 5;
+            int reconnectBackoffInitialMs = 1000;
+            int reconnectBackoffMaxMs = 10000;
         };
 
         explicit WebSocketVoiceClient(VoiceAssistantManager &voiceAssistantManager);
@@ -50,8 +50,16 @@ namespace btspeaker {
 
         [[nodiscard]] bool isConnected() const { return state.load() == ConnectionState::CONNECTED; }
 
+        [[nodiscard]] bool isTransportReady() const;
+
         // Non-blocking: copies audio and enqueues for mic_uplink worker.
         esp_err_t sendAudioChunk(const uint8_t *audioData, size_t length);
+
+        void setPlaybackActive(bool active);
+
+        void onNetworkLost();
+
+        void onNetworkAvailable();
 
     private:
         struct UplinkChunk {
@@ -62,16 +70,27 @@ namespace btspeaker {
 
         static constexpr const char *TAG = "WS_VOICE_CLIENT";
         static constexpr size_t UPLINK_QUEUE_DEPTH = 16;
+        static constexpr size_t UPLINK_MAX_CHUNK_BYTES = 4096;
         static constexpr size_t UPLINK_TASK_STACK_WORDS = 4096;
         static constexpr int UPLINK_SEND_TIMEOUT_MS = 250;
+        static constexpr int UPLINK_PLAYBACK_SEND_TIMEOUT_MS = 250;
         static constexpr int UPLINK_DIAG_INTERVAL_MS = 5000;
         static constexpr uint32_t UPLINK_SLOW_SEND_US = 100000;
-        static constexpr UBaseType_t UPLINK_TASK_PRIORITY = 6;
+        static constexpr uint32_t UPLINK_PLAYBACK_AGGREGATE_BYTES = 4096;
+        static constexpr int UPLINK_PLAYBACK_AGGREGATE_WAIT_MS = 80;
+        static constexpr uint32_t UPLINK_PLAYBACK_QUEUE_MAX = 2;
+        static constexpr int RECONNECT_CONNECT_WAIT_MS = 15000;
+        static constexpr int RECONNECT_LOOP_IDLE_MS = 1000;
+        static constexpr uint32_t CONNECT_OUTCOME_PENDING = 0;
+        static constexpr uint32_t CONNECT_OUTCOME_SUCCESS = 1;
+        static constexpr uint32_t CONNECT_OUTCOME_FAILURE = 2;
 
         static void websocketEventHandler(void *handlerArgs, esp_event_base_t base,
                                           int32_t eventId, void *eventData);
 
         static void uplinkWorkerTask(void *arg);
+
+        static void reconnectLoopTask(void *pvParameters);
 
         void handleWebsocketEvent(esp_websocket_event_id_t eventId, esp_websocket_event_data_t *eventData);
 
@@ -81,9 +100,23 @@ namespace btspeaker {
 
         void setConnectionState(ConnectionState newState);
 
-        static void reconnectTask(void *pvParameters);
+        void startReconnectLoop();
 
-        esp_err_t attemptReconnection();
+        void stopReconnectLoop();
+
+        uint32_t beginConnectAttempt();
+
+        void signalConnectOutcome(uint32_t outcome);
+
+        uint32_t waitForConnectOutcome(uint32_t generation, int timeout_ms);
+
+        uint32_t computeReconnectBackoffMs() const;
+
+        void recordConnectSuccess();
+
+        void recordConnectFailure();
+
+        void markTransportDisconnected(const char *reason);
 
         esp_err_t startUplinkWorker();
 
@@ -97,12 +130,19 @@ namespace btspeaker {
 
         void freeUplinkChunk(UplinkChunk &chunk);
 
+        uint8_t *acquireUplinkBuffer();
+
+        void releaseUplinkBuffer(uint8_t *payload);
+
+        void destroyUplinkBufferPool();
+
         void drainUplinkQueue();
 
         void logUplinkDiagnostics(int64_t now_us,
                                   uint32_t enqueued,
                                   uint32_t sent,
                                   uint32_t dropped_oldest,
+                                  uint32_t dropped_playback,
                                   uint32_t dropped_disc,
                                   uint32_t send_fail,
                                   uint32_t send_slow,
@@ -111,20 +151,33 @@ namespace btspeaker {
                                   uint32_t max_send_us,
                                   uint32_t queue_depth) const;
 
+        bool shouldDropForPlaybackCongestion(uint32_t queue_depth) const;
+
+        esp_err_t buildUplinkPayload(const uint8_t *audioData,
+                                     size_t length,
+                                     uint8_t **out_payload,
+                                     uint32_t *out_length);
+
         Config config;
         std::atomic<ConnectionState> state;
         esp_websocket_client_handle_t websocketClient;
         SemaphoreHandle_t stateMutex;
-        TaskHandle_t reconnectTaskHandle;
+        TaskHandle_t reconnectLoopTaskHandle_;
         std::atomic_bool isDestroying{false};
+        std::atomic_bool reconnectShutdown_{true};
+        std::atomic_bool networkAvailable_{true};
 
         VoiceAssistantManager &voiceAssistantManager;
 
         bool initialized;
         bool isClientRunning;
-        int reconnectAttempts;
+        std::atomic<uint32_t> consecutiveFailures_{0};
+        std::atomic<uint32_t> connectGeneration_{0};
+        std::atomic<uint32_t> connectOutcome_{CONNECT_OUTCOME_PENDING};
+        std::atomic<uint32_t> connectOutcomeGeneration_{0};
 
         QueueHandle_t uplinkQueue_ = nullptr;
+        QueueHandle_t uplinkFreeQueue_ = nullptr;
         TaskHandle_t uplinkTaskHandle_ = nullptr;
         SemaphoreHandle_t uplinkStoppedSem_ = nullptr;
         StackType_t *uplinkTaskStack_ = nullptr;
@@ -132,6 +185,9 @@ namespace btspeaker {
         std::atomic<bool> uplinkAccepting_{false};
         std::atomic<uint32_t> uplinkDiagEnqueued_{0};
         std::atomic<uint32_t> uplinkDiagDroppedOldest_{0};
+        std::atomic<uint32_t> uplinkDiagDroppedPlayback_{0};
+        std::atomic<bool> playbackActive_{false};
+        ImaAdpcmState adpcmState_{};
     };
 
 } // namespace btspeaker

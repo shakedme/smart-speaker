@@ -1,6 +1,7 @@
 #include <esp_sntp.h>
 #include "../include/app_manager.hpp"
 #include "../include/voice_config.hpp"
+#include "../include/task_affinity.hpp"
 #include "../include/audio_source_manager.hpp"
 #include "../include/memory_utils.hpp"
 
@@ -21,6 +22,7 @@ namespace btspeaker {
 
     AppManager::AppManager() {
         ESP_LOGI(TAG, "🚀 Starting AppManager initialization");
+        logTaskAffinityLayout();
 
         initNVS();
 
@@ -32,6 +34,18 @@ namespace btspeaker {
         if (wifiManager->isConnected()) {
             voiceAssistantManager = std::make_unique<VoiceAssistantManager>(*audioSourceManager);
         }
+
+        wifiManager->setStatusCallback([this](WiFiManager::Status status) {
+            if (!voiceAssistantManager) {
+                return;
+            }
+            if (status == WiFiManager::Status::CONNECTED) {
+                voiceAssistantManager->onNetworkAvailable();
+            } else if (status == WiFiManager::Status::DISCONNECTED ||
+                       status == WiFiManager::Status::FAILED) {
+                voiceAssistantManager->onNetworkLost();
+            }
+        });
 
         ESP_LOGI(TAG, "✅ AppManager initialization complete");
     }

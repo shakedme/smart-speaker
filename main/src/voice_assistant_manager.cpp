@@ -1,4 +1,5 @@
 #include "../include/voice_assistant_manager.hpp"
+#include "../include/task_affinity.hpp"
 #include "../include/microphone_manager.hpp"
 #include "../include/websocket_voice_client.hpp"
 #include "../include/audio_source_manager.hpp"
@@ -140,10 +141,10 @@ namespace btspeaker {
                 "voice_inbound",
                 INBOUND_TASK_STACK_WORDS,
                 this,
-                INBOUND_TASK_PRIORITY,
+                kVoiceInboundPriority,
                 inboundTaskStack_,
                 inboundTaskBuffer_,
-                1);
+                kIoCore);
 
         if (!inboundTaskHandle_) {
             shutdownInboundWorker();
@@ -179,6 +180,18 @@ namespace btspeaker {
         shutdownInboundWorker();
     }
 
+    void VoiceAssistantManager::onNetworkLost() {
+        if (websocketClient) {
+            websocketClient->onNetworkLost();
+        }
+    }
+
+    void VoiceAssistantManager::onNetworkAvailable() {
+        if (websocketClient) {
+            websocketClient->onNetworkAvailable();
+        }
+    }
+
     esp_err_t VoiceAssistantManager::start() {
         setVoiceAssistantState(VoiceAssistantState::LISTENING);
 
@@ -211,7 +224,7 @@ namespace btspeaker {
                 .payload = copy,
         };
 
-        if (!enqueueInboundMessage(std::move(message))) {
+        if (!enqueueInboundMessage(std::move(message), INBOUND_AUDIO_ENQUEUE_TIMEOUT_MS)) {
             ESP_LOGW(TAG, "Dropped audio response chunk (%u bytes), inbound queue full",
                      static_cast<unsigned>(length));
             freeInboundPayloadPtr(copy);
@@ -244,18 +257,19 @@ namespace btspeaker {
                 .payload = copy,
         };
 
-        if (!enqueueInboundMessage(std::move(message))) {
+        if (!enqueueInboundMessage(std::move(message), 0)) {
             ESP_LOGW(TAG, "Dropped text message (%u bytes), inbound queue full",
                      static_cast<unsigned>(length));
             freeInboundPayloadPtr(copy);
         }
     }
 
-    bool VoiceAssistantManager::enqueueInboundMessage(InboundMessage &&message) {
+    bool VoiceAssistantManager::enqueueInboundMessage(InboundMessage &&message, TickType_t timeout_ms) {
         if (!inboundQueue_) {
             return false;
         }
-        return xQueueSend(inboundQueue_, &message, 0) == pdTRUE;
+        const TickType_t ticks = timeout_ms > 0 ? pdMS_TO_TICKS(timeout_ms) : 0;
+        return xQueueSend(inboundQueue_, &message, ticks) == pdTRUE;
     }
 
     void VoiceAssistantManager::freeInboundPayload(InboundMessage &message) {
@@ -380,7 +394,21 @@ namespace btspeaker {
 
         if (current_state == VoiceAssistantState::LISTENING ||
             current_state == VoiceAssistantState::WAITING_FOR_USER) {
-            if (websocketClient && websocketClient->isConnected()) {
+            const bool voice_response_draining =
+                    audioSourceManager.getCurrentSource() == AudioSource::VOICE_RESPONSE &&
+                    !audioSourceManager.isVoiceResponsePlaybackIdle();
+            const bool defer_uplink_for_voice_response =
+                    current_state == VoiceAssistantState::WAITING_FOR_USER && voice_response_draining;
+
+            if (defer_uplink_for_voice_response) {
+                // Hold mic uplink until LLM playback buffers drain to avoid WS overload/echo.
+            } else if (websocketClient && websocketClient->isConnected()) {
+                const AudioSource playback_source = audioSourceManager.getCurrentSource();
+                const bool playback_active = playback_source == AudioSource::BLUETOOTH ||
+                                             playback_source == AudioSource::SPOTIFY ||
+                                             voice_response_draining;
+                websocketClient->setPlaybackActive(playback_active);
+
                 const int64_t before_send_us = esp_timer_get_time();
                 const esp_err_t ret = websocketClient->sendAudioChunk(data, length);
                 const uint32_t send_us = static_cast<uint32_t>(esp_timer_get_time() - before_send_us);

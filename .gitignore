@@ -40,5 +40,6 @@ cmake-build-debug*
 *.o
 managed_components
 backend/node_modules
+backend/.env
 
 hey_rufus

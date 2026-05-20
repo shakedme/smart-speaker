@@ -42,6 +42,10 @@ namespace btspeaker {
 
         esp_err_t start();
 
+        void onNetworkLost();
+
+        void onNetworkAvailable();
+
         // Called from websocket_task: copy payload and return immediately.
         void onAudioResponse(const uint8_t *data, size_t length);
 
@@ -61,10 +65,10 @@ namespace btspeaker {
         };
 
         static constexpr const char *TAG = "VOICE_ASST";
-        static constexpr size_t INBOUND_QUEUE_DEPTH = 16;
+        static constexpr size_t INBOUND_QUEUE_DEPTH = 48;
+        static constexpr TickType_t INBOUND_AUDIO_ENQUEUE_TIMEOUT_MS = 500;
         static constexpr size_t MAX_INBOUND_TEXT_BYTES = 2048;
         static constexpr size_t INBOUND_TASK_STACK_WORDS = 8192;
-        static constexpr UBaseType_t INBOUND_TASK_PRIORITY = 6;
         static constexpr int UPSTREAM_DIAG_INTERVAL_MS = 5000;
 
         void logUpstreamDiagnostics(int64_t now_us,
@@ -85,7 +89,7 @@ namespace btspeaker {
 
         void runInboundWorker();
 
-        bool enqueueInboundMessage(InboundMessage &&message);
+        bool enqueueInboundMessage(InboundMessage &&message, TickType_t timeout_ms = 0);
 
         void freeInboundPayload(InboundMessage &message);
 

@@ -1,4 +1,5 @@
 #include "MercurySession.h"
+#include "cspot_task_config.h"
 
 #include <string.h>     // for memcpy
 #include <memory>       // for shared_ptr
@@ -62,7 +63,7 @@ T extractData(const std::vector<uint8_t> &data, size_t &pos) {
 
 MercurySession::MercurySession(std::shared_ptr<TimeProvider> timeProvider)
         : bell::Task("mercury_dispatcher", 8 * 1024, 6,
-                     1) {  // prio above cspot_player so recv isn't starved during preload
+                     CSPOT_MERCURY_CORE) {  // prio above cspot_player so recv isn't starved during preload
     responseSemaphore = std::make_shared<bell::WrappedSemaphore>();
     this->timeProvider = timeProvider;
 }

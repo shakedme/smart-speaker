@@ -160,6 +160,10 @@ namespace btspeaker {
         }
     }
 
+    void WiFiManager::setStatusCallback(StatusCallback callback) {
+        statusCallback = std::move(callback);
+    }
+
     esp_err_t WiFiManager::disconnect() {
         ESP_LOGI(TAG, "Disconnecting from WiFi");
 
@@ -221,6 +225,10 @@ namespace btspeaker {
             ESP_LOGI(self->TAG, "WiFi started");
         } else if (eventBase == WIFI_EVENT && eventId == WIFI_EVENT_STA_DISCONNECTED) {
             esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+            self->status = Status::DISCONNECTED;
+            if (self->statusCallback) {
+                self->statusCallback(self->status);
+            }
             if (self->retryCount < MAX_RETRY) {
                 esp_wifi_connect();
                 self->retryCount++;

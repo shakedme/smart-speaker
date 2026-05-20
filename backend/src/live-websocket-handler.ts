@@ -1,10 +1,16 @@
 import {WebSocket} from 'ws';
 import {v4 as uuidv4} from 'uuid';
-import {GoogleGenAI, Modality, Part} from '@google/genai';
+import {GoogleGenAI, Modality, Part, Session} from '@google/genai';
 import {Cobra} from "@picovoice/cobra-node";
 import {Porcupine} from "@picovoice/porcupine-node";
 import axios from 'axios';
 import * as fs from "node:fs";
+import {
+    createImaAdpcmState,
+    decodeImaAdpcmToPcm,
+    UPLINK_FORMAT_IMA_ADPCM,
+    UPLINK_FORMAT_PCM,
+} from "./ima-adpcm";
 
 // The state of the WebSocket session handler
 type SessionState =
@@ -21,11 +27,16 @@ interface ControlMessage {
 }
 
 // VAD constants
-const VAD_SENSITIVITY = 0.2; // 0.0 (lowest) to 1.0 (highest)
-const VAD_SILENCE_TIMEOUT_MS = 2400; // Time of silence before processing
+const VAD_SENSITIVITY = 0.4; // 0.0 (lowest) to 1.0 (highest)
+const VAD_SILENCE_TIMEOUT_MS = 2000; // Time of silence before processing
 const CONVERSATION_TIMEOUT_MS = 5000; // Time to keep conversation session alive with no user input
+const MIN_RESPONSE_AUDIO_BYTES = 320; // Skip Gemini framing/header chunks (~2 bytes)
 const WAKE_WORD_WINDOW_MS = 1500; // Reduced from 3000ms for lower latency
 const WAKE_WORD_SENSITIVITY = 0.4; // Lower = more sensitive
+const UPLINK_PCM_SAMPLE_RATE = 16000;
+const UPLINK_RX_DIAG_INTERVAL_MS = 5000;
+const UPLINK_RX_BURST_GAP_MS = 5;
+const UPLINK_RX_STALL_GAP_MS = 150;
 
 export class LiveWebSocketHandler {
     private ws: WebSocket;
@@ -38,7 +49,7 @@ export class LiveWebSocketHandler {
 
     // State management
     private sessionState: SessionState = 'IDLE';
-    private responseSession: any = null;
+    private responseSession: Session | null = null;
 
     // Buffers
     private audioBuffer: Buffer[] = []; // Stores the complete user utterance
@@ -55,6 +66,19 @@ export class LiveWebSocketHandler {
     // Conversation management
     private conversationTimer: NodeJS.Timeout | null = null;
     private isGeminiSpeaking: boolean = false;
+    private uplinkAdpcmState = createImaAdpcmState();
+
+    // Receive-side transport diagnostics. Keep this aggregated so logging does
+    // not distort packet timing while profiling ESP32 uplink jitter.
+    private uplinkRxWindowStartMs: number = Date.now();
+    private uplinkRxLastPacketMs: number = 0;
+    private uplinkRxPackets: number = 0;
+    private uplinkRxBytes: number = 0;
+    private uplinkRxGapSumMs: number = 0;
+    private uplinkRxGapCount: number = 0;
+    private uplinkRxGapMaxMs: number = 0;
+    private uplinkRxBurstPackets: number = 0;
+    private uplinkRxStallPackets: number = 0;
 
 
     constructor(ws: WebSocket) {
@@ -62,14 +86,14 @@ export class LiveWebSocketHandler {
         this.sessionId = uuidv4();
 
         // Initialize Google Gemini
-        const googleApiKey = 'AIzaSyDLWE7QnreYIWkMiWGNklp5h-oq1TIE9UU';
+        const googleApiKey = process.env.GOOGLE_AI_API_KEY;
         if (!googleApiKey) {
             throw new Error('GOOGLE_AI_API_KEY is not set in environment variables.');
         }
         this.gemini = new GoogleGenAI({apiKey: googleApiKey});
 
         // Initialize Picovoice Cobra VAD
-        const picoAccessKey = 'NrqcOM1naSSYl1fYVru7i9Mbmu4+1s99e5ZUUDmOMdaFBnb0/+TEkw==';
+        const picoAccessKey = process.env.PICOVOICE_ACCESS_KEY;
         if (!picoAccessKey) {
             throw new Error('PICOVOICE_ACCESS_KEY is not set in environment variables. Get one from Picovoice Console.');
         }
@@ -97,10 +121,78 @@ export class LiveWebSocketHandler {
             this.log('warn', `Received unexpected text message: ${data.toString()}`);
             return;
         }
-
+        this.recordUplinkReceive(data.length);
         if (this.isRecording) {
-            this.handleAudioData(data);
+            try {
+                const pcm = this.decodeUplinkAudio(data);
+                if (pcm.length > 0) {
+                    this.handleAudioData(pcm);
+                }
+            } catch (error) {
+                this.log('error', `Failed to process uplink audio: ${error}`);
+            }
         }
+    }
+
+    private recordUplinkReceive(length: number): void {
+        const now = Date.now();
+        if (this.uplinkRxLastPacketMs > 0) {
+            const gapMs = now - this.uplinkRxLastPacketMs;
+            this.uplinkRxGapSumMs += gapMs;
+            this.uplinkRxGapCount++;
+            this.uplinkRxGapMaxMs = Math.max(this.uplinkRxGapMaxMs, gapMs);
+            if (gapMs <= UPLINK_RX_BURST_GAP_MS) {
+                this.uplinkRxBurstPackets++;
+            } else if (gapMs >= UPLINK_RX_STALL_GAP_MS) {
+                this.uplinkRxStallPackets++;
+            }
+        }
+
+        this.uplinkRxLastPacketMs = now;
+        this.uplinkRxPackets++;
+        this.uplinkRxBytes += length;
+
+        const elapsedMs = now - this.uplinkRxWindowStartMs;
+        if (elapsedMs < UPLINK_RX_DIAG_INTERVAL_MS) {
+            return;
+        }
+
+        const avgGapMs = this.uplinkRxGapCount > 0
+            ? Math.round(this.uplinkRxGapSumMs / this.uplinkRxGapCount)
+            : 0;
+        this.log(
+            'info',
+            `[UPLINK_RX_DIAG] packets=${this.uplinkRxPackets} bytes=${this.uplinkRxBytes} ` +
+            `avg_gap_ms=${avgGapMs} max_gap_ms=${this.uplinkRxGapMaxMs} ` +
+            `burst_gap<=${UPLINK_RX_BURST_GAP_MS}ms=${this.uplinkRxBurstPackets} ` +
+            `stall_gap>=${UPLINK_RX_STALL_GAP_MS}ms=${this.uplinkRxStallPackets}`
+        );
+
+        this.uplinkRxWindowStartMs = now;
+        this.uplinkRxPackets = 0;
+        this.uplinkRxBytes = 0;
+        this.uplinkRxGapSumMs = 0;
+        this.uplinkRxGapCount = 0;
+        this.uplinkRxGapMaxMs = 0;
+        this.uplinkRxBurstPackets = 0;
+        this.uplinkRxStallPackets = 0;
+    }
+
+    private decodeUplinkAudio(data: Buffer): Buffer {
+        if (data.length === 0) {
+            return data;
+        }
+
+        const format = data[0];
+        if (format === UPLINK_FORMAT_IMA_ADPCM) {
+            return decodeImaAdpcmToPcm(data.subarray(1), this.uplinkAdpcmState);
+        }
+        if (format === UPLINK_FORMAT_PCM) {
+            return data.subarray(1);
+        }
+
+        // Legacy: raw PCM without framing byte.
+        return data;
     }
 
     private isValidAudioData(data: Buffer): boolean {
@@ -112,7 +204,6 @@ export class LiveWebSocketHandler {
             this.log('warn', 'Invalid audio data received. Skipping...');
             return;
         }
-
         if (!this.wakeWordDetected && !this.responseSession) {
             this.addToWakeWordBuffer(data);
             this.wakeWordProcessBuffer = Buffer.concat([this.wakeWordProcessBuffer, data]);
@@ -134,9 +225,7 @@ export class LiveWebSocketHandler {
             }
 
             const voiceProbability = this.cobra.process(audioFrameInt16);
-            this.log('debug', `Voice probability: ${voiceProbability}`);
             if (voiceProbability > VAD_SENSITIVITY) {
-                this.log('debug', `Voice activity detected with probability: ${voiceProbability}`);
                 this.voiceActivityDetected = true;
 
                 if (this.wakeWordDetected || this.responseSession) {
@@ -205,7 +294,10 @@ export class LiveWebSocketHandler {
         // If we don't hear more speech for the timeout duration, process the command only if wake word was detected
         this.silenceTimer = setTimeout(() => {
             if ((this.wakeWordDetected || this.responseSession) && this.audioBuffer.length > 0) {
-                this.log('info', `Silence detected after wake word. Processing accumulated audio.`);
+                const label = this.responseSession && this.sessionState === 'WAITING_FOR_USER'
+                    ? 'Silence detected after follow-up speech'
+                    : 'Silence detected after wake word';
+                this.log('info', `${label}. Processing accumulated audio.`);
                 this.processIntent();
             } else {
                 this.log('debug', `Silence timeout - Wake word: ${this.wakeWordDetected}, Buffer size: ${this.audioBuffer.length}`);
@@ -228,17 +320,41 @@ export class LiveWebSocketHandler {
         }
         if (this.responseSession) {
             this.conversationTimer = setTimeout(() => {
+                if (this.sessionState === 'STREAMING_RESPONSE' ||
+                    this.sessionState === 'PROCESSING_INTENT') {
+                    this.log('debug', 'Conversation timeout deferred - turn in progress.');
+                    this.resetConversationTimer();
+                    return;
+                }
                 if (!this.isGeminiSpeaking) {
                     this.log('info', 'Conversation timeout. Closing session.');
                     this.endConversation();
                 } else {
                     this.log('info', 'Conversation timeout delayed - Gemini is still speaking.');
-                    // Reset timer to check again later
                     this.resetConversationTimer();
                 }
             }, CONVERSATION_TIMEOUT_MS);
         }
 
+    }
+
+    private enterWaitingForUser(): void {
+        if (this.sessionState === 'WAITING_FOR_USER') {
+            return;
+        }
+
+        this.isGeminiSpeaking = false;
+        this.uplinkAdpcmState = createImaAdpcmState();
+        this.audioBuffer = [];
+        this.vadBuffer = Buffer.alloc(0);
+        this.voiceActivityDetected = false;
+        if (this.silenceTimer) {
+            clearTimeout(this.silenceTimer);
+            this.silenceTimer = null;
+        }
+        this.log('info', 'Ready for follow-up. Speak without saying the wake word again.');
+        this.resetConversationTimer();
+        this.broadcastStateChange('WAITING_FOR_USER');
     }
 
     private broadcastStateChange(newState: SessionState): void {
@@ -253,8 +369,18 @@ export class LiveWebSocketHandler {
     }
 
     private async processIntent(): Promise<void> {
-        if (!this.isRecording || this.audioBuffer.length === 0) {
-            this.log('warn', 'processIntent called with no audio or in wrong state.');
+        const continuingSession = this.responseSession !== null;
+
+        if (this.audioBuffer.length === 0) {
+            this.log('warn', 'processIntent called with empty audio buffer.');
+            if (!continuingSession) {
+                this.resetWakeWordState();
+            }
+            return;
+        }
+
+        if (!this.isRecording && !continuingSession) {
+            this.log('warn', 'processIntent called in non-recording state.');
             this.resetWakeWordState();
             return;
         }
@@ -262,29 +388,24 @@ export class LiveWebSocketHandler {
         this.broadcastStateChange('PROCESSING_INTENT');
         if (this.silenceTimer) clearTimeout(this.silenceTimer);
 
-        this.log('info', `Sending ${this.audioBuffer.length} audio chunks to Gemini for intent detection.`);
-
+        const chunkCount = this.audioBuffer.length;
         try {
             const fullAudio = Buffer.concat(this.audioBuffer);
-            const wavBuffer = this.createWavBuffer(fullAudio);
 
-            // If we already have a conversation session, continue it
-            if (this.responseSession) {
-                this.log('info', 'Continuing existing conversation session.');
-                this.broadcastStateChange('STREAMING_RESPONSE');
-                this.responseSession.sendClientContent({
-                    turns: [{
-                        parts: [{
-                            inlineData: {
-                                mimeType: 'audio/wav',
-                                data: wavBuffer.toString('base64')
-                            }
-                        }]
-                    }]
-                });
-                this.resetWakeWordState();
+            if (continuingSession) {
+                this.log('info', `Processing follow-up utterance (${chunkCount} buffered chunks, ${fullAudio.length} bytes PCM).`);
+                try {
+                    this.continueConversationSession(fullAudio);
+                } catch (error) {
+                    this.log('error', `Failed to continue conversation: ${error}`);
+                    this.sendError(`Could not continue conversation: ${error}`);
+                    this.endConversation();
+                }
                 return;
             }
+
+            this.log('info', `Sending ${chunkCount} audio chunks to Gemini for intent detection.`);
+            const wavBuffer = this.createWavBuffer(fullAudio);
 
             // First interaction - determine intent
             const systemInstruction = `You are a smart home assistant intent detection system. 
@@ -327,8 +448,46 @@ export class LiveWebSocketHandler {
             this.sendError(`Could not determine intent: ${error}`);
             this.resetToListening();
         } finally {
-            this.resetWakeWordState();
+            if (!continuingSession) {
+                this.resetWakeWordState();
+            }
         }
+    }
+
+    private continueConversationSession(pcmAudio: Buffer): void {
+        if (!this.responseSession) {
+            throw new Error('No active live response session');
+        }
+        if (pcmAudio.length === 0) {
+            throw new Error('Empty PCM audio for follow-up turn');
+        }
+
+        this.log('info', `Continuing conversation (${pcmAudio.length} bytes PCM follow-up).`);
+        this.isGeminiSpeaking = false;
+        this.clearAudioBuffers();
+
+        this.sendUserPcmToLiveSession(pcmAudio);
+
+        this.broadcastStateChange('STREAMING_RESPONSE');
+        this.resetConversationTimer();
+    }
+
+    /**
+     * Send a complete batched utterance with server-side VAD (default). Docs show a single PCM
+     * blob per user turn; the server derives end-of-speech from the audio itself.
+     */
+    private sendUserPcmToLiveSession(pcmAudio: Buffer): void {
+        if (!this.responseSession) {
+            throw new Error('No active live response session');
+        }
+
+        this.log('info', `Sending follow-up as single PCM blob (${pcmAudio.length} bytes) with server VAD.`);
+        this.responseSession.sendRealtimeInput({
+            audio: {
+                data: pcmAudio.toString('base64'),
+                mimeType: `audio/pcm;rate=${UPLINK_PCM_SAMPLE_RATE}`,
+            },
+        });
     }
 
     private createWavBuffer(pcmData: Buffer): Buffer {
@@ -406,11 +565,11 @@ export class LiveWebSocketHandler {
     private async startAudioResponseSession(question: string): Promise<void> {
         try {
             this.responseSession = await this.gemini.live.connect({
-                model: 'gemini-2.5-flash-exp-native-audio-thinking-dialog',
+                model: 'gemini-3.1-flash-live-preview',
                 config: {
                     responseModalities: [Modality.AUDIO],
-                    speechConfig: {voiceConfig: {prebuiltVoiceConfig: {voiceName: "Orus"}}},
-                    systemInstruction: `You are a helpful voice assistant. Provide concise, natural responses. Keep your responses conversational and be ready for follow-up questions.`
+                    speechConfig: {voiceConfig: {prebuiltVoiceConfig: {voiceName: "Gacrux"}}},
+                    systemInstruction: `You are a helpful voice assistant. Provide concise, natural responses. Keep your responses conversational and be ready for follow-up questions.`,
                 },
                 callbacks: {
                     onopen: () => {
@@ -418,19 +577,35 @@ export class LiveWebSocketHandler {
                     },
                     onmessage: (message: any) => this.handleAudioResponse(message),
                     onerror: (e: any) => {
-                        this.log('error', `Audio response error: ${e}`);
+                        this.log('error', `Audio response error: ${JSON.stringify(e)}`);
                         this.endConversation();
                     },
-                    onclose: () => {
-                        this.log('info', 'Audio response session closed.');
-                        // Don't reset state here - let conversation timeout handle it
+                    onclose: (event: any) => {
+                        const closeCode = event?.code ?? 'unknown';
+                        const closeReason = event?.reason || 'none';
+                        this.log('info', `Audio response session closed (code=${closeCode}, reason=${closeReason}).`);
+                        this.responseSession = null;
+
+                        if (this.sessionState === 'LISTENING' || this.sessionState === 'IDLE') {
+                            return;
+                        }
+
+                        if (this.sessionState === 'PROCESSING_INTENT') {
+                            this.log('error', 'Live session closed while processing follow-up.');
+                            this.sendError('Conversation session ended unexpectedly.');
+                            this.resetToListening();
+                        } else if (this.sessionState === 'STREAMING_RESPONSE') {
+                            this.log('warn', 'Live session closed during response.');
+                            this.resetToListening();
+                        } else if (this.sessionState === 'WAITING_FOR_USER') {
+                            this.log('info', 'Follow-up session ended; resetting to wake word listen.');
+                            this.resetToListening();
+                        }
                     },
                 }
             });
 
-            this.responseSession.sendClientContent({
-                turns: question
-            });
+            this.responseSession.sendRealtimeInput({text: question});
 
             // Clear audio buffers after sending
             this.clearAudioBuffers();
@@ -442,23 +617,34 @@ export class LiveWebSocketHandler {
     }
 
     private handleAudioResponse(message: any): void {
-        // Handle turn completion
-        if (message.serverContent?.turnComplete) {
-            this.isGeminiSpeaking = false;
-            this.log('info', 'Gemini finished speaking. Waiting for user response.');
-            this.resetConversationTimer();
-            this.broadcastStateChange('WAITING_FOR_USER');
+        if (message.goAway) {
+            this.log('warn', `Live session GoAway: ${JSON.stringify(message.goAway)}`);
+        }
+
+        const serverContent = message.serverContent;
+
+        if (serverContent?.generationComplete) {
+            this.log('info', 'Gemini generation complete.');
+        }
+
+        if (serverContent?.turnComplete) {
+            this.log('info', 'Gemini turn complete. Ready for follow-up.');
+            this.enterWaitingForUser();
             return;
         }
 
         // Handle audio data
-        const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+        const audioData = serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
         if (audioData) {
             if (!this.isGeminiSpeaking) {
                 this.isGeminiSpeaking = true;
                 this.log('info', 'Gemini started speaking.');
             }
             const audioBuffer = Buffer.from(audioData, 'base64');
+            if (audioBuffer.length < MIN_RESPONSE_AUDIO_BYTES) {
+                this.log('debug', `Skipping tiny audio response chunk of ${audioBuffer.length} bytes.`);
+                return;
+            }
             if (this.ws.readyState === WebSocket.OPEN) {
                 this.log('debug', `Sending audio response chunk of ${audioBuffer.length} bytes.`);
                 this.ws.send(audioBuffer);
@@ -469,17 +655,18 @@ export class LiveWebSocketHandler {
     private endConversation(): void {
         this.log('info', 'Ending conversation session.');
         if (this.responseSession) {
-            this.responseSession.close();
+            const session = this.responseSession;
             this.responseSession = null;
+            session.close();
         }
         this.resetToListening();
     }
 
     private resetToListening(): void {
         this.clearAllTimers();
+        this.isGeminiSpeaking = false;
         this.resetWakeWordState();
         this.broadcastStateChange('LISTENING');
-        this.isGeminiSpeaking = false;
         this.log('info', 'Reset to listening state. Ready for next wake word.');
     }
 

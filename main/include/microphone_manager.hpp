@@ -42,7 +42,7 @@ namespace btspeaker {
 
     private:
         static constexpr const char *TAG = "MIC_MGR";
-        static constexpr int AUDIO_BUFFER_SIZE = 1024 * 8;
+        static constexpr int AUDIO_BUFFER_SIZE = 1024 * 4;
         static constexpr float CUTOFF_HZ = 50.0f;             // remove DC and sub-50Hz drift
         static constexpr float SAMPLE_RATE = 16000.0f;          // your mic ADC rate
         static constexpr float F_NORM = CUTOFF_HZ / SAMPLE_RATE;  // ≈0.003125

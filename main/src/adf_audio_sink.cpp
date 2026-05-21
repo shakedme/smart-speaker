@@ -141,16 +141,11 @@ namespace btspeaker {
             return 0;
         }
 
-        size_t filled = 0;
         if (audioPipeline->i2SStreamReader) {
-            filled += ringbufFilled(
+            return ringbufFilled(
                     audio_element_get_output_ringbuf(audioPipeline->i2SStreamReader.get()));
         }
-        if (audioPipeline->i2SStreamWriter) {
-            filled += ringbufFilled(
-                    audio_element_get_input_ringbuf(audioPipeline->i2SStreamWriter.get()));
-        }
-        return filled;
+        return 0;
     }
 
     size_t ADFAudioSink::getBufferCapacity() {
@@ -158,8 +153,15 @@ namespace btspeaker {
             return 0;
         }
 
-        size_t capacity = kRawRingBufferSize + (256 * 1024);
-        return capacity;
+        if (audioPipeline->i2SStreamReader) {
+            ringbuf_handle_t rb =
+                    audio_element_get_output_ringbuf(audioPipeline->i2SStreamReader.get());
+            const int size = rb ? rb_get_size(rb) : 0;
+            if (size > 0) {
+                return static_cast<size_t>(size);
+            }
+        }
+        return kRawRingBufferSize;
     }
 
     void ADFAudioSink::setupPipeline() {

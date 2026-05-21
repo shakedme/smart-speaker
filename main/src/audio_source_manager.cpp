@@ -61,15 +61,22 @@ namespace btspeaker {
 
         ESP_LOGI(TAG, "Switching from source %d to %d", (int) currentSource, (int) source);
 
-        ensureI2SDriverStopped();
-
         // Store previous source for restoration after voice response
         if (source == AudioSource::VOICE_RESPONSE && currentSource != AudioSource::VOICE_RESPONSE) {
             previousSource = currentSource;
             ESP_LOGD(TAG, "Storing previous source %d for restoration", (int) previousSource);
+            if (currentSource == AudioSource::SPOTIFY && spotifyPipeline) {
+                spotifyPipeline->suspendForVoiceResponse();
+            } else if (currentSource == AudioSource::BLUETOOTH && btPipeline) {
+                btPipeline->suspendForVoiceResponse();
+            } else {
+                ensureI2SDriverStopped();
+            }
             // Extra delay for voice response due to sample rate change (44.1kHz -> 24kHz)
             ESP_LOGI(TAG, "Adding extra delay for voice response I2S reconfiguration");
             vTaskDelay(pdMS_TO_TICKS(300));
+        } else {
+            ensureI2SDriverStopped();
         }
 
         startSource(source);
@@ -118,6 +125,33 @@ namespace btspeaker {
 
         AudioSource restore_source = previousSource;
         previousSource = AudioSource::NONE;
+
+        if (currentSource == AudioSource::VOICE_RESPONSE && llmPipeline) {
+            llmPipeline->cleanupPipeline();
+            currentSource = AudioSource::NONE;
+        }
+
+        if (restore_source == AudioSource::SPOTIFY && spotifyPipeline) {
+            esp_err_t ret = spotifyPipeline->resumeAfterVoiceResponse();
+            if (ret == ESP_OK) {
+                currentSource = AudioSource::SPOTIFY;
+                ESP_LOGI(TAG, "Successfully restored Spotify after voice response");
+                ESP_LOGI(TAG, "[AUDIO_SRC_DIAG] active playback source is now %d (0=NONE 2=BT 3=SPOTIFY 1=VOICE)",
+                         (int) currentSource);
+            }
+            return ret;
+        }
+
+        if (restore_source == AudioSource::BLUETOOTH && btPipeline) {
+            esp_err_t ret = btPipeline->resumeAfterVoiceResponse();
+            if (ret == ESP_OK) {
+                currentSource = AudioSource::BLUETOOTH;
+                ESP_LOGI(TAG, "Successfully restored Bluetooth after voice response");
+                ESP_LOGI(TAG, "[AUDIO_SRC_DIAG] active playback source is now %d (0=NONE 2=BT 3=SPOTIFY 1=VOICE)",
+                         (int) currentSource);
+            }
+            return ret;
+        }
 
         return switchToSource(restore_source);
     }

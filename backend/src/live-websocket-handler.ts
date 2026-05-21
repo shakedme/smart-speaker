@@ -34,6 +34,8 @@ const MIN_RESPONSE_AUDIO_BYTES = 320; // Skip Gemini framing/header chunks (~2 b
 const WAKE_WORD_WINDOW_MS = 1500; // Reduced from 3000ms for lower latency
 const WAKE_WORD_SENSITIVITY = 0.4; // Lower = more sensitive
 const UPLINK_PCM_SAMPLE_RATE = 16000;
+const GEMINI_RESPONSE_PCM_SAMPLE_RATE = 24000;
+const GEMINI_RESPONSE_VOICE = 'Sulafat';
 const UPLINK_RX_DIAG_INTERVAL_MS = 5000;
 const UPLINK_RX_BURST_GAP_MS = 5;
 const UPLINK_RX_STALL_GAP_MS = 150;
@@ -66,6 +68,7 @@ export class LiveWebSocketHandler {
     // Conversation management
     private conversationTimer: NodeJS.Timeout | null = null;
     private isGeminiSpeaking: boolean = false;
+    private responseAudioMimeLogged: boolean = false;
     private uplinkAdpcmState = createImaAdpcmState();
 
     // Receive-side transport diagnostics. Keep this aggregated so logging does
@@ -568,7 +571,14 @@ export class LiveWebSocketHandler {
                 model: 'gemini-3.1-flash-live-preview',
                 config: {
                     responseModalities: [Modality.AUDIO],
-                    speechConfig: {voiceConfig: {prebuiltVoiceConfig: {voiceName: "Gacrux"}}},
+                    speechConfig: {
+                        languageCode: 'en-US',
+                        voiceConfig: {
+                            prebuiltVoiceConfig: {
+                                voiceName: GEMINI_RESPONSE_VOICE,
+                            },
+                        },
+                    },
                     systemInstruction: `You are a helpful voice assistant. Provide concise, natural responses. Keep your responses conversational and be ready for follow-up questions.`,
                 },
                 callbacks: {
@@ -605,6 +615,7 @@ export class LiveWebSocketHandler {
                 }
             });
 
+            this.responseAudioMimeLogged = false;
             this.responseSession.sendRealtimeInput({text: question});
 
             // Clear audio buffers after sending
@@ -634,11 +645,20 @@ export class LiveWebSocketHandler {
         }
 
         // Handle audio data
-        const audioData = serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+        const inlineData = serverContent?.modelTurn?.parts?.find((part: Part) => part.inlineData)?.inlineData;
+        const audioData = inlineData?.data;
         if (audioData) {
             if (!this.isGeminiSpeaking) {
                 this.isGeminiSpeaking = true;
                 this.log('info', 'Gemini started speaking.');
+            }
+            if (!this.responseAudioMimeLogged) {
+                this.responseAudioMimeLogged = true;
+                this.log(
+                    'info',
+                    `Gemini response audio format: ${inlineData?.mimeType ?? `audio/pcm;rate=${GEMINI_RESPONSE_PCM_SAMPLE_RATE}`}; ` +
+                    `ESP playback expects ${GEMINI_RESPONSE_PCM_SAMPLE_RATE}Hz mono s16le; voice=${GEMINI_RESPONSE_VOICE}`
+                );
             }
             const audioBuffer = Buffer.from(audioData, 'base64');
             if (audioBuffer.length < MIN_RESPONSE_AUDIO_BYTES) {

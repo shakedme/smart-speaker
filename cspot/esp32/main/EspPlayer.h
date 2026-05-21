@@ -18,7 +18,6 @@ namespace cspot {
 class EspPlayer : public bell::Task {
 public:
     static constexpr size_t kPreBufferBytes = 192 * 1024;
-    static constexpr size_t kPlayStartPreBufferBytes = 128 * 1024;
 
     EspPlayer(std::shared_ptr<AudioSink> sink,
               std::shared_ptr<cspot::DeviceStateHandler> handler);
@@ -26,6 +25,8 @@ public:
     ~EspPlayer();
 
     void disconnect();
+
+    void resetPrebuffer();
 
 private:
     static constexpr uint32_t kPositionSyncIntervalMs = 1000;
@@ -48,7 +49,6 @@ private:
     std::atomic<bool> isPreBuffered = false;
     std::atomic<bool> pendingTrackEnd = false;
     bool logFirstAudioPending_ = false;
-    bool reducedPrebufferActive_ = false;
     size_t lastTrackHash = 0;
 
     std::mutex trackMutex;

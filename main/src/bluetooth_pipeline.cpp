@@ -104,6 +104,22 @@ namespace btspeaker {
         }
     }
 
+    esp_err_t BluetoothPipeline::suspendForVoiceResponse() {
+        ESP_LOGI(TAG, "Suspending Bluetooth for voice response");
+        avrcpPause();
+        cleanupPipeline();
+        return ESP_OK;
+    }
+
+    esp_err_t BluetoothPipeline::resumeAfterVoiceResponse() {
+        ESP_LOGI(TAG, "Resuming Bluetooth after voice response");
+        if (!isRunning()) {
+            setupPipeline();
+        }
+        avrcpResume();
+        return ESP_OK;
+    }
+
     // Helper to send passthrough command (pressed + released)
     static void send_avrcp_passthrough_cmd(uint8_t key_code) {
         uint8_t tl = avrcp_tl++ & 0x0F;

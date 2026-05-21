@@ -67,7 +67,6 @@ EspPlayer::EspPlayer(std::shared_ptr<AudioSink> sink,
                         break;
                     case cspot::DeviceStateHandler::CommandType::SKIP_NEXT:
                     case cspot::DeviceStateHandler::CommandType::SKIP_PREV:
-                        reducedPrebufferActive_ = true;
                         this->audioSink->flush();
                         this->isPreBuffered = false;
                         lastTrackHash = 0;
@@ -75,7 +74,6 @@ EspPlayer::EspPlayer(std::shared_ptr<AudioSink> sink,
                     case cspot::DeviceStateHandler::CommandType::PLAYBACK_START:
                         cspot::PlayPathProfiler::mark("esp.playback_start");
                         logFirstAudioPending_ = true;
-                        reducedPrebufferActive_ = true;
                         this->audioSink->flush();
                         this->isPreBuffered = false;
                         lastTrackHash = 0;
@@ -120,24 +118,35 @@ EspPlayer::~EspPlayer() {
     disconnect();
 }
 
+void EspPlayer::resetPrebuffer() {
+    isPreBuffered = false;
+}
+
 void EspPlayer::tryStartPlayback() {
     if (isPaused.load()) {
         return;
     }
 
     const size_t fillLevel = this->audioSink->getBufferFillLevel();
-    const size_t prebufferThreshold = reducedPrebufferActive_
-                                      ? kPlayStartPreBufferBytes
-                                      : kPreBufferBytes;
-    if (isPreBuffered.load() || fillLevel >= prebufferThreshold) {
-        if (!this->audioSink->isPlaying()) {
+    if (!this->audioSink->isPlaying()) {
+        if (fillLevel < kPreBufferBytes) {
+            isPreBuffered = false;
+            return;
+        }
+        {
             char detail[48];
             snprintf(detail, sizeof(detail), "fill=%u threshold=%u",
-                     (unsigned) fillLevel, (unsigned) prebufferThreshold);
+                     (unsigned) fillLevel, (unsigned) kPreBufferBytes);
             cspot::PlayPathProfiler::mark("esp.resume_pipeline", detail);
+            ESP_LOGI(kEspPlayerTag, "Spotify prebuffer ready: fill=%u threshold=%u",
+                     (unsigned) fillLevel, (unsigned) kPreBufferBytes);
             this->audioSink->resume();
-            reducedPrebufferActive_ = false;
         }
+        isPreBuffered = true;
+        return;
+    }
+
+    if (fillLevel >= kPreBufferBytes) {
         isPreBuffered = true;
     }
 }
@@ -189,8 +198,7 @@ size_t EspPlayer::feedData(uint8_t *data, size_t len, size_t trackId) {
         cspot::notifyPlayFirstAudio();
     }
 
-    if (this->audioSink->getBufferFillLevel() >=
-        (reducedPrebufferActive_ ? kPlayStartPreBufferBytes : kPreBufferBytes)) {
+    if (this->audioSink->getBufferFillLevel() >= kPreBufferBytes) {
         isPreBuffered = true;
     }
 

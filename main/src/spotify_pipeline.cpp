@@ -182,6 +182,43 @@ namespace btspeaker {
         return ESP_OK;
     }
 
+    esp_err_t SpotifyPipeline::suspendForVoiceResponse() {
+        if (!isInitialized || !isRunning_) {
+            return ESP_OK;
+        }
+
+        ESP_LOGI(TAG, "Suspending Spotify for voice response");
+        if (deviceStateHandler) {
+            deviceStateHandler->sendCommand(cspot::DeviceStateHandler::CommandType::PAUSE);
+        }
+        isPlaying = false;
+        audioSink->pause();
+        if (audioSink->isInitialized()) {
+            audioSink->cleanupPipeline();
+        }
+        if (espPlayer) {
+            espPlayer->resetPrebuffer();
+        }
+        return ESP_OK;
+    }
+
+    esp_err_t SpotifyPipeline::resumeAfterVoiceResponse() {
+        if (!isInitialized) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (!isRunning_) {
+            return start();
+        }
+
+        ESP_LOGI(TAG, "Resuming Spotify after voice response");
+        if (!audioSink->isInitialized()) {
+            audioSink->prepare();
+            audioSink->start();
+            audioSink->pause();
+        }
+        return resume();
+    }
+
     esp_err_t SpotifyPipeline::playURI(const std::string &uri) {
         ESP_LOGI(TAG, "[play] Playing Spotify URI: %s", uri.c_str());
         

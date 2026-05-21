@@ -41,6 +41,10 @@ namespace btspeaker {
 
         esp_err_t resume();
 
+        esp_err_t suspendForVoiceResponse();
+
+        esp_err_t resumeAfterVoiceResponse();
+
         // Playback control
         esp_err_t playURI(const std::string &uri);
 

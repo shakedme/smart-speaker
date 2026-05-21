@@ -35,6 +35,10 @@ namespace btspeaker {
 
         void disconnectCurrentDevice();
 
+        esp_err_t suspendForVoiceResponse();
+
+        esp_err_t resumeAfterVoiceResponse();
+
         // AVRCP control interface
         void avrcpPause() const;
         void avrcpResume() const;

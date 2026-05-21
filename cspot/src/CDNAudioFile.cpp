@@ -5,12 +5,9 @@
 #include <functional>        // for __base
 #include <initializer_list>  // for initializer_list
 #include <map>               // for operator!=, operator==
+#include <stdexcept>         // for runtime_error
 #include <string_view>       // for string_view
 #include <type_traits>       // for remove_extent_t
-
-#ifdef ESP_PLATFORM
-#include <esp_log.h>
-#endif
 
 #include "AccessKeyFetcher.h"  // for AccessKeyFetcher
 #include "BellLogger.h"        // for AbstractLogger
@@ -34,8 +31,9 @@ CDNAudioFile::CDNAudioFile(const std::string& cdnUrl,
                            const std::vector<uint8_t>& audioKey)
     : cdnUrl(cdnUrl), audioKey(audioKey) {
   this->crypto = std::make_unique<Crypto>();
-  this->prefetchBuffer = std::vector<uint8_t>(HTTP_BUFFER_SIZE);
 }
+
+CDNAudioFile::~CDNAudioFile() = default;
 
 size_t CDNAudioFile::getPosition() {
   return this->position;
@@ -44,8 +42,79 @@ size_t CDNAudioFile::getPosition() {
 void CDNAudioFile::seek(size_t newPos) {
   this->enableRequestMargin = true;
   this->position = newPos;
-  this->prefetchPosition = SIZE_MAX;
-  this->prefetchCapacity = 0;
+}
+
+CDNAudioFile::Diagnostics CDNAudioFile::consumeDiagnostics() {
+  std::lock_guard<std::mutex> lock(diagnosticsMutex);
+  Diagnostics snapshot = diagnostics;
+  diagnostics = {};
+  return snapshot;
+}
+
+void CDNAudioFile::decryptWith(Crypto& cryptoInstance,
+                               uint8_t* dst,
+                               size_t nbytes,
+                               size_t pos) {
+  if (audioKey.size() != 16 && audioKey.size() != 24 && audioKey.size() != 32) {
+    throw std::runtime_error("Invalid AES key length");
+  }
+  auto calculatedIV = bigNumAdd(audioAESIV, pos / 16);
+  cryptoInstance.aesCTRXcrypt(this->audioKey, calculatedIV, dst, nbytes);
+}
+
+bool CDNAudioFile::fetchRangeInto(std::unique_ptr<bell::HTTPClient::Response>& connection,
+                                  Crypto& cryptoInstance,
+                                  uint8_t* dst,
+                                  size_t requestPosition,
+                                  size_t requestCapacity,
+                                  size_t& bytesRead) {
+  bytesRead = 0;
+  if (requestPosition >= totalFileSize + SPOTIFY_OPUS_HEADER || requestCapacity == 0) {
+    return false;
+  }
+
+  const size_t maxEnd = totalFileSize + SPOTIFY_OPUS_HEADER - 1;
+  const size_t endPosition = std::min(requestPosition + requestCapacity - 1, maxEnd);
+  const size_t expectedBytes = endPosition - requestPosition + 1;
+
+  {
+    std::lock_guard<std::mutex> lock(diagnosticsMutex);
+    diagnostics.rangeRequests++;
+  }
+
+  if (!connection) {
+    connection = bell::HTTPClient::get(
+        this->cdnUrl,
+        {bell::HTTPClient::RangeHeader::range(
+            static_cast<int32_t>(requestPosition),
+            static_cast<int32_t>(endPosition))},
+        20);
+    if (!connection || !connection->stream().isOpen()) {
+      std::lock_guard<std::mutex> lock(diagnosticsMutex);
+      diagnostics.rangeFailures++;
+      return false;
+    }
+  } else if (!connection->get(
+                 cdnUrl,
+                 {bell::HTTPClient::RangeHeader::range(
+                     static_cast<int32_t>(requestPosition),
+                     static_cast<int32_t>(endPosition))})) {
+    std::lock_guard<std::mutex> lock(diagnosticsMutex);
+    diagnostics.rangeFailures++;
+    return false;
+  }
+
+  auto& stream = connection->stream();
+  stream.read((char*)dst, expectedBytes);
+  if (stream.fail() || static_cast<size_t>(stream.gcount()) != expectedBytes) {
+    std::lock_guard<std::mutex> lock(diagnosticsMutex);
+    diagnostics.rangeFailures++;
+    return false;
+  }
+
+  bytesRead = expectedBytes;
+  decryptWith(cryptoInstance, dst, bytesRead, requestPosition);
+  return true;
 }
 
 #ifndef CONFIG_BELL_NOCODEC
@@ -116,56 +185,20 @@ bool CDNAudioFile::openStreamAttempt() {
   this->position = 0;
   this->lastRequestPosition = 0;
   this->lastRequestCapacity = 0;
-  this->prefetchPosition = SIZE_MAX;
-  this->prefetchCapacity = 0;
   return true;
 }
 
-void CDNAudioFile::prefetchNextSegment() {
-  if (prefetchPosition != SIZE_MAX) {
-    return;
-  }
-
-  const size_t remaining =
-      (lastRequestPosition + lastRequestCapacity) - position;
-  if (remaining > kPrefetchLowWaterBytes) {
-    return;
-  }
-
-  size_t nextPos = lastRequestPosition + lastRequestCapacity;
-  nextPos -= nextPos % 16;
-  if (nextPos >= totalFileSize) {
-    return;
-  }
-
-  const size_t endPosition =
-      std::min(nextPos + HTTP_BUFFER_SIZE - 1, totalFileSize + SPOTIFY_OPUS_HEADER - 1);
-  if (!this->httpConnection->get(
-          cdnUrl,
-          {bell::HTTPClient::RangeHeader::range(nextPos, endPosition)})) {
-    return;
-  }
-
-  prefetchPosition = nextPos;
-  prefetchCapacity = this->httpConnection->contentLength();
-  if (prefetchCapacity > prefetchBuffer.size()) {
-    prefetchBuffer.resize(prefetchCapacity);
-  }
-
-  this->httpConnection->stream().read((char*)prefetchBuffer.data(),
-                                        prefetchCapacity);
-  this->decrypt(prefetchBuffer.data(), prefetchCapacity, prefetchPosition);
-}
-
 size_t CDNAudioFile::readBytes(uint8_t* dst, size_t bytes) {
+  if (bytes == 0 || position >= this->totalFileSize) {
+    return 0;
+  }
+  if (position + bytes > this->totalFileSize) {
+    bytes = this->totalFileSize - position;
+  }
+
   size_t offsetPosition = position + SPOTIFY_OPUS_HEADER;
   size_t actualFileSize = this->totalFileSize + SPOTIFY_OPUS_HEADER;
 
-  if (position + bytes >= this->totalFileSize) {
-    return 0;
-  }
-
-  // // Opus tries to read header, use prefetched data
   if (offsetPosition < OPUS_HEADER_SIZE &&
       bytes + offsetPosition <= OPUS_HEADER_SIZE) {
     memcpy(dst, this->header.data() + offsetPosition, bytes);
@@ -173,12 +206,10 @@ size_t CDNAudioFile::readBytes(uint8_t* dst, size_t bytes) {
     return bytes;
   }
 
-  // // Opus tries to read footer, use prefetched data
   if (offsetPosition >= (actualFileSize - this->footer.size())) {
     size_t toReadBytes = bytes;
 
     if ((position + bytes) > this->totalFileSize) {
-      // Tries to read outside of bounds, truncate
       toReadBytes = this->totalFileSize - position;
     }
 
@@ -190,8 +221,6 @@ size_t CDNAudioFile::readBytes(uint8_t* dst, size_t bytes) {
     return toReadBytes;
   }
 
-  // Data not in the headers. Make sense of whats going on.
-  // Position in bounds :)
   if (offsetPosition >= this->lastRequestPosition &&
       offsetPosition < this->lastRequestPosition + this->lastRequestCapacity) {
     size_t toRead = bytes;
@@ -204,45 +233,33 @@ size_t CDNAudioFile::readBytes(uint8_t* dst, size_t bytes) {
     memcpy(dst, this->httpBuffer.data() + offsetPosition - lastRequestPosition,
            toRead);
     position += toRead;
-    prefetchNextSegment();
 
     return toRead;
-  } else {
-    size_t requestPosition = (offsetPosition) - ((offsetPosition) % 16);
-    if (this->enableRequestMargin && requestPosition > SEEK_MARGIN_SIZE) {
-      requestPosition = (offsetPosition - SEEK_MARGIN_SIZE) -
-                        ((offsetPosition - SEEK_MARGIN_SIZE) % 16);
-      this->enableRequestMargin = false;
-    }
-
-    if (prefetchPosition != SIZE_MAX && requestPosition == prefetchPosition) {
-      httpBuffer.swap(prefetchBuffer);
-      if (prefetchBuffer.size() < HTTP_BUFFER_SIZE) {
-        prefetchBuffer.resize(HTTP_BUFFER_SIZE);
-      }
-      lastRequestPosition = prefetchPosition;
-      lastRequestCapacity = prefetchCapacity;
-      prefetchPosition = SIZE_MAX;
-      prefetchCapacity = 0;
-      return readBytes(dst, bytes);
-    }
-
-    this->httpConnection->get(
-        cdnUrl, {bell::HTTPClient::RangeHeader::range(
-                    requestPosition, requestPosition + HTTP_BUFFER_SIZE - 1)});
-    this->lastRequestPosition = requestPosition;
-    this->lastRequestCapacity = this->httpConnection->contentLength();
-
-    this->httpConnection->stream().read((char*)this->httpBuffer.data(),
-                                        lastRequestCapacity);
-    this->decrypt(this->httpBuffer.data(), lastRequestCapacity,
-
-                  this->lastRequestPosition);
-
-    return readBytes(dst, bytes);
   }
 
-  return bytes;
+  size_t requestPosition = (offsetPosition) - ((offsetPosition) % 16);
+  if (this->enableRequestMargin && requestPosition > SEEK_MARGIN_SIZE) {
+    requestPosition = (offsetPosition - SEEK_MARGIN_SIZE) -
+                      ((offsetPosition - SEEK_MARGIN_SIZE) % 16);
+    this->enableRequestMargin = false;
+  }
+
+  if (httpBuffer.size() < HTTP_BUFFER_SIZE) {
+    httpBuffer.resize(HTTP_BUFFER_SIZE);
+  }
+  size_t bytesRead = 0;
+  if (!fetchRangeInto(httpConnection,
+                      *crypto,
+                      httpBuffer.data(),
+                      requestPosition,
+                      HTTP_BUFFER_SIZE,
+                      bytesRead)) {
+    return 0;
+  }
+  this->lastRequestPosition = requestPosition;
+  this->lastRequestCapacity = bytesRead;
+
+  return readBytes(dst, bytes);
 }
 #else
 /**
@@ -338,7 +355,6 @@ long CDNAudioFile::readBytes(uint8_t* dst, size_t bytes) {
     }
   }
 
-  // Position in bounds :)
   if (position >= this->lastRequestPosition &&
       position < this->lastRequestPosition + this->lastRequestCapacity) {
     size_t toRead = bytes;
@@ -359,17 +375,15 @@ long CDNAudioFile::readBytes(uint8_t* dst, size_t bytes) {
           (position - SEEK_MARGIN_SIZE) - ((position - SEEK_MARGIN_SIZE) % 16);
       this->enableRequestMargin = false;
     }
-    // Ensure the request range is within file bounds
     size_t endPosition = requestPosition + HTTP_BUFFER_SIZE - 1;
     if (endPosition > this->totalFileSize) {
-      endPosition = this->totalFileSize - 1;  // Cap the range to the file size
+      endPosition = this->totalFileSize - 1;
     }
 
-    // Only request if the range is valid
     if (!this->httpConnection->get(
             cdnUrl, {bell::HTTPClient::RangeHeader::range(requestPosition,
                                                           endPosition)})) {
-      return -1;  // Handle error if range is invalid or request fails
+      return -1;
     }
     this->lastRequestPosition = requestPosition;
     this->lastRequestCapacity = this->httpConnection->contentLength();
@@ -377,7 +391,6 @@ long CDNAudioFile::readBytes(uint8_t* dst, size_t bytes) {
     this->httpConnection->stream().read((char*)this->httpBuffer.data(),
                                         lastRequestCapacity);
     this->decrypt(this->httpBuffer.data(), lastRequestCapacity,
-
                   this->lastRequestPosition);
 
     return readBytes(dst, bytes);
@@ -392,10 +405,5 @@ size_t CDNAudioFile::getSize() {
 }
 
 void CDNAudioFile::decrypt(uint8_t* dst, size_t nbytes, size_t pos) {
-  if (audioKey.size() != 16 && audioKey.size() != 24 && audioKey.size() != 32) {
-    throw std::runtime_error("Invalid AES key length");
-  }
-  auto calculatedIV = bigNumAdd(audioAESIV, pos / 16);
-
-  this->crypto->aesCTRXcrypt(this->audioKey, calculatedIV, dst, nbytes);
+  decryptWith(*crypto, dst, nbytes, pos);
 }

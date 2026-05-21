@@ -4,6 +4,7 @@
 #include "../include/ima_adpcm.hpp"
 #include "../include/voice_assistant_manager.hpp"
 #include "../include/voice_config.hpp"
+#include "diagnostics_config.hpp"
 #include <cstring>
 #include <stdexcept>
 
@@ -41,8 +42,31 @@ namespace btspeaker {
         }
     }
 
+    void WebSocketVoiceClient::setPlaybackStress(const bool stressed) {
+        const bool was = playbackStress_.exchange(stressed, std::memory_order_relaxed);
+        if (was != stressed && diagnostics_enabled) {
+            ESP_LOGI(TAG, "[WS_TX_DIAG] playback stress %s", stressed ? "enabled" : "cleared");
+        }
+    }
+
+    void WebSocketVoiceClient::setPlaybackMicSuspended(const bool suspended) {
+        const bool was = playbackMicSuspended_.exchange(suspended, std::memory_order_relaxed);
+        if (was == suspended) {
+            return;
+        }
+
+        if (diagnostics_enabled) {
+            ESP_LOGI(TAG, "[WS_TX_DIAG] mic uplink %s for playback protection",
+                     suspended ? "suspended" : "resumed");
+        }
+        if (suspended) {
+            drainUplinkQueue();
+        }
+    }
+
     bool WebSocketVoiceClient::isTransportReady() const {
-        return websocketClient != nullptr &&
+        return state.load(std::memory_order_acquire) == ConnectionState::CONNECTED &&
+               websocketClient != nullptr &&
                esp_websocket_client_is_connected(websocketClient);
     }
 
@@ -196,6 +220,8 @@ namespace btspeaker {
             ESP_LOGW(TAG, "WebSocket transport down (%s), marking disconnected",
                      reason ? reason : "?");
             setConnectionState(ConnectionState::DISCONNECTED);
+            isClientRunning = false;
+            drainUplinkQueue();
         }
     }
 
@@ -371,7 +397,9 @@ namespace btspeaker {
 
         if (dropOldestUplinkChunk() &&
             xQueueReceive(uplinkFreeQueue_, &payload, 0) == pdTRUE) {
-            uplinkDiagDroppedOldest_.fetch_add(1, std::memory_order_relaxed);
+            if (diagnostics_enabled) {
+                uplinkDiagDroppedOldest_.fetch_add(1, std::memory_order_relaxed);
+            }
             return payload;
         }
 
@@ -407,9 +435,11 @@ namespace btspeaker {
 
         UplinkChunk pending{};
         while (xQueueReceive(uplinkQueue_, &pending, 0) == pdTRUE) {
-            if (!pending.shutdown) {
-                freeUplinkChunk(pending);
+            if (pending.shutdown) {
+                xQueueSendToFront(uplinkQueue_, &pending, 0);
+                break;
             }
+            freeUplinkChunk(pending);
         }
     }
 
@@ -485,19 +515,25 @@ namespace btspeaker {
         }
 
         if (xQueueSend(uplinkQueue_, &chunk, 0) == pdTRUE) {
-            uplinkDiagEnqueued_.fetch_add(1, std::memory_order_relaxed);
+            if (diagnostics_enabled) {
+                uplinkDiagEnqueued_.fetch_add(1, std::memory_order_relaxed);
+            }
             return ESP_OK;
         }
 
         if (dropOldestUplinkChunk()) {
-            uplinkDiagDroppedOldest_.fetch_add(1, std::memory_order_relaxed);
+            if (diagnostics_enabled) {
+                uplinkDiagDroppedOldest_.fetch_add(1, std::memory_order_relaxed);
+            }
         } else {
             freeUplinkChunk(chunk);
             return ESP_FAIL;
         }
 
         if (xQueueSend(uplinkQueue_, &chunk, 0) == pdTRUE) {
-            uplinkDiagEnqueued_.fetch_add(1, std::memory_order_relaxed);
+            if (diagnostics_enabled) {
+                uplinkDiagEnqueued_.fetch_add(1, std::memory_order_relaxed);
+            }
             return ESP_OK;
         }
 
@@ -568,6 +604,10 @@ namespace btspeaker {
                                                     const uint64_t sum_send_us,
                                                     const uint32_t max_send_us,
                                                     const uint32_t queue_depth) const {
+        if (!diagnostics_enabled) {
+            return;
+        }
+
         const uint32_t avg_send_us = sent > 0
                                      ? static_cast<uint32_t>(sum_send_us / sent)
                                      : 0;
@@ -584,7 +624,7 @@ namespace btspeaker {
 
         ESP_LOGI(TAG,
                  "[WS_TX_DIAG] enqueued=%lu sent=%lu drop_old=%lu drop_pb=%lu drop_disc=%lu send_fail=%lu slow=%lu "
-                 "bytes=%lu ~%luHz send_us(avg=%lu max=%lu) q=%lu task=%s dram=%lu",
+                 "bytes=%lu ~%luHz send_us(avg=%lu max=%lu) q=%lu stress=%d mic_suspend=%d task=%s dram=%lu",
                  static_cast<unsigned long>(enqueued),
                  static_cast<unsigned long>(sent),
                  static_cast<unsigned long>(dropped_oldest),
@@ -597,6 +637,8 @@ namespace btspeaker {
                  static_cast<unsigned long>(avg_send_us),
                  static_cast<unsigned long>(max_send_us),
                  static_cast<unsigned long>(queue_depth),
+                 playbackStress_.load(std::memory_order_relaxed) ? 1 : 0,
+                 playbackMicSuspended_.load(std::memory_order_relaxed) ? 1 : 0,
                  task_name,
                  static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
         (void) now_us;
@@ -629,13 +671,20 @@ namespace btspeaker {
 
             if (!isTransportReady()) {
                 markTransportDisconnected("uplink_worker");
-                diag_dropped_disc++;
+                if (diagnostics_enabled) {
+                    diag_dropped_disc++;
+                }
+                freeUplinkChunk(chunk);
+            } else if (playbackMicSuspended_.load(std::memory_order_relaxed)) {
                 freeUplinkChunk(chunk);
             } else if (shouldDropForPlaybackCongestion(queue_depth)) {
-                uplinkDiagDroppedPlayback_.fetch_add(1, std::memory_order_relaxed);
+                if (diagnostics_enabled) {
+                    uplinkDiagDroppedPlayback_.fetch_add(1, std::memory_order_relaxed);
+                }
                 freeUplinkChunk(chunk);
             } else {
                 const bool playback = playbackActive_.load(std::memory_order_relaxed);
+                const bool stress = playbackStress_.load(std::memory_order_relaxed);
                 const int send_timeout_ms = playback ? UPLINK_PLAYBACK_SEND_TIMEOUT_MS
                                                      : UPLINK_SEND_TIMEOUT_MS;
                 const uint8_t *send_payload = chunk.payload;
@@ -644,7 +693,10 @@ namespace btspeaker {
                 uint32_t encoded_length = 0;
 
                 if (playback) {
-                    while (chunk.length < UPLINK_PLAYBACK_AGGREGATE_BYTES) {
+                    const uint32_t aggregate_target = stress
+                                                      ? UPLINK_STRESS_AGGREGATE_BYTES
+                                                      : UPLINK_PLAYBACK_AGGREGATE_BYTES;
+                    while (chunk.length < aggregate_target) {
                         UplinkChunk next{};
                         if (xQueueReceive(uplinkQueue_, &next,
                                           pdMS_TO_TICKS(UPLINK_PLAYBACK_AGGREGATE_WAIT_MS)) != pdTRUE) {
@@ -656,7 +708,7 @@ namespace btspeaker {
                         }
                         if (!next.payload ||
                             chunk.length + next.length > UPLINK_MAX_CHUNK_BYTES ||
-                            chunk.length + next.length > UPLINK_PLAYBACK_AGGREGATE_BYTES) {
+                            chunk.length + next.length > aggregate_target) {
                             freeUplinkChunk(next);
                             break;
                         }
@@ -677,20 +729,33 @@ namespace btspeaker {
                         send_payload = encoded_payload;
                         send_length = encoded_length;
                     } else {
-                        diag_send_fail++;
-                        ESP_LOGW(TAG, "[WS_TX_DIAG] encode failed: %s (%u bytes, %lu us)",
-                                 esp_err_to_name(encode_ret),
-                                 static_cast<unsigned>(chunk.length),
-                                 static_cast<unsigned long>(encode_us));
+                        if (diagnostics_enabled) {
+                            diag_send_fail++;
+                            ESP_LOGW(TAG, "[WS_TX_DIAG] encode failed: %s (%u bytes, %lu us)",
+                                     esp_err_to_name(encode_ret),
+                                     static_cast<unsigned>(chunk.length),
+                                     static_cast<unsigned long>(encode_us));
+                        }
                         freeUplinkChunk(chunk);
                         continue;
                     }
-                    if (encode_us > kUplinkSlowEncodeUs) {
+                    if (diagnostics_enabled && encode_us > kUplinkSlowEncodeUs) {
                         ESP_LOGW(TAG, "[WS_TX_DIAG] slow encode %lu us, %u -> %u bytes",
                                  static_cast<unsigned long>(encode_us),
                                  static_cast<unsigned>(chunk.length),
                                  static_cast<unsigned>(encoded_length));
                     }
+                }
+
+                if (!isTransportReady()) {
+                    if (diagnostics_enabled) {
+                        diag_dropped_disc++;
+                    }
+                    if (encoded_payload) {
+                        heap_caps_free(encoded_payload);
+                    }
+                    freeUplinkChunk(chunk);
+                    continue;
                 }
 
                 const int64_t before_send_us = esp_timer_get_time();
@@ -702,32 +767,39 @@ namespace btspeaker {
                 const uint32_t send_us = static_cast<uint32_t>(esp_timer_get_time() - before_send_us);
 
                 if (ret < 0) {
-                    diag_send_fail++;
-                    ESP_LOGW(TAG, "[WS_TX_DIAG] send_bin failed ret=%d len=%u us=%lu",
-                             ret,
-                             static_cast<unsigned>(send_length),
-                             static_cast<unsigned long>(send_us));
+                    if (diagnostics_enabled) {
+                        diag_send_fail++;
+                        ESP_LOGW(TAG, "[WS_TX_DIAG] send_bin failed ret=%d len=%u us=%lu",
+                                 ret,
+                                 static_cast<unsigned>(send_length),
+                                 static_cast<unsigned long>(send_us));
+                    }
                     markTransportDisconnected("uplink_send_failed");
                 } else if (ret != static_cast<int>(send_length)) {
-                    diag_send_fail++;
-                    ESP_LOGW(TAG, "[WS_TX_DIAG] short send ret=%d len=%u us=%lu",
-                             ret,
-                             static_cast<unsigned>(send_length),
-                             static_cast<unsigned long>(send_us));
-                } else {
-                    diag_sent++;
-                    diag_bytes_sent += static_cast<uint32_t>(ret);
-                    diag_sum_send_us += send_us;
-                    if (send_us > diag_max_send_us) {
-                        diag_max_send_us = send_us;
+                    if (diagnostics_enabled) {
+                        diag_send_fail++;
+                        ESP_LOGW(TAG, "[WS_TX_DIAG] short send ret=%d len=%u us=%lu",
+                                 ret,
+                                 static_cast<unsigned>(send_length),
+                                 static_cast<unsigned long>(send_us));
                     }
-                    const uint32_t slow_threshold = playback ? UPLINK_SLOW_SEND_US / 2
-                                                             : UPLINK_SLOW_SEND_US;
-                    if (send_us > slow_threshold) {
-                        diag_send_slow++;
-                        ESP_LOGW(TAG, "[WS_TX_DIAG] slow send %lu us, %u bytes",
-                                 static_cast<unsigned long>(send_us),
-                                 static_cast<unsigned>(send_length));
+                    markTransportDisconnected("uplink_short_send");
+                } else {
+                    if (diagnostics_enabled) {
+                        diag_sent++;
+                        diag_bytes_sent += static_cast<uint32_t>(ret);
+                        diag_sum_send_us += send_us;
+                        if (send_us > diag_max_send_us) {
+                            diag_max_send_us = send_us;
+                        }
+                        const uint32_t slow_threshold = playback ? UPLINK_SLOW_SEND_US / 2
+                                                                 : UPLINK_SLOW_SEND_US;
+                        if (send_us > slow_threshold) {
+                            diag_send_slow++;
+                            ESP_LOGW(TAG, "[WS_TX_DIAG] slow send %lu us, %u bytes",
+                                     static_cast<unsigned long>(send_us),
+                                     static_cast<unsigned>(send_length));
+                        }
                     }
                 }
 
@@ -737,34 +809,36 @@ namespace btspeaker {
                 freeUplinkChunk(chunk);
             }
 
-            const int64_t now_us = esp_timer_get_time();
-            if ((now_us - diag_window_start_us) >= (UPLINK_DIAG_INTERVAL_MS * 1000LL)) {
-                const uint32_t enqueued = uplinkDiagEnqueued_.exchange(0, std::memory_order_relaxed);
-                const uint32_t dropped_oldest =
-                        uplinkDiagDroppedOldest_.exchange(0, std::memory_order_relaxed);
-                const uint32_t dropped_playback =
-                        uplinkDiagDroppedPlayback_.exchange(0, std::memory_order_relaxed);
+            if (diagnostics_enabled) {
+                const int64_t now_us = esp_timer_get_time();
+                if ((now_us - diag_window_start_us) >= (UPLINK_DIAG_INTERVAL_MS * 1000LL)) {
+                    const uint32_t enqueued = uplinkDiagEnqueued_.exchange(0, std::memory_order_relaxed);
+                    const uint32_t dropped_oldest =
+                            uplinkDiagDroppedOldest_.exchange(0, std::memory_order_relaxed);
+                    const uint32_t dropped_playback =
+                            uplinkDiagDroppedPlayback_.exchange(0, std::memory_order_relaxed);
 
-                logUplinkDiagnostics(now_us,
-                                   enqueued,
-                                   diag_sent,
-                                   dropped_oldest,
-                                   dropped_playback,
-                                   diag_dropped_disc,
-                                   diag_send_fail,
-                                   diag_send_slow,
-                                   diag_bytes_sent,
-                                   diag_sum_send_us,
-                                   diag_max_send_us,
-                                   queue_depth);
-                diag_window_start_us = now_us;
-                diag_sent = 0;
-                diag_dropped_disc = 0;
-                diag_send_fail = 0;
-                diag_send_slow = 0;
-                diag_bytes_sent = 0;
-                diag_sum_send_us = 0;
-                diag_max_send_us = 0;
+                    logUplinkDiagnostics(now_us,
+                                       enqueued,
+                                       diag_sent,
+                                       dropped_oldest,
+                                       dropped_playback,
+                                       diag_dropped_disc,
+                                       diag_send_fail,
+                                       diag_send_slow,
+                                       diag_bytes_sent,
+                                       diag_sum_send_us,
+                                       diag_max_send_us,
+                                       queue_depth);
+                    diag_window_start_us = now_us;
+                    diag_sent = 0;
+                    diag_dropped_disc = 0;
+                    diag_send_fail = 0;
+                    diag_send_slow = 0;
+                    diag_bytes_sent = 0;
+                    diag_sum_send_us = 0;
+                    diag_max_send_us = 0;
+                }
             }
             if (shutdown_after_send) {
                 break;
@@ -781,6 +855,9 @@ namespace btspeaker {
         if (!audioData || length == 0) {
             return ESP_ERR_INVALID_ARG;
         }
+        if (playbackMicSuspended_.load(std::memory_order_relaxed)) {
+            return ESP_OK;
+        }
         if (!isTransportReady()) {
             return ESP_ERR_INVALID_STATE;
         }
@@ -789,25 +866,31 @@ namespace btspeaker {
                                      ? static_cast<uint32_t>(uxQueueMessagesWaiting(uplinkQueue_))
                                      : 0;
         if (shouldDropForPlaybackCongestion(queue_depth)) {
-            uplinkDiagDroppedPlayback_.fetch_add(1, std::memory_order_relaxed);
+            if (diagnostics_enabled) {
+                uplinkDiagDroppedPlayback_.fetch_add(1, std::memory_order_relaxed);
+            }
             return ESP_OK;
         }
         if (length > UPLINK_MAX_CHUNK_BYTES) {
-            ESP_LOGW(TAG, "[WS_TX_DIAG] dropping oversized uplink chunk %u > %u bytes",
-                     static_cast<unsigned>(length),
-                     static_cast<unsigned>(UPLINK_MAX_CHUNK_BYTES));
+            if (diagnostics_enabled) {
+                ESP_LOGW(TAG, "[WS_TX_DIAG] dropping oversized uplink chunk %u > %u bytes",
+                         static_cast<unsigned>(length),
+                         static_cast<unsigned>(UPLINK_MAX_CHUNK_BYTES));
+            }
             return ESP_ERR_INVALID_SIZE;
         }
 
         const int64_t before_copy_us = esp_timer_get_time();
         uint8_t *payload = acquireUplinkBuffer();
         if (!payload) {
-            uplinkDiagDroppedOldest_.fetch_add(1, std::memory_order_relaxed);
+            if (diagnostics_enabled) {
+                uplinkDiagDroppedOldest_.fetch_add(1, std::memory_order_relaxed);
+            }
             return ESP_OK;
         }
         memcpy(payload, audioData, length);
         const uint32_t copy_us = static_cast<uint32_t>(esp_timer_get_time() - before_copy_us);
-        if (copy_us > kUplinkSlowCopyUs) {
+        if (diagnostics_enabled && copy_us > kUplinkSlowCopyUs) {
             ESP_LOGW(TAG, "[WS_TX_DIAG] slow capture copy %lu us, %u bytes",
                      static_cast<unsigned long>(copy_us),
                      static_cast<unsigned>(length));
@@ -874,6 +957,65 @@ namespace btspeaker {
         }
     }
 
+    void WebSocketVoiceClient::handleDownlinkFragment(esp_websocket_event_data_t *eventData,
+                                                      const bool is_binary) {
+        if (!eventData || !eventData->data_ptr || eventData->data_len <= 0) {
+            return;
+        }
+
+        const int payload_len = eventData->payload_len;
+        if (payload_len <= 0) {
+            return;
+        }
+        if (static_cast<size_t>(payload_len) > DOWNLINK_MAX_PAYLOAD_BYTES) {
+            ESP_LOGW(TAG, "Ignoring oversized downlink payload (%d bytes)", payload_len);
+            if (is_binary) {
+                downlinkBinaryBuffer_.clear();
+            } else {
+                downlinkTextBuffer_.clear();
+            }
+            return;
+        }
+
+        auto &buffer = is_binary ? downlinkBinaryBuffer_ : downlinkTextBuffer_;
+        const size_t chunk_offset = static_cast<size_t>(eventData->payload_offset);
+        const size_t chunk_len = static_cast<size_t>(eventData->data_len);
+        const size_t chunk_end = chunk_offset + chunk_len;
+        const size_t expected_len = static_cast<size_t>(payload_len);
+
+        if (chunk_offset == 0) {
+            buffer.clear();
+            buffer.reserve(expected_len);
+        } else if (buffer.empty()) {
+            ESP_LOGW(TAG, "Downlink fragment without start (offset=%u)", static_cast<unsigned>(chunk_offset));
+            return;
+        }
+
+        if (chunk_end > expected_len) {
+            ESP_LOGW(TAG, "Downlink fragment exceeds payload length (%u > %u)",
+                     static_cast<unsigned>(chunk_end),
+                     static_cast<unsigned>(expected_len));
+            buffer.clear();
+            return;
+        }
+
+        if (buffer.size() < chunk_end) {
+            buffer.resize(chunk_end);
+        }
+        memcpy(buffer.data() + chunk_offset, eventData->data_ptr, chunk_len);
+
+        if (chunk_end < expected_len) {
+            return;
+        }
+
+        if (is_binary) {
+            voiceAssistantManager.onAudioResponse(buffer.data(), buffer.size());
+        } else {
+            voiceAssistantManager.onTextData(buffer.data(), buffer.size());
+        }
+        buffer.clear();
+    }
+
     void WebSocketVoiceClient::handleWebsocketEvent(esp_websocket_event_id_t eventId,
                                                     esp_websocket_event_data_t *eventData) {
         switch (eventId) {
@@ -884,34 +1026,38 @@ namespace btspeaker {
                 break;
 
             case WEBSOCKET_EVENT_DISCONNECTED: {
+                downlinkBinaryBuffer_.clear();
+                downlinkTextBuffer_.clear();
+                isClientRunning = false;
                 const ConnectionState previous = state.load(std::memory_order_relaxed);
                 if (previous == ConnectionState::CONNECTING) {
                     signalConnectOutcome(CONNECT_OUTCOME_FAILURE);
                 }
                 setConnectionState(ConnectionState::DISCONNECTED);
+                drainUplinkQueue();
                 break;
             }
 
             case WEBSOCKET_EVENT_DATA:
                 if (eventData && eventData->data_ptr && eventData->data_len > 0) {
                     if (eventData->op_code == 0x1) {
-                        voiceAssistantManager.onTextData(
-                                reinterpret_cast<const uint8_t *>(eventData->data_ptr),
-                                static_cast<size_t>(eventData->data_len));
+                        handleDownlinkFragment(eventData, false);
                     } else if (eventData->op_code == 0x2) {
-                        voiceAssistantManager.onAudioResponse(
-                                reinterpret_cast<const uint8_t *>(eventData->data_ptr),
-                                static_cast<size_t>(eventData->data_len));
+                        handleDownlinkFragment(eventData, true);
                     }
                 }
                 break;
 
             case WEBSOCKET_EVENT_ERROR: {
+                downlinkBinaryBuffer_.clear();
+                downlinkTextBuffer_.clear();
+                isClientRunning = false;
                 const ConnectionState previous = state.load(std::memory_order_relaxed);
                 if (previous == ConnectionState::CONNECTING) {
                     signalConnectOutcome(CONNECT_OUTCOME_FAILURE);
                 }
                 setConnectionState(ConnectionState::DISCONNECTED);
+                drainUplinkQueue();
                 break;
             }
 
@@ -929,6 +1075,7 @@ namespace btspeaker {
         websocket_cfg.keep_alive_enable = true;
         websocket_cfg.network_timeout_ms = 10000;
         websocket_cfg.task_stack = 4096;
+        websocket_cfg.buffer_size = static_cast<int>(DOWNLINK_RX_BUFFER_SIZE);
 
         websocketClient = esp_websocket_client_init(&websocket_cfg);
         if (!websocketClient) {

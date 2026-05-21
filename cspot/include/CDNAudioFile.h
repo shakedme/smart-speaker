@@ -3,6 +3,7 @@
 #include <cstddef>  // for size_t, SIZE_MAX
 #include <cstdint>  // for uint8_t
 #include <memory>   // for shared_ptr, unique_ptr
+#include <mutex>    // for mutex
 #include <string>   // for string
 #include <vector>   // for vector
 
@@ -19,7 +20,13 @@ class AccessKeyFetcher;
 class CDNAudioFile {
 
  public:
+  struct Diagnostics {
+    uint32_t rangeRequests = 0;
+    uint32_t rangeFailures = 0;
+  };
+
   CDNAudioFile(const std::string& cdnUrl, const std::vector<uint8_t>& audioKey);
+  ~CDNAudioFile();
 
 #ifndef CONFIG_BELL_NOCODEC
   /**
@@ -77,13 +84,15 @@ class CDNAudioFile {
 
   long getHeader();
 
+  Diagnostics consumeDiagnostics();
+
  private:
   bool streamOpen_ = false;
   const int OPUS_HEADER_SIZE = 8 * 1024;
   const int OPUS_FOOTER_PREFFERED = 1024 * 12;  // 12K should be safe
   const int SEEK_MARGIN_SIZE = 1024 * 4;
 
-  const int HTTP_BUFFER_SIZE = 1024 * 32;
+  static constexpr size_t HTTP_BUFFER_SIZE = 1024 * 64;
   const int SPOTIFY_OPUS_HEADER = 167;
 
 #ifndef CONFIG_BELL_NOCODEC
@@ -109,12 +118,16 @@ class CDNAudioFile {
 
   bool enableRequestMargin = false;
 
-  static constexpr size_t kPrefetchLowWaterBytes = 8 * 1024;
-  std::vector<uint8_t> prefetchBuffer;
-  size_t prefetchPosition = SIZE_MAX;
-  size_t prefetchCapacity = 0;
+  std::mutex diagnosticsMutex;
+  Diagnostics diagnostics;
 
-  void prefetchNextSegment();
+  bool fetchRangeInto(std::unique_ptr<bell::HTTPClient::Response>& connection,
+                      Crypto& cryptoInstance,
+                      uint8_t* dst,
+                      size_t requestPosition,
+                      size_t requestCapacity,
+                      size_t& bytesRead);
+  void decryptWith(Crypto& cryptoInstance, uint8_t* dst, size_t nbytes, size_t pos);
   bool openStreamAttempt();
 
   std::string cdnUrl;

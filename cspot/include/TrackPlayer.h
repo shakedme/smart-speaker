@@ -68,6 +68,8 @@ class TrackPlayer : bell::Task {
   void stop();
   void start();
 
+  void flushDiagnostics();
+
  private:
   std::shared_ptr<cspot::Context> ctx;
   std::shared_ptr<cspot::TrackQueue> trackQueue;
@@ -109,5 +111,37 @@ class TrackPlayer : bell::Task {
   std::mutex runningMutex;
 
   void runTask() override;
+  void recordDecodeDiagnostics(long decodedBytes,
+                               uint32_t decodeWallMs,
+                               uint32_t cdnInDecodeMs);
+  void recordCdnReadDiagnostics(size_t bytesRead, uint32_t readUs);
+  void flushDecodeDiagnosticsWindow();
+
+  int64_t decodeDiagWindowStartUs_ = 0;
+  int64_t decodeDiagLastCallUs_ = 0;
+  uint32_t decodeDiagCalls_ = 0;
+  uint32_t decodeDiagZeroReads_ = 0;
+  uint32_t decodeDiagErrors_ = 0;
+  uint32_t decodeDiagMaxGapMs_ = 0;
+  uint32_t decodeDiagMaxDecodeUs_ = 0;
+  uint64_t decodeDiagBytes_ = 0;
+  uint64_t decodeDiagSumDecodeUs_ = 0;
+
+  uint32_t cdnDiagReads_ = 0;
+  uint32_t cdnDiagZeroReads_ = 0;
+  uint32_t cdnDiagMaxReadUs_ = 0;
+  uint32_t cdnDiagRangeRequests_ = 0;
+  uint32_t cdnDiagRangeFailures_ = 0;
+  uint64_t cdnDiagBytes_ = 0;
+  uint64_t cdnDiagSumReadUs_ = 0;
+
+  bool insideVorbisRead_ = false;
+  uint32_t currentReadCdnMs_ = 0;
+  uint64_t windowSumDecodeWallMs_ = 0;
+  uint64_t windowSumCdnInDecodeMs_ = 0;
+  uint64_t windowSumCpuInDecodeMs_ = 0;
+  uint32_t windowMaxDecodeWallMs_ = 0;
+  uint32_t windowMaxCdnInDecodeMs_ = 0;
+  uint32_t windowMaxCpuInDecodeMs_ = 0;
 };
 }  // namespace cspot

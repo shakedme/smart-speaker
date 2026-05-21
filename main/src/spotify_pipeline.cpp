@@ -471,6 +471,9 @@ namespace btspeaker {
             audioSink->prepare();
             ESP_LOGI(TAG, "Creating ESP player");
             espPlayer = std::make_unique<EspPlayer>(audioSink, deviceStateHandler);
+            espPlayer->setTrackTransitionCallback([this](const bool active) {
+                trackTransitionActive_.store(active, std::memory_order_release);
+            });
             audioSink->start();
             audioSink->pause();
             ESP_LOGI(TAG, "Starting session task");
@@ -511,5 +514,32 @@ namespace btspeaker {
         failureCallback = std::move(cb);
     }
 
+    size_t SpotifyPipeline::getPlaybackBufferFillLevel() const {
+        return audioSink ? audioSink->getBufferFillLevel() : 0;
+    }
+
+    size_t SpotifyPipeline::getPlaybackBufferCapacity() const {
+        return audioSink ? audioSink->getBufferCapacity() : 0;
+    }
+
+    bool SpotifyPipeline::isSinkPlaying() const {
+        return audioSink && audioSink->isPlaying();
+    }
+
+    bool SpotifyPipeline::isRebuffering() const {
+        return isRunning_.load(std::memory_order_relaxed) &&
+               audioSink &&
+               audioSink->isInitialized() &&
+               !isPlaybackPaused() &&
+               !audioSink->isPlaying();
+    }
+
+    bool SpotifyPipeline::isPlaybackPaused() const {
+        return espPlayer && espPlayer->isPlaybackPaused();
+    }
+
+    bool SpotifyPipeline::isTrackTransitionActive() const {
+        return trackTransitionActive_.load(std::memory_order_acquire);
+    }
 
 } // namespace btspeaker

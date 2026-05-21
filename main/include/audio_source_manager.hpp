@@ -37,6 +37,22 @@ public:
 
     [[nodiscard]] AudioSource getCurrentSource() const { return currentSource; }
 
+    [[nodiscard]] size_t getSpotifyPlaybackBufferFillLevel() const;
+
+    [[nodiscard]] size_t getSpotifyPlaybackBufferCapacity() const;
+
+    enum class SpotifyMicUplinkPolicy {
+        Allow,
+        Stress,
+        Suspend,
+    };
+
+    [[nodiscard]] SpotifyMicUplinkPolicy getSpotifyMicUplinkPolicy();
+
+    [[nodiscard]] bool isSpotifyUplinkStressed() const;
+
+    [[nodiscard]] bool shouldSuspendMicUplinkForSpotify() const;
+
     esp_err_t queueVoiceResponseChunk(const uint8_t* audio_data, size_t length);
     esp_err_t stopVoiceResponse();
 
@@ -57,6 +73,28 @@ private:
     bool isInitialized;
 
     static constexpr int I2S_SWITCH_DELAY_MS = 200;
+    // Thresholds aligned with 1 MB prebuffer / 1.25 MB playback ring buffer.
+    static constexpr size_t SPOTIFY_MIC_STRESS_ON_FILL_BYTES = 768 * 1024;
+    static constexpr size_t SPOTIFY_MIC_STRESS_CLEAR_FILL_BYTES = 1024 * 1024;
+    static constexpr size_t SPOTIFY_MIC_SUSPEND_FILL_BYTES = 512 * 1024;
+    static constexpr size_t SPOTIFY_MIC_RESUME_FILL_BYTES = 768 * 1024;
+
+    enum class SpotifyMicUplinkMode {
+        Normal,
+        Stress,
+        Suspended,
+    };
+
+    enum class SpotifyMicUplinkSuspendReason {
+        None,
+        TrackTransition,
+        BufferLow,
+    };
+
+    mutable SpotifyMicUplinkMode spotifyMicUplinkMode_ = SpotifyMicUplinkMode::Normal;
+    mutable SpotifyMicUplinkSuspendReason micSuspendReason_ = SpotifyMicUplinkSuspendReason::None;
+
+    void updateSpotifyMicUplinkMode() const;
 
     // Internal helpers
     esp_err_t stopCurrentSource();

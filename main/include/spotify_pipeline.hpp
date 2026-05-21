@@ -60,6 +60,18 @@ namespace btspeaker {
 
         void setFailureCallback(FailureCallback cb);
 
+        [[nodiscard]] size_t getPlaybackBufferFillLevel() const;
+
+        [[nodiscard]] size_t getPlaybackBufferCapacity() const;
+
+        [[nodiscard]] bool isSinkPlaying() const;
+
+        [[nodiscard]] bool isRebuffering() const;
+
+        [[nodiscard]] bool isPlaybackPaused() const;
+
+        [[nodiscard]] bool isTrackTransitionActive() const;
+
     private:
         std::string nextUri;
         std::shared_ptr<cspot::Context> context;
@@ -67,6 +79,7 @@ namespace btspeaker {
         std::atomic<bool> isPlaying;
         std::atomic<bool> isInitialized;
         std::atomic<bool> isRunning_;
+        std::atomic<bool> trackTransitionActive_{false};
         std::atomic<uint8_t> volume;
 
         // Audio streaming components

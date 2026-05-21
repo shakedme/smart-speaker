@@ -43,10 +43,12 @@ namespace btspeaker {
     private:
         static constexpr const char *TAG = "MIC_MGR";
         static constexpr int AUDIO_BUFFER_SIZE = 1024 * 4;
-        static constexpr float CUTOFF_HZ = 50.0f;             // remove DC and sub-50Hz drift
-        static constexpr float SAMPLE_RATE = 16000.0f;          // your mic ADC rate
-        static constexpr float F_NORM = CUTOFF_HZ / SAMPLE_RATE;  // ≈0.003125
-        static constexpr float Q_FACTOR = 0.707f;            // Butterworth-style two-pole (~1/√2)
+        static constexpr float SAMPLE_RATE = 16000.0f;
+        static constexpr float HPF_CUTOFF_HZ = 150.0f;        // speech band: reject bass bleed from playback
+        static constexpr float LPF_CUTOFF_HZ = 5000.0f;       // speech band: reject treble/hi-hat bleed
+        static constexpr float HPF_F_NORM = HPF_CUTOFF_HZ / SAMPLE_RATE;
+        static constexpr float LPF_F_NORM = LPF_CUTOFF_HZ / SAMPLE_RATE;
+        static constexpr float Q_FACTOR = 0.707f;             // Butterworth-style two-pole (~1/√2)
         static constexpr int SAMPLE_COUNT = AUDIO_BUFFER_SIZE / sizeof(int32_t);
         static constexpr int MIC_DIAG_INTERVAL_MS = 5000;
 
@@ -64,8 +66,10 @@ namespace btspeaker {
                                uint64_t sum_callback_us,
                                uint32_t max_callback_us) const;
 
-        float delay_lines[2] = {0.0f, 0.0f};
-        float coeffs[5];                        // b0,b1,b2,a1,a2
+        float hpf_delay_lines[2] = {0.0f, 0.0f};
+        float lpf_delay_lines[2] = {0.0f, 0.0f};
+        float hpf_coeffs[5] = {};               // b0,b1,b2,a1,a2
+        float lpf_coeffs[5] = {};
 
         // Audio processing task
         static void audioTask(void *arg);

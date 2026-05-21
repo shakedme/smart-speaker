@@ -76,6 +76,7 @@ namespace btspeaker {
                                     uint32_t chunks_sent,
                                     uint32_t chunks_skipped_state,
                                     uint32_t chunks_skipped_disconnected,
+                                    uint32_t chunks_skipped_spotify_protect,
                                     uint32_t chunks_send_failed,
                                     uint64_t bytes_sent,
                                     uint64_t sum_send_us,

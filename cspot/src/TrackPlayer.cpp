@@ -1,5 +1,6 @@
 #include "TrackPlayer.h"
 #include "cspot_task_config.h"
+#include "diagnostics_config.hpp"
 
 #include <mutex>        // for mutex, scoped_lock
 #include <cstdio>
@@ -19,6 +20,7 @@ extern "C" {
 #include "Logger.h"            // for CSPOT_LOG
 #include "Packet.h"            // for cspot
 #include "PlayPathProfiler.h"
+#include "PlaybackStallDiagnostics.h"
 #include "TrackQueue.h"        // for CDNTrackStream, CDNTrackStream::TrackInfo
 #include "WrappedSemaphore.h"  // for WrappedSemaphore
 #include <esp_log.h>
@@ -44,6 +46,10 @@ namespace cspot {
 }  // namespace cspot
 
 using namespace cspot;
+
+namespace {
+    constexpr uint32_t kSpotifyDecodeDiagIntervalMs = 5000;
+}
 
 #ifndef CONFIG_BELL_NOCODEC
 
@@ -72,7 +78,7 @@ TrackPlayer::TrackPlayer(std::shared_ptr<cspot::Context> ctx,
                          TrackEndedCallback onTrackEnd,
                          TrackChangedCallback onTrackChanged,
                          bool *repeating_track)
-        : bell::Task("cspot_player", 60 * 1024, 4, CSPOT_PLAYER_CORE) {
+        : bell::Task("cspot_player", 60 * 1024, 5, CSPOT_PLAYER_CORE) {
     this->ctx = ctx;
     this->onTrackEnd = onTrackEnd;
     this->onTrackChanged = onTrackChanged;
@@ -90,12 +96,18 @@ TrackPlayer::TrackPlayer(std::shared_ptr<cspot::Context> ctx,
             (decltype(ov_callbacks::tell_func)) &vorbisTellCb,
     };
 #endif
+    registerTrackPlayerForStallDiagnostics(this);
 }
 
 TrackPlayer::~TrackPlayer() {
+    registerTrackPlayerForStallDiagnostics(nullptr);
     isRunning = false;
     resetState();
     std::scoped_lock lock(runningMutex);
+}
+
+void TrackPlayer::flushDiagnostics() {
+    flushDecodeDiagnosticsWindow();
 }
 
 void TrackPlayer::start() {
@@ -340,6 +352,9 @@ void TrackPlayer::runTask() {
                     this->onTrackChanged(track, false);
                 }
 
+                insideVorbisRead_ = true;
+                currentReadCdnMs_ = 0;
+                const uint32_t decodeStartMs = esp_log_timestamp();
                 long ret =
 #ifdef CONFIG_BELL_NOCODEC
                         this->currentTrackStream->readBytes(&pcmBuffer[0],
@@ -348,6 +363,13 @@ void TrackPlayer::runTask() {
                         VORBIS_READ(&vorbisFile, (char *) &pcmBuffer[0], pcmBuffer.size(),
                                     &currentSection);
 #endif
+                insideVorbisRead_ = false;
+                const uint32_t decodeMs = esp_log_timestamp() - decodeStartMs;
+                const uint32_t cdnInDecodeMs = currentReadCdnMs_;
+                const uint32_t cpuInDecodeMs =
+                        decodeMs > cdnInDecodeMs ? decodeMs - cdnInDecodeMs : 0;
+                recordDecodeDiagnostics(ret, decodeMs, cdnInDecodeMs);
+                (void) cpuInDecodeMs;
 
                 if (ret < 0) {
                     if (retries == 0) {
@@ -392,6 +414,7 @@ void TrackPlayer::runTask() {
                     if (this->dataCallback != nullptr) {
                         auto toWrite = ret;
 
+                        uint32_t zeroWriteStreak = 0;
                         while (!eof && currentSongPlaying && !pendingReset && toWrite > 0) {
                             int written = 0;
                             {
@@ -410,9 +433,15 @@ void TrackPlayer::runTask() {
                             }
                             toWrite -= written;
                             if (written == 0) {
-                                vTaskDelay(pdMS_TO_TICKS(10));
+                                zeroWriteStreak++;
+                                const TickType_t delayTicks =
+                                        zeroWriteStreak >= 50
+                                        ? pdMS_TO_TICKS(20)
+                                        : pdMS_TO_TICKS(1);
+                                vTaskDelay(delayTicks > 0 ? delayTicks : 1);
                                 continue;
                             }
+                            zeroWriteStreak = 0;
                         }
                         track->written_bytes += ret;
                     }
@@ -449,7 +478,11 @@ size_t TrackPlayer::_vorbisRead(void *ptr, size_t size, size_t nmemb) {
     if (this->currentTrackStream == nullptr) {
         return 0;
     }
-    return this->currentTrackStream->readBytes((uint8_t *) ptr, nmemb * size);
+    const uint32_t readStartMs = esp_log_timestamp();
+    const size_t bytesRead = this->currentTrackStream->readBytes((uint8_t *) ptr, nmemb * size);
+    const uint32_t readMs = esp_log_timestamp() - readStartMs;
+    recordCdnReadDiagnostics(bytesRead, readMs);
+    return bytesRead;
 }
 
 size_t TrackPlayer::_vorbisClose() {
@@ -494,4 +527,184 @@ void TrackPlayer::setDataCallback(DataCallback callback,
     this->seekable_callback = seekable_callback;
     this->spaces_available = spaces_available;
 #endif
+}
+
+void TrackPlayer::recordDecodeDiagnostics(const long decodedBytes,
+                                          const uint32_t decodeWallMs,
+                                          const uint32_t cdnInDecodeMs) {
+    if (!btspeaker::diagnostics_enabled) {
+        return;
+    }
+
+    const int64_t nowUs = static_cast<int64_t>(esp_log_timestamp());
+    if (decodeDiagWindowStartUs_ == 0) {
+        decodeDiagWindowStartUs_ = nowUs;
+    }
+    if (decodeDiagLastCallUs_ != 0) {
+        const uint32_t gapMs = static_cast<uint32_t>(nowUs - decodeDiagLastCallUs_);
+        if (gapMs > decodeDiagMaxGapMs_) {
+            decodeDiagMaxGapMs_ = gapMs;
+        }
+    }
+    decodeDiagLastCallUs_ = nowUs;
+
+    decodeDiagCalls_++;
+    decodeDiagSumDecodeUs_ += decodeWallMs;
+    if (decodeWallMs > decodeDiagMaxDecodeUs_) {
+        decodeDiagMaxDecodeUs_ = decodeWallMs;
+    }
+    windowSumDecodeWallMs_ += decodeWallMs;
+    windowSumCdnInDecodeMs_ += cdnInDecodeMs;
+    const uint32_t cpuInDecodeMs =
+            decodeWallMs > cdnInDecodeMs ? decodeWallMs - cdnInDecodeMs : 0;
+    windowSumCpuInDecodeMs_ += cpuInDecodeMs;
+    if (cdnInDecodeMs > windowMaxCdnInDecodeMs_) {
+        windowMaxCdnInDecodeMs_ = cdnInDecodeMs;
+    }
+    if (cpuInDecodeMs > windowMaxCpuInDecodeMs_) {
+        windowMaxCpuInDecodeMs_ = cpuInDecodeMs;
+    }
+    if (decodeWallMs > windowMaxDecodeWallMs_) {
+        windowMaxDecodeWallMs_ = decodeWallMs;
+    }
+    if (decodedBytes > 0) {
+        decodeDiagBytes_ += static_cast<uint64_t>(decodedBytes);
+    } else if (decodedBytes == 0) {
+        decodeDiagZeroReads_++;
+    } else {
+        decodeDiagErrors_++;
+    }
+
+    if ((nowUs - decodeDiagWindowStartUs_) < kSpotifyDecodeDiagIntervalMs) {
+        return;
+    }
+
+    flushDecodeDiagnosticsWindow();
+}
+
+void TrackPlayer::flushDecodeDiagnosticsWindow() {
+    if (!btspeaker::diagnostics_enabled) {
+        return;
+    }
+
+    const int64_t nowUs = static_cast<int64_t>(esp_log_timestamp());
+    const int64_t windowMs = nowUs - decodeDiagWindowStartUs_;
+    if (windowMs <= 0) {
+        return;
+    }
+
+    const uint32_t avgDecodeMs = decodeDiagCalls_ > 0
+                                 ? static_cast<uint32_t>(decodeDiagSumDecodeUs_ /
+                                                         decodeDiagCalls_)
+                                 : 0;
+    const uint32_t decodeRate = static_cast<uint32_t>(
+            (decodeDiagBytes_ * 1000ULL) / static_cast<uint64_t>(windowMs));
+    const uint32_t avgCdnReadMs = cdnDiagReads_ > 0
+                                  ? static_cast<uint32_t>(cdnDiagSumReadUs_ /
+                                                          cdnDiagReads_)
+                                  : 0;
+    const uint32_t cdnRate = static_cast<uint32_t>(
+            (cdnDiagBytes_ * 1000ULL) / static_cast<uint64_t>(windowMs));
+    const uint32_t avgCdnInDecodeMs = decodeDiagCalls_ > 0
+                                      ? static_cast<uint32_t>(
+                                                windowSumCdnInDecodeMs_ /
+                                                decodeDiagCalls_)
+                                      : 0;
+    const uint32_t avgCpuInDecodeMs = decodeDiagCalls_ > 0
+                                      ? static_cast<uint32_t>(
+                                                windowSumCpuInDecodeMs_ /
+                                                decodeDiagCalls_)
+                                      : 0;
+
+    ESP_LOGI("TrackPlayer",
+             "[SPOTIFY_DECODE_DIAG] calls=%lu decoded=%lu rate=%luB/s zero=%lu err=%lu "
+             "gap_max_ms=%lu decode_ms(avg=%lu max=%lu) cdn_in_decode_ms(avg=%lu max=%lu) "
+             "cpu_in_decode_ms(avg=%lu max=%lu) cdn_reads=%lu cdn_bytes=%lu "
+             "cdn_rate=%luB/s cdn_zero=%lu cdn_read_ms(avg=%lu max=%lu) "
+             "cdn_req=%lu cdn_fail=%lu",
+             static_cast<unsigned long>(decodeDiagCalls_),
+             static_cast<unsigned long>(decodeDiagBytes_),
+             static_cast<unsigned long>(decodeRate),
+             static_cast<unsigned long>(decodeDiagZeroReads_),
+             static_cast<unsigned long>(decodeDiagErrors_),
+             static_cast<unsigned long>(decodeDiagMaxGapMs_),
+             static_cast<unsigned long>(avgDecodeMs),
+             static_cast<unsigned long>(decodeDiagMaxDecodeUs_),
+             static_cast<unsigned long>(avgCdnInDecodeMs),
+             static_cast<unsigned long>(windowMaxCdnInDecodeMs_),
+             static_cast<unsigned long>(avgCpuInDecodeMs),
+             static_cast<unsigned long>(windowMaxCpuInDecodeMs_),
+             static_cast<unsigned long>(cdnDiagReads_),
+             static_cast<unsigned long>(cdnDiagBytes_),
+             static_cast<unsigned long>(cdnRate),
+             static_cast<unsigned long>(cdnDiagZeroReads_),
+             static_cast<unsigned long>(avgCdnReadMs),
+             static_cast<unsigned long>(cdnDiagMaxReadUs_),
+             static_cast<unsigned long>(cdnDiagRangeRequests_),
+             static_cast<unsigned long>(cdnDiagRangeFailures_));
+
+    PlaybackDecodeSnapshot snapshot{};
+    snapshot.decoded_rate_bps = decodeRate;
+    snapshot.cdn_rate_bps = cdnRate;
+    snapshot.decode_calls = decodeDiagCalls_;
+    snapshot.gap_max_ms = decodeDiagMaxGapMs_;
+    snapshot.decode_wall_ms_avg = avgDecodeMs;
+    snapshot.decode_wall_ms_max = windowMaxDecodeWallMs_;
+    snapshot.cdn_in_decode_ms_avg = avgCdnInDecodeMs;
+    snapshot.cdn_in_decode_ms_max = windowMaxCdnInDecodeMs_;
+    snapshot.cpu_in_decode_ms_avg = avgCpuInDecodeMs;
+    snapshot.cpu_in_decode_ms_max = windowMaxCpuInDecodeMs_;
+    snapshot.cdn_read_ms_avg = avgCdnReadMs;
+    snapshot.cdn_read_ms_max = cdnDiagMaxReadUs_;
+    snapshot.cdn_reads = cdnDiagReads_;
+    snapshot.cdn_zero_reads = cdnDiagZeroReads_;
+    snapshot.cdn_range_requests = cdnDiagRangeRequests_;
+    snapshot.cdn_range_failures = cdnDiagRangeFailures_;
+    publishDecodeSnapshot(snapshot);
+
+    decodeDiagWindowStartUs_ = nowUs;
+    decodeDiagCalls_ = 0;
+    decodeDiagZeroReads_ = 0;
+    decodeDiagErrors_ = 0;
+    decodeDiagMaxGapMs_ = 0;
+    decodeDiagMaxDecodeUs_ = 0;
+    decodeDiagBytes_ = 0;
+    decodeDiagSumDecodeUs_ = 0;
+    cdnDiagReads_ = 0;
+    cdnDiagZeroReads_ = 0;
+    cdnDiagMaxReadUs_ = 0;
+    cdnDiagBytes_ = 0;
+    cdnDiagSumReadUs_ = 0;
+    cdnDiagRangeRequests_ = 0;
+    cdnDiagRangeFailures_ = 0;
+    windowSumDecodeWallMs_ = 0;
+    windowSumCdnInDecodeMs_ = 0;
+    windowSumCpuInDecodeMs_ = 0;
+    windowMaxDecodeWallMs_ = 0;
+    windowMaxCdnInDecodeMs_ = 0;
+    windowMaxCpuInDecodeMs_ = 0;
+}
+
+void TrackPlayer::recordCdnReadDiagnostics(const size_t bytesRead, const uint32_t readMs) {
+    if (!btspeaker::diagnostics_enabled) {
+        return;
+    }
+
+    cdnDiagReads_++;
+    cdnDiagBytes_ += bytesRead;
+    cdnDiagSumReadUs_ += readMs;
+    if (bytesRead == 0) {
+        cdnDiagZeroReads_++;
+    }
+    if (readMs > cdnDiagMaxReadUs_) {
+        cdnDiagMaxReadUs_ = readMs;
+    }
+    if (insideVorbisRead_) {
+        currentReadCdnMs_ += readMs;
+    }
+    if (currentTrackStream) {
+        const auto cdn = currentTrackStream->consumeDiagnostics();
+        cdnDiagRangeRequests_ += cdn.rangeRequests;
+        cdnDiagRangeFailures_ += cdn.rangeFailures;
+    }
 }

@@ -3,11 +3,9 @@
 
 extern "C" {
 #include "esp_log.h"
-#include "esp_check.h"
 #include "audio_pipeline.h"
 #include "audio_common.h"
 #include <bluetooth_service.h>
-#include "audio_event_iface.h"
 #include "esp_err.h"
 #include "board.h"
 }
@@ -24,15 +22,6 @@ namespace btspeaker {
                  static_cast<int>(source), sampleRate, channels, bitsPerSample);
 
         auto audioPipeline = std::make_unique<I2SAudioPipeline>();
-
-        // Create pipeline event handle
-        audio_event_iface_cfg_t evtCfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
-        audio_event_iface_handle_t evtHandle = audio_event_iface_init(&evtCfg);
-        if (!evtHandle) {
-            ESP_LOGE(TAG, "Failed to create audio event interface");
-            throw std::runtime_error("Failed to create audio event interface");
-        }
-        audioPipeline->evtHandle.reset(evtHandle);
 
         // Create I2S writer
         auto i2SHandle = createI2SWriter(
@@ -90,12 +79,8 @@ namespace btspeaker {
             throw std::runtime_error("Failed to link pipeline elements");
         }
 
-        // Set event listener on pipeline
-        ret = audio_pipeline_set_listener(audioPipeline.pipeline.get(), audioPipeline.evtHandle.get());
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to set pipeline listener: %s", esp_err_to_name(ret));
-            throw std::runtime_error("Failed to set pipeline listener");
-        }
+        // No listener is attached here. This path does not consume ADF events, and
+        // an undrained listener queue fills quickly during pause/resume churn.
     }
 
     audio_element_handle_t AudioPipelineUtil::createI2SWriter(AudioSource source,

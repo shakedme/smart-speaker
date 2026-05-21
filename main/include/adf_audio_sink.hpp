@@ -59,7 +59,8 @@ namespace btspeaker {
 
     private:
         static constexpr const char *TAG = "ADF_AUDIO_SINK";
-        static constexpr size_t kRawRingBufferSize = 512 * 1024;
+        // Must exceed EspPlayer::kInitialPreBufferBytes (1 MB) plus low-water headroom.
+        static constexpr size_t kRawRingBufferSize = 1280 * 1024;
         static constexpr size_t kWriteChunkSize = 8192;
 
         std::unique_ptr<I2SAudioPipeline> audioPipeline;
@@ -71,11 +72,16 @@ namespace btspeaker {
 
         void maybeLogPlaybackDiagnostics();
 
+        void maybeLogResumeFollowUp();
+
         std::atomic<uint32_t> ringbufBlockCount_{0};
         std::atomic<uint32_t> ringbufBlockMaxWaitMs_{0};
         std::atomic<uint32_t> feedShortWriteCount_{0};
         std::atomic<size_t> minFillBytes_{SIZE_MAX};
         int64_t lastDiagLogUs_{0};
+        int64_t resumeDiagStartUs_{0};
+        bool resumeDiag500Logged_{false};
+        bool resumeDiag2000Logged_{false};
     };
 
 } // namespace btspeaker

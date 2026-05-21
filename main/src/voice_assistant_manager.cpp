@@ -3,6 +3,7 @@
 #include "../include/microphone_manager.hpp"
 #include "../include/websocket_voice_client.hpp"
 #include "../include/audio_source_manager.hpp"
+#include "diagnostics_config.hpp"
 #include <cstring>
 #include <stdexcept>
 
@@ -76,10 +77,15 @@ namespace btspeaker {
                                                          const uint32_t chunks_sent,
                                                          const uint32_t chunks_skipped_state,
                                                          const uint32_t chunks_skipped_disconnected,
+                                                         const uint32_t chunks_skipped_spotify_protect,
                                                          const uint32_t chunks_send_failed,
                                                          const uint64_t bytes_sent,
                                                          const uint64_t sum_send_us,
                                                          const uint32_t max_send_us) const {
+        if (!diagnostics_enabled) {
+            return;
+        }
+
         const uint32_t avg_send_us = chunks_sent > 0
                                      ? static_cast<uint32_t>(sum_send_us / chunks_sent)
                                      : 0;
@@ -90,13 +96,14 @@ namespace btspeaker {
                                       : 0;
 
         ESP_LOGI(TAG,
-                 "[UPSTREAM_DIAG] rx_chunks=%lu sent=%lu skip_state=%lu skip_ws=%lu send_fail=%lu "
+                 "[UPSTREAM_DIAG] rx_chunks=%lu sent=%lu skip_state=%lu skip_ws=%lu skip_spotify=%lu send_fail=%lu "
                  "bytes=%lu ~%luHz voice=%s audio=%s "
                  "ws_send_us(avg=%lu max=%lu) dram=%lu",
                  static_cast<unsigned long>(chunks_received),
                  static_cast<unsigned long>(chunks_sent),
                  static_cast<unsigned long>(chunks_skipped_state),
                  static_cast<unsigned long>(chunks_skipped_disconnected),
+                 static_cast<unsigned long>(chunks_skipped_spotify_protect),
                  static_cast<unsigned long>(chunks_send_failed),
                  static_cast<unsigned long>(bytes_sent),
                  static_cast<unsigned long>(effective_hz),
@@ -379,16 +386,18 @@ namespace btspeaker {
         static uint32_t diag_chunks_sent = 0;
         static uint32_t diag_chunks_skipped_state = 0;
         static uint32_t diag_chunks_skipped_disconnected = 0;
+        static uint32_t diag_chunks_skipped_spotify_protect = 0;
         static uint32_t diag_chunks_send_failed = 0;
         static uint64_t diag_bytes_sent = 0;
         static uint64_t diag_sum_send_us = 0;
         static uint32_t diag_max_send_us = 0;
 
-        if (diag_window_start_us == 0) {
-            diag_window_start_us = esp_timer_get_time();
+        if (diagnostics_enabled) {
+            if (diag_window_start_us == 0) {
+                diag_window_start_us = esp_timer_get_time();
+            }
+            diag_chunks_received++;
         }
-
-        diag_chunks_received++;
 
         const VoiceAssistantState current_state = state.load();
 
@@ -401,7 +410,10 @@ namespace btspeaker {
                     current_state == VoiceAssistantState::WAITING_FOR_USER && voice_response_draining;
 
             if (defer_uplink_for_voice_response) {
-                // Hold mic uplink until LLM playback buffers drain to avoid WS overload/echo.
+                if (websocketClient) {
+                    websocketClient->setPlaybackMicSuspended(false);
+                    websocketClient->setPlaybackStress(false);
+                }
             } else if (websocketClient && websocketClient->isConnected()) {
                 const AudioSource playback_source = audioSourceManager.getCurrentSource();
                 const bool playback_active = playback_source == AudioSource::BLUETOOTH ||
@@ -409,61 +421,105 @@ namespace btspeaker {
                                              voice_response_draining;
                 websocketClient->setPlaybackActive(playback_active);
 
-                const int64_t before_send_us = esp_timer_get_time();
-                const esp_err_t ret = websocketClient->sendAudioChunk(data, length);
-                const uint32_t send_us = static_cast<uint32_t>(esp_timer_get_time() - before_send_us);
+                AudioSourceManager::SpotifyMicUplinkPolicy mic_policy =
+                        AudioSourceManager::SpotifyMicUplinkPolicy::Allow;
+                if (playback_source == AudioSource::SPOTIFY) {
+                    mic_policy = audioSourceManager.getSpotifyMicUplinkPolicy();
+                }
 
-                if (ret == ESP_OK) {
-                    diag_chunks_sent++;
-                    diag_bytes_sent += length;
-                    diag_sum_send_us += send_us;
-                    if (send_us > diag_max_send_us) {
-                        diag_max_send_us = send_us;
+                const bool suspend_mic_for_spotify =
+                        mic_policy == AudioSourceManager::SpotifyMicUplinkPolicy::Suspend;
+                websocketClient->setPlaybackMicSuspended(suspend_mic_for_spotify);
+
+                if (suspend_mic_for_spotify) {
+                    websocketClient->setPlaybackStress(false);
+                    if (diagnostics_enabled) {
+                        diag_chunks_skipped_spotify_protect++;
                     }
-                    if (send_us > 100000) {
-                        ESP_LOGW(TAG,
-                                 "[UPSTREAM_DIAG] slow ws send %lu us, %u bytes, voice=%s audio=%s",
-                                 static_cast<unsigned long>(send_us),
+                } else {
+                    websocketClient->setPlaybackStress(
+                            mic_policy == AudioSourceManager::SpotifyMicUplinkPolicy::Stress);
+
+                    const int64_t before_send_us = esp_timer_get_time();
+                    const esp_err_t ret = websocketClient->sendAudioChunk(data, length);
+                    const uint32_t send_us =
+                            static_cast<uint32_t>(esp_timer_get_time() - before_send_us);
+
+                    if (ret == ESP_OK) {
+                        if (diagnostics_enabled) {
+                            diag_chunks_sent++;
+                            diag_bytes_sent += length;
+                            diag_sum_send_us += send_us;
+                            if (send_us > diag_max_send_us) {
+                                diag_max_send_us = send_us;
+                            }
+                            if (send_us > 100000) {
+                                ESP_LOGW(TAG,
+                                         "[UPSTREAM_DIAG] slow ws send %lu us, %u bytes, voice=%s audio=%s",
+                                         static_cast<unsigned long>(send_us),
+                                         static_cast<unsigned>(length),
+                                         voiceStateName(current_state),
+                                         audioSourceName(audioSourceManager.getCurrentSource()));
+                            }
+                        }
+                    } else if (diagnostics_enabled) {
+                        diag_chunks_send_failed++;
+                        ESP_LOGE(TAG,
+                                 "[UPSTREAM_DIAG] send failed: %s (%u bytes, voice=%s audio=%s)",
+                                 esp_err_to_name(ret),
                                  static_cast<unsigned>(length),
                                  voiceStateName(current_state),
                                  audioSourceName(audioSourceManager.getCurrentSource()));
+                    } else {
+                        ESP_LOGE(TAG,
+                                 "Upstream send failed: %s (%u bytes)",
+                                 esp_err_to_name(ret),
+                                 static_cast<unsigned>(length));
                     }
-                } else {
-                    diag_chunks_send_failed++;
-                    ESP_LOGE(TAG,
-                             "[UPSTREAM_DIAG] send failed: %s (%u bytes, voice=%s audio=%s)",
-                             esp_err_to_name(ret),
-                             static_cast<unsigned>(length),
-                             voiceStateName(current_state),
-                             audioSourceName(audioSourceManager.getCurrentSource()));
                 }
             } else {
-                diag_chunks_skipped_disconnected++;
+                if (diagnostics_enabled) {
+                    diag_chunks_skipped_disconnected++;
+                }
+                if (websocketClient) {
+                    websocketClient->setPlaybackMicSuspended(false);
+                    websocketClient->setPlaybackStress(false);
+                }
             }
         } else {
-            diag_chunks_skipped_state++;
+            if (diagnostics_enabled) {
+                diag_chunks_skipped_state++;
+            }
+            if (websocketClient) {
+                websocketClient->setPlaybackMicSuspended(false);
+                websocketClient->setPlaybackStress(false);
+            }
         }
 
-        const int64_t now_us = esp_timer_get_time();
-        if ((now_us - diag_window_start_us) >= (UPSTREAM_DIAG_INTERVAL_MS * 1000LL)) {
-            logUpstreamDiagnostics(now_us,
-                                   diag_chunks_received,
-                                   diag_chunks_sent,
-                                   diag_chunks_skipped_state,
-                                   diag_chunks_skipped_disconnected,
-                                   diag_chunks_send_failed,
-                                   diag_bytes_sent,
-                                   diag_sum_send_us,
-                                   diag_max_send_us);
-            diag_window_start_us = now_us;
-            diag_chunks_received = 0;
-            diag_chunks_sent = 0;
-            diag_chunks_skipped_state = 0;
-            diag_chunks_skipped_disconnected = 0;
-            diag_chunks_send_failed = 0;
-            diag_bytes_sent = 0;
-            diag_sum_send_us = 0;
-            diag_max_send_us = 0;
+        if (diagnostics_enabled) {
+            const int64_t now_us = esp_timer_get_time();
+            if ((now_us - diag_window_start_us) >= (UPSTREAM_DIAG_INTERVAL_MS * 1000LL)) {
+                logUpstreamDiagnostics(now_us,
+                                       diag_chunks_received,
+                                       diag_chunks_sent,
+                                       diag_chunks_skipped_state,
+                                       diag_chunks_skipped_disconnected,
+                                       diag_chunks_skipped_spotify_protect,
+                                       diag_chunks_send_failed,
+                                       diag_bytes_sent,
+                                       diag_sum_send_us,
+                                       diag_max_send_us);
+                diag_window_start_us = now_us;
+                diag_chunks_received = 0;
+                diag_chunks_sent = 0;
+                diag_chunks_skipped_state = 0;
+                diag_chunks_skipped_disconnected = 0;
+                diag_chunks_skipped_spotify_protect = 0;
+                diag_chunks_send_failed = 0;
+                diag_bytes_sent = 0;
+                diag_sum_send_us = 0;
+                diag_max_send_us = 0;
+            }
         }
     }
 

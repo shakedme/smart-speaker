@@ -889,24 +889,16 @@ static bool runReloadPreloadStartup() {
             QueuedTrack::State::READY;
 
     if (handler->skipLikePlayStartup) {
-        handler->reloadPreloadedTracks = false;
         handler->skipLikePlayStartup = false;
-        handler->deferredReloadTrackList = false;
-        handler->reloadHeadTrackReady = false;
-        PlayPathProfiler::mark("reload.skip_like_startup", "complete");
+        PlayPathProfiler::mark("reload.skip_like_startup", "needs_playback_start");
         ESP_LOGI("DST",
-                 "reloadTrackList: skip-like startup complete (head already "
-                 "signaled/consumed); topping up preload");
-
-        if (!handler->currentTracks.empty()) {
-            handler->device.player_state.track = handler->currentTracks[0];
-        }
-        handler->deferTopUpPreload = true;
-        PlayPathProfiler::mark("play.topup_deferred");
-        return true;
+                 "reloadTrackList: skip-like reload complete; starting playback "
+                 "(head preload was deferred or reset consumed first signal)");
     }
 
     handler->reloadPreloadedTracks = false;
+    handler->deferredReloadTrackList = false;
+    handler->reloadHeadTrackReady = false;
 
     PlayPathProfiler::mark("reload.startup_begin");
     ESP_LOGI("DST",

@@ -494,6 +494,13 @@ bool PlayerContext::applyContextResponsePayload(
       buildFastPlayAlternativeIndex(
           alternative_index, jsonResult["pages"][pageIndex]["tracks"],
           tracks->at(0));
+      offset = tracks->at(0).original_index;
+#ifdef ESP_PLATFORM
+      ESP_LOGI("PlayerContext",
+               "fastHeadMerge: head uri=%s page_offset=%u",
+               tracks->at(0).uri,
+               (unsigned) offset);
+#endif
     } else {
       createIndexBasedOnTracklist(
           tracks, jsonResult["pages"][pageIndex]["tracks"],

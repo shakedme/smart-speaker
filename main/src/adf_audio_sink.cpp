@@ -5,6 +5,7 @@
 
 #include "../include/adf_audio_sink.hpp"
 #include "../include/audio_pipeline_util.hpp"
+#include "diagnostics_config.hpp"
 #include <algorithm>
 #include <stdexcept>
 
@@ -29,9 +30,49 @@ namespace btspeaker {
         size_t ringbufFilled(ringbuf_handle_t rb) {
             return rb ? rb_bytes_filled(rb) : 0;
         }
+
+        int i2sElementState(const ElementHandle &element) {
+            return element ? static_cast<int>(audio_element_get_state(element.get())) : -1;
+        }
+    }
+
+    void ADFAudioSink::maybeLogResumeFollowUp() {
+        if (!diagnostics_enabled || resumeDiagStartUs_ == 0 || !audioPipeline) {
+            return;
+        }
+
+        const int64_t elapsed_ms = (esp_timer_get_time() - resumeDiagStartUs_) / 1000;
+        const size_t fill = getBufferFillLevel();
+        const size_t capacity = getBufferCapacity();
+        const int i2s_state = i2sElementState(audioPipeline->i2SStreamWriter);
+
+        if (!resumeDiag500Logged_ && elapsed_ms >= 500) {
+            resumeDiag500Logged_ = true;
+            ESP_LOGI(TAG,
+                     "[PLAYBACK_RESUME_DIAG] +500ms fill=%u/%u i2s_state=%d playing=%d",
+                     static_cast<unsigned>(fill),
+                     static_cast<unsigned>(capacity),
+                     i2s_state,
+                     isPlaying_.load() ? 1 : 0);
+        }
+
+        if (!resumeDiag2000Logged_ && elapsed_ms >= 2000) {
+            resumeDiag2000Logged_ = true;
+            resumeDiagStartUs_ = 0;
+            ESP_LOGI(TAG,
+                     "[PLAYBACK_RESUME_DIAG] +2000ms fill=%u/%u i2s_state=%d playing=%d",
+                     static_cast<unsigned>(fill),
+                     static_cast<unsigned>(capacity),
+                     i2s_state,
+                     isPlaying_.load() ? 1 : 0);
+        }
     }
 
     void ADFAudioSink::maybeLogPlaybackDiagnostics() {
+        if (!diagnostics_enabled) {
+            return;
+        }
+
         const int64_t now_us = esp_timer_get_time();
         if (lastDiagLogUs_ != 0 &&
             (now_us - lastDiagLogUs_) < (kPlaybackDiagIntervalMs * 1000LL)) {
@@ -87,15 +128,17 @@ namespace btspeaker {
                 vTaskDelay(pdMS_TO_TICKS(backoffMs));
                 const uint32_t waited_ms = static_cast<uint32_t>(
                         (esp_timer_get_time() - block_start_us) / 1000);
-                ringbufBlockCount_.fetch_add(1, std::memory_order_relaxed);
-                uint32_t prev_max = ringbufBlockMaxWaitMs_.load(std::memory_order_relaxed);
-                while (waited_ms > prev_max &&
-                       !ringbufBlockMaxWaitMs_.compare_exchange_weak(
-                               prev_max, waited_ms, std::memory_order_relaxed)) {
-                }
-                if (waited_ms >= kRingbufBlockWarnMs) {
-                    ESP_LOGW(TAG, "[PLAYBACK_DIAG] ringbuf full, waited %lu ms",
-                             static_cast<unsigned long>(waited_ms));
+                if (diagnostics_enabled) {
+                    ringbufBlockCount_.fetch_add(1, std::memory_order_relaxed);
+                    uint32_t prev_max = ringbufBlockMaxWaitMs_.load(std::memory_order_relaxed);
+                    while (waited_ms > prev_max &&
+                           !ringbufBlockMaxWaitMs_.compare_exchange_weak(
+                                   prev_max, waited_ms, std::memory_order_relaxed)) {
+                    }
+                    if (waited_ms >= kRingbufBlockWarnMs) {
+                        ESP_LOGW(TAG, "[PLAYBACK_DIAG] ringbuf full, waited %lu ms",
+                                 static_cast<unsigned long>(waited_ms));
+                    }
                 }
                 if (((esp_timer_get_time() - feed_start_us) / 1000) >= kFeedBackpressureReturnMs) {
                     break;
@@ -121,17 +164,20 @@ namespace btspeaker {
             }
 
             offset += static_cast<size_t>(written);
-            if (static_cast<size_t>(written) < toWrite) {
+            if (diagnostics_enabled && static_cast<size_t>(written) < toWrite) {
                 feedShortWriteCount_.fetch_add(1, std::memory_order_relaxed);
             }
         }
 
-        const size_t fill = getBufferFillLevel();
-        size_t prev_min = minFillBytes_.load(std::memory_order_relaxed);
-        while (fill < prev_min &&
-               !minFillBytes_.compare_exchange_weak(prev_min, fill, std::memory_order_relaxed)) {
+        if (diagnostics_enabled) {
+            const size_t fill = getBufferFillLevel();
+            size_t prev_min = minFillBytes_.load(std::memory_order_relaxed);
+            while (fill < prev_min &&
+                   !minFillBytes_.compare_exchange_weak(prev_min, fill, std::memory_order_relaxed)) {
+            }
+            maybeLogPlaybackDiagnostics();
+            maybeLogResumeFollowUp();
         }
-        maybeLogPlaybackDiagnostics();
 
         return offset;
     }
@@ -208,14 +254,48 @@ namespace btspeaker {
     }
 
     void ADFAudioSink::resume() {
-        if (audioPipeline && audioPipeline->pipeline) {
-            esp_err_t ret = audio_pipeline_resume(audioPipeline->pipeline.get());
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to resume pipeline: %s", esp_err_to_name(ret));
-            } else {
-                isPlaying_.store(true);
-                ESP_LOGI(TAG, "Pipeline resumed");
+        if (!audioPipeline || !audioPipeline->pipeline) {
+            return;
+        }
+
+        const size_t fill_before = getBufferFillLevel();
+        const size_t capacity = getBufferCapacity();
+        const int i2s_state_before = i2sElementState(audioPipeline->i2SStreamWriter);
+
+        const esp_err_t ret = audio_pipeline_resume(audioPipeline->pipeline.get());
+        const size_t fill_after = getBufferFillLevel();
+        const int i2s_state_after = i2sElementState(audioPipeline->i2SStreamWriter);
+
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to resume pipeline: %s", esp_err_to_name(ret));
+            if (diagnostics_enabled) {
+                ESP_LOGW(TAG,
+                         "[PLAYBACK_RESUME_DIAG] resume failed ret=%s fill=%u->%u cap=%u "
+                         "i2s_state=%d->%d",
+                         esp_err_to_name(ret),
+                         static_cast<unsigned>(fill_before),
+                         static_cast<unsigned>(fill_after),
+                         static_cast<unsigned>(capacity),
+                         i2s_state_before,
+                         i2s_state_after);
             }
+            return;
+        }
+
+        isPlaying_.store(true);
+        ESP_LOGI(TAG, "Pipeline resumed");
+
+        if (diagnostics_enabled) {
+            resumeDiagStartUs_ = esp_timer_get_time();
+            resumeDiag500Logged_ = false;
+            resumeDiag2000Logged_ = false;
+            ESP_LOGI(TAG,
+                     "[PLAYBACK_RESUME_DIAG] resume ok fill=%u->%u cap=%u i2s_state=%d->%d playing=1",
+                     static_cast<unsigned>(fill_before),
+                     static_cast<unsigned>(fill_after),
+                     static_cast<unsigned>(capacity),
+                     i2s_state_before,
+                     i2s_state_after);
         }
     }
 

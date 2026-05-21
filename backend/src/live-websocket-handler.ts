@@ -1,6 +1,6 @@
 import {WebSocket} from 'ws';
 import {v4 as uuidv4} from 'uuid';
-import {GoogleGenAI, Modality, Part, Session} from '@google/genai';
+import {GoogleGenAI, LiveServerMessage, Modality, Part, Session} from '@google/genai';
 import {Cobra} from "@picovoice/cobra-node";
 import {Porcupine} from "@picovoice/porcupine-node";
 import axios from 'axios';
@@ -27,12 +27,13 @@ interface ControlMessage {
 }
 
 // VAD constants
-const VAD_SENSITIVITY = 0.4; // 0.0 (lowest) to 1.0 (highest)
-const VAD_SILENCE_TIMEOUT_MS = 2000; // Time of silence before processing
+const VAD_SENSITIVITY = 0.9; // 0.0 (lowest) to 1.0 (highest)
+const VAD_SILENCE_TIMEOUT_MS = 1800; // Time of silence before processing
 const CONVERSATION_TIMEOUT_MS = 5000; // Time to keep conversation session alive with no user input
 const MIN_RESPONSE_AUDIO_BYTES = 320; // Skip Gemini framing/header chunks (~2 bytes)
+const ESP_DOWNLINK_PCM_CHUNK_BYTES = 4096; // Match ESP32 WS rx buffer / pipeline write chunk size
 const WAKE_WORD_WINDOW_MS = 1500; // Reduced from 3000ms for lower latency
-const WAKE_WORD_SENSITIVITY = 0.4; // Lower = more sensitive
+const WAKE_WORD_SENSITIVITY = 0.8; // Higher = fewer misses, but more false alarms.
 const UPLINK_PCM_SAMPLE_RATE = 16000;
 const GEMINI_RESPONSE_PCM_SAMPLE_RATE = 24000;
 const GEMINI_RESPONSE_VOICE = 'Sulafat';
@@ -407,7 +408,6 @@ export class LiveWebSocketHandler {
                 return;
             }
 
-            this.log('info', `Sending ${chunkCount} audio chunks to Gemini for intent detection.`);
             const wavBuffer = this.createWavBuffer(fullAudio);
 
             // First interaction - determine intent
@@ -416,7 +416,7 @@ export class LiveWebSocketHandler {
             Respond with a single, minified JSON object with the format: {"intent": "...", "data": "..."}.
             Do not include any other text, markdown, or explanation.
             Possible intents are "spotify", "playback_control", and "information".
-            - For "spotify", the "data" should be the song, artist, or playlist name. The word PLAY must be included in the intent.
+            - For "spotify", the "data" should be the song, artist, album or playlist name. For example, "the wall by pink floyd", "jazz", "blackbird", etc'. The word PLAY must be included in the intent. DO NOT return the word play in the data property.
             - For "playback_control", the "data" should be the action ("pause", "next", "volume up/down").
             - For "information", the "data" should be the user's full question, and clearly not be a command.`;
             const contents: Part[] = [
@@ -428,11 +428,12 @@ export class LiveWebSocketHandler {
                     }
                 }
             ];
+            this.log('info', `Sending ${contents.length} contents to Gemini for intent detection.`);
             const response = await this.gemini.models.generateContent({
                 model: 'gemini-2.0-flash',
                 contents
             });
-
+            this.log('info', `Gemini intent response received.`);
             const text = response.text;
             if (!text) {
                 this.log('error', 'Gemini response is empty.');
@@ -585,7 +586,7 @@ export class LiveWebSocketHandler {
                     onopen: () => {
                         this.log('info', 'Audio response session opened.');
                     },
-                    onmessage: (message: any) => this.handleAudioResponse(message),
+                    onmessage: (message: LiveServerMessage) => this.handleAudioResponse(message),
                     onerror: (e: any) => {
                         this.log('error', `Audio response error: ${JSON.stringify(e)}`);
                         this.endConversation();
@@ -616,7 +617,10 @@ export class LiveWebSocketHandler {
             });
 
             this.responseAudioMimeLogged = false;
-            this.responseSession.sendRealtimeInput({text: question});
+            this.responseSession.sendClientContent({
+                turns: [{role: 'user', parts: [{text: question}]}],
+                turnComplete: true,
+            });
 
             // Clear audio buffers after sending
             this.clearAudioBuffers();
@@ -627,7 +631,81 @@ export class LiveWebSocketHandler {
         }
     }
 
-    private handleAudioResponse(message: any): void {
+    private decodeInlineBlobData(data: unknown): Buffer {
+        if (typeof data === 'string') {
+            return Buffer.from(data, 'base64');
+        }
+        if (Buffer.isBuffer(data)) {
+            return data;
+        }
+        if (data instanceof Uint8Array) {
+            return Buffer.from(data);
+        }
+        return Buffer.alloc(0);
+    }
+
+    private extractLiveAudioChunks(message: LiveServerMessage): Array<{ buffer: Buffer; mimeType?: string }> {
+        const chunks: Array<{ buffer: Buffer; mimeType?: string }> = [];
+        const parts = message.serverContent?.modelTurn?.parts ?? [];
+
+        for (const part of parts) {
+            const inlineData = part.inlineData;
+            if (!inlineData?.data) {
+                continue;
+            }
+            const buffer = this.decodeInlineBlobData(inlineData.data);
+            if (buffer.length > 0) {
+                chunks.push({
+                    buffer,
+                    ...(inlineData.mimeType ? {mimeType: inlineData.mimeType} : {}),
+                });
+            }
+        }
+
+        if (chunks.length === 0 && message.data) {
+            const buffer = Buffer.from(message.data, 'base64');
+            if (buffer.length > 0) {
+                chunks.push({buffer});
+            }
+        }
+
+        return chunks;
+    }
+
+    private sendAudioResponseToDevice(audioBuffer: Buffer, mimeType?: string): void {
+        if (audioBuffer.length < MIN_RESPONSE_AUDIO_BYTES) {
+            this.log('debug', `Skipping tiny audio response chunk of ${audioBuffer.length} bytes.`);
+            return;
+        }
+
+        if (!this.isGeminiSpeaking) {
+            this.isGeminiSpeaking = true;
+            this.log('info', 'Gemini started speaking.');
+        }
+        if (!this.responseAudioMimeLogged) {
+            this.responseAudioMimeLogged = true;
+            this.log(
+                'info',
+                `Gemini response audio format: ${mimeType ?? `audio/pcm;rate=${GEMINI_RESPONSE_PCM_SAMPLE_RATE}`}; ` +
+                `ESP playback expects ${GEMINI_RESPONSE_PCM_SAMPLE_RATE}Hz mono s16le; voice=${GEMINI_RESPONSE_VOICE}`
+            );
+        }
+
+        if (this.ws.readyState !== WebSocket.OPEN) {
+            return;
+        }
+
+        for (let offset = 0; offset < audioBuffer.length; offset += ESP_DOWNLINK_PCM_CHUNK_BYTES) {
+            const chunk = audioBuffer.subarray(
+                offset,
+                Math.min(offset + ESP_DOWNLINK_PCM_CHUNK_BYTES, audioBuffer.length)
+            );
+            this.log('debug', `Sending audio response chunk of ${chunk.length} bytes.`);
+            this.ws.send(chunk);
+        }
+    }
+
+    private handleAudioResponse(message: LiveServerMessage): void {
         if (message.goAway) {
             this.log('warn', `Live session GoAway: ${JSON.stringify(message.goAway)}`);
         }
@@ -638,37 +716,17 @@ export class LiveWebSocketHandler {
             this.log('info', 'Gemini generation complete.');
         }
 
+        if (serverContent?.interrupted) {
+            this.log('warn', 'Gemini response interrupted.');
+        }
+
+        for (const {buffer, mimeType} of this.extractLiveAudioChunks(message)) {
+            this.sendAudioResponseToDevice(buffer, mimeType);
+        }
+
         if (serverContent?.turnComplete) {
             this.log('info', 'Gemini turn complete. Ready for follow-up.');
             this.enterWaitingForUser();
-            return;
-        }
-
-        // Handle audio data
-        const inlineData = serverContent?.modelTurn?.parts?.find((part: Part) => part.inlineData)?.inlineData;
-        const audioData = inlineData?.data;
-        if (audioData) {
-            if (!this.isGeminiSpeaking) {
-                this.isGeminiSpeaking = true;
-                this.log('info', 'Gemini started speaking.');
-            }
-            if (!this.responseAudioMimeLogged) {
-                this.responseAudioMimeLogged = true;
-                this.log(
-                    'info',
-                    `Gemini response audio format: ${inlineData?.mimeType ?? `audio/pcm;rate=${GEMINI_RESPONSE_PCM_SAMPLE_RATE}`}; ` +
-                    `ESP playback expects ${GEMINI_RESPONSE_PCM_SAMPLE_RATE}Hz mono s16le; voice=${GEMINI_RESPONSE_VOICE}`
-                );
-            }
-            const audioBuffer = Buffer.from(audioData, 'base64');
-            if (audioBuffer.length < MIN_RESPONSE_AUDIO_BYTES) {
-                this.log('debug', `Skipping tiny audio response chunk of ${audioBuffer.length} bytes.`);
-                return;
-            }
-            if (this.ws.readyState === WebSocket.OPEN) {
-                this.log('debug', `Sending audio response chunk of ${audioBuffer.length} bytes.`);
-                this.ws.send(audioBuffer);
-            }
         }
     }
 

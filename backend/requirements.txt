@@ -1,0 +1,4 @@
+# Python deps for wake word inference worker (backend/.venv)
+-r models/wakeword/requirements.txt
+
+# Training: pip install -r models/wakeword/requirements-train.txt

@@ -12,10 +12,6 @@ extern "C" {
 
 namespace btspeaker {
 
-    std::unique_ptr<WiFiManager> WiFiManager::create() {
-        return std::make_unique<WiFiManager>();
-    }
-
     WiFiManager::WiFiManager()
             : status(Status::DISCONNECTED), wifiEventGroup(nullptr), staNetif(nullptr), retryCount(0),
               initialized(false) {
@@ -245,13 +241,10 @@ namespace btspeaker {
         } else if (eventBase == IP_EVENT && eventId == IP_EVENT_STA_GOT_IP) {
             auto *event = (ip_event_got_ip_t *) eventData;
             ESP_LOGI(self->TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
-            // Modem sleep delays inbound TCP (Spotify Connect commands) by seconds.
             const esp_err_t psErr = esp_wifi_set_ps(WIFI_PS_NONE);
             if (psErr != ESP_OK) {
                 ESP_LOGW(self->TAG, "Failed to disable WiFi power save: %s",
                          esp_err_to_name(psErr));
-            } else {
-                ESP_LOGI(self->TAG, "WiFi power save disabled for low-latency streaming");
             }
             self->retryCount = 0;
             xEventGroupSetBits(self->wifiEventGroup, WIFI_MGR_CONNECTED_BIT);

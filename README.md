@@ -8,7 +8,7 @@ An ESP32-based smart speaker that combines classic Bluetooth audio, Spotify Conn
 - Spotify Connect client powered by `cspot`, including Zeroconf pairing and persistent credentials stored in NVS
 - WebSocket voice assistant that streams microphone audio to a backend for wake word detection, Gemini intent parsing, Google Cloud speech services, and real-time voice replies
 - Shared audio pipeline that can queue voice responses over active music playback
-- Optional wake word model training tools for the custom "Hey Rufus" hotword
+- Optional wake word model training tools for the custom "Okay Rufus" hotword (LiveKit wakeword)
 
 ## Repository Layout
 - `main/` – ESP-IDF application entry point and firmware modules (audio pipelines, Wi-Fi, voice assistant, Spotify integration)
@@ -55,14 +55,15 @@ npm run build
 ```
 
 ### Required Environment Variables
-Create a `.env` file in `backend/` (or export the variables) before starting the server:
+Create a `.env` file in `backend/` (see `.env.example`) before starting the server:
 - `PORT` – HTTP/WebSocket port (default 8080)
 - `GOOGLE_AI_API_KEY` – API key for Google Gemini
-- `PICOVOICE_ACCESS_KEY` – Access key for Picovoice Porcupine/Cobra SDKs
+- `WAKEWORD_MODEL_PATH` – Path to trained LiveKit `okay_rufus` ONNX classifier
+- `WAKEWORD_THRESHOLD` – Detection threshold from eval JSON (default 0.68)
+- `VAD_THRESHOLD` – Silero VAD speech threshold (default 0.5)
 - `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` – Client credentials used for search & intent follow-up
-- Optional: `GOOGLE_APPLICATION_CREDENTIALS` pointing to a service account JSON if Google Cloud Speech/TTS is configured to use service accounts
 
-Place the Picovoice keyword file (`Hey-Rufus_en_mac_v3_0_0.ppn`) in the backend root (already referenced by relative path).
+Python dependency for wake word inference: `pip install livekit-wakeword` (see `backend/models/wakeword/README.md` for training the custom model).
 
 ### Run the Server
 ```bash
@@ -73,7 +74,17 @@ npm run start:live  # build once and run the compiled server
 The server hosts a minimal web UI at `http://localhost:PORT` for testing audio streaming, and exposes the WebSocket endpoint at `/voice` that the ESP32 firmware connects to.
 
 ## Wake Word Model
-The `hey_rufus/` directory contains scripts to curate datasets, extract MFCC features, train TensorFlow Lite models, and export Picovoice-compatible wake word models. Refer to the individual Python scripts for usage; they require NumPy, TensorFlow, and the Picovoice SDK.
+Production **Okay Rufus** wake word uses [livekit-wakeword](https://github.com/livekit/livekit-wakeword). Train once, then the backend auto-loads threshold from eval metrics.
+
+```bash
+cd backend
+python3.11 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r models/wakeword/requirements-train.txt
+npm run train:wakeword:prod   # several hours; see models/wakeword/README.md
+npm run start:live
+```
+
+See [backend/models/wakeword/README.md](backend/models/wakeword/README.md) for details.
 
 ## Development Tips
 - `build_optimized.sh` / `analyze_build.sh` wrap common ESP-IDF build and inspection commands

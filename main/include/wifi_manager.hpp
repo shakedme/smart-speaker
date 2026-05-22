@@ -13,7 +13,7 @@ extern "C" {
 
 namespace btspeaker {
 
-    class WiFiManager {
+    class WiFiManager final {
     public:
         enum class Status {
             DISCONNECTED,
@@ -23,8 +23,6 @@ namespace btspeaker {
         };
 
         using StatusCallback = std::function<void(Status status)>;
-
-        static std::unique_ptr<WiFiManager> create();
 
         WiFiManager();
 

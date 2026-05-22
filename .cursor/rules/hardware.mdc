@@ -9,10 +9,10 @@ BMS: 3S Battery Management System with protection
 Power Switch: SPST toggle switch for main power control
 DC Input Jack: 2.1mm barrel jack for 12V external power/charging
 LM317 Buck Converter: 12V to 5V conversion for ESP32 system
-Sure Electronics AA-JA32172: TPA3116D2 2×50W amplifier (includes built-in volume control & coupling caps)
+TPA3116D2 2×50W amplifier (includes built-in volume control & coupling caps)
 Left/Right Speakers: 2× Dayton Audio RS100P-4 (4Ω, 30W)
 Passive Radiators: 2× Dayton Audio ND105-PR
-Speaker Wire: 1.5mm² (15-16 AWG) speaker wire
+Speaker Wire: 1.5mm² (15-16 AWG) speaker wire   
 LM2587 Boost Converter: 5A, 9-12V to 15V (from Amazon - $8.55)
 Basic Wires/Breadboard: For prototyping
 
@@ -43,7 +43,7 @@ GPIO35 (ADC1_CH7) → OUT (Analog Audio)
 Power Distribution:
 
 12V Rail: Battery → BMS → LM2587 Boost (15V) → TPA3116D2 Amplifier
-5V Rail: Battery → BMS → LM317 Buck (5V) → ESP32, PCM5102A, MAX9814
+5V Rail: Battery → BMS → LM317 Buck (5V) → ESP32, PCM5102A, SPH0645LM4H
 Audio Chain: ESP32 → PCM5102A → AA-JA32172 → Speakers
 
 ⚡ Power Specifications:

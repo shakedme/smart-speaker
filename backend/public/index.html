@@ -270,6 +270,8 @@
                 this.outputAudioContext = null;
                 this.audioBufferQueue = [];
                 this.isPlaying = false;
+                this.playbackPumpActive = false;
+                this.playbackGeneration = 0;
                 this.nextPlayTime = 0;
 
                 this.initializeElements();
@@ -407,7 +409,12 @@
                     const workletNode = new AudioWorkletNode(this.inputAudioContext, 'audio-processor');
                     workletNode.port.onmessage = (event) => {
                         if (this.isRecording && this.ws && this.ws.readyState === WebSocket.OPEN) {
-                            this.ws.send(event.data);
+                            // Match firmware uplink framing: byte 0 = PCM format, rest = s16le samples.
+                            const pcm = new Uint8Array(event.data);
+                            const payload = new Uint8Array(pcm.length + 1);
+                            payload[0] = 0;
+                            payload.set(pcm, 1);
+                            this.ws.send(payload);
                             this.chunksSent++;
                             this.elements.chunksSent.textContent = this.chunksSent;
                         }
@@ -449,58 +456,66 @@
             
             queueAudioForPlayback(audioData) {
                 this.audioBufferQueue.push(audioData);
-                if (!this.isPlaying && this.audioBufferQueue.length > 3) {
-                    this.startBufferedPlayback();
-                }
+                this.ensurePlaybackRunning();
             }
 
-            async startBufferedPlayback() {
-                if (this.isPlaying) return;
-                
+            ensurePlaybackRunning() {
+                if (this.playbackPumpActive || this.audioBufferQueue.length === 0) {
+                    return;
+                }
+                this.playbackPumpActive = true;
                 this.isPlaying = true;
+                const generation = ++this.playbackGeneration;
+                if (this.outputAudioContext) {
+                    if (this.nextPlayTime < this.outputAudioContext.currentTime) {
+                        this.nextPlayTime = this.outputAudioContext.currentTime;
+                    }
+                }
                 this.log('info', 'Audio response detected. Starting playback.');
-                this.nextPlayTime = this.outputAudioContext.currentTime;
-                
-                // Continuous playback loop that handles new chunks as they arrive
-                const playbackLoop = async () => {
-                    while (this.audioBufferQueue.length > 0) {
-                        const audioData = this.audioBufferQueue.shift();
-                        await this.scheduleAudioChunk(audioData);
-                    }
-                    
-                    // Check if more chunks arrived while we were processing
-                    if (this.audioBufferQueue.length > 0) {
-                        // Continue playing new chunks immediately
-                        setTimeout(playbackLoop, 10);
-                    } else {
-                        // No more chunks currently, but don't stop playback yet
-                        // Wait a bit longer for potential new chunks
-                        setTimeout(() => {
-                            if (this.audioBufferQueue.length > 0) {
-                                // New chunks arrived, continue playing
-                                playbackLoop();
-                            } else {
-                                // Still no chunks, wait a bit more but check if playback should continue
-                                setTimeout(() => {
-                                    if (this.audioBufferQueue.length > 0) {
-                                        playbackLoop();
-                                    }
-                                    // If still no chunks after waiting, playback will be stopped by state change
-                                }, 100);
-                            }
-                        }, 50);
-                    }
-                };
-                
-                playbackLoop();
+                void this.runPlaybackPump(generation);
             }
 
-            // Method to explicitly stop playback (called when backend state changes)
-            stop() {
-                if (this.isPlaying) {
-                    this.isPlaying = false;
-                    this.log('info', 'Playback stopped by state change.');
+            async runPlaybackPump(generation) {
+                try {
+                    if (!this.outputAudioContext) {
+                        return;
+                    }
+                    if (this.outputAudioContext.state === 'suspended') {
+                        await this.outputAudioContext.resume();
+                    }
+
+                    while (this.playbackGeneration === generation) {
+                        while (this.audioBufferQueue.length > 0 && this.playbackGeneration === generation) {
+                            const audioData = this.audioBufferQueue.shift();
+                            await this.scheduleAudioChunk(audioData);
+                        }
+
+                        if (this.playbackGeneration !== generation) {
+                            return;
+                        }
+
+                        // Streaming chunks may arrive in bursts; wait briefly before idling.
+                        await new Promise((resolve) => setTimeout(resolve, 120));
+
+                        if (this.audioBufferQueue.length === 0) {
+                            break;
+                        }
+                    }
+                } finally {
+                    if (this.playbackGeneration === generation) {
+                        this.playbackPumpActive = false;
+                        this.isPlaying = false;
+                    }
                 }
+            }
+
+            stopPlayback() {
+                this.playbackGeneration++;
+                this.playbackPumpActive = false;
+                this.isPlaying = false;
+                this.audioBufferQueue = [];
+                this.nextPlayTime = 0;
+                this.log('info', 'Playback stopped.');
             }
 
             async scheduleAudioChunk(audioData) {
@@ -526,7 +541,6 @@
 
                 } catch (error) {
                     this.log('error', `Failed to schedule audio chunk: ${error.message}`);
-                    this.isPlaying = false; // Stop playback on error
                 }
             }
 
@@ -550,20 +564,17 @@
                 // Update recording indicator text based on state
                 if (state === 'WAITING_FOR_USER') {
                     this.elements.recordingText.textContent = 'Your turn to speak...';
-                    // Stop playback when we know Gemini finished speaking
-                    this.stop();
                 } else if (state === 'LISTENING') {
                     this.elements.recordingText.textContent = 'Listening for your command...';
-                    // Also stop playback when going back to listening (conversation ended)
-                    this.stop();
+                    this.stopPlayback();
                 } else if (state === 'STREAMING_RESPONSE') {
                     this.elements.recordingText.textContent = 'Assistant is responding...';
+                    this.ensurePlaybackRunning();
                 } else if (state === 'PROCESSING_INTENT') {
                     this.elements.recordingText.textContent = 'Processing your request...';
                 } else if (state === 'HANDLING_COMMAND') {
                     this.elements.recordingText.textContent = 'Executing command...';
-                    // Stop playback for non-conversational commands
-                    this.stop();
+                    this.stopPlayback();
                 }
             }
 

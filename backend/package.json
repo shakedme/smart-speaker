@@ -4,18 +4,23 @@
   "description": "WebSocket voice streaming backend for ESP32 BT Speaker",
   "main": "dist/server.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && npm run copy:wakeword-worker",
+    "copy:wakeword-worker": "cp src/voice/wakeword-worker.py dist/voice/wakeword-worker.py",
     "start": "node dist/server.js",
     "start:live": "npm run build && node dist/live-server.js",
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "dev:live": "ts-node-dev --respawn --transpile-only src/live-server.ts",
-    "watch": "tsc --watch"
+    "watch": "tsc --watch",
+    "setup:wakeword": "cd models/wakeword && ../.venv/bin/livekit-wakeword setup --config okay_rufus_test.yaml && ../.venv/bin/livekit-wakeword run okay_rufus_test.yaml",
+    "train:wakeword:prod": "bash models/wakeword/train-prod.sh okay_rufus.yaml",
+    "train:wakeword:prod:captures": "bash models/wakeword/train-prod-with-captures.sh okay_rufus.yaml",
+    "test:wakeword-offline": "npm run build && node dist/scripts/test-wakeword-offline.js",
+    "capture:wakeword:segment": "npm run build && node dist/scripts/segment-wakeword-captures.js"
   },
   "dependencies": {
     "@google/genai": "^2.5.0",
     "@modelcontextprotocol/sdk": "^1.11.0",
-    "@picovoice/cobra-node": "^2.0.4",
-    "@picovoice/porcupine-node": "^3.0.6",
+    "avr-vad": "^1.0.10",
     "@types/axios": "^0.14.4",
     "axios": "^1.9.0",
     "dotenv": "^16.3.1",

@@ -405,22 +405,6 @@ namespace btspeaker {
         try {
             ESP_LOGI(TAG, "Creating Spotify context");
             auto loginBlob = authManager->getLoginBlob();
-
-            // Add detailed debugging of the blob being used for authentication
-            ESP_LOGI(TAG, "🔧 DEBUG: Auth blob details before authentication:");
-            ESP_LOGI(TAG, "  - Username: %s", loginBlob->getUserName().c_str());
-            ESP_LOGI(TAG, "  - Device ID: %s", loginBlob->getDeviceId().c_str());
-            ESP_LOGI(TAG, "  - Device Name: %s", loginBlob->getDeviceName().c_str());
-            ESP_LOGI(TAG, "  - Auth Type: %d", loginBlob->authType);
-            ESP_LOGI(TAG, "  - Auth Data Size: %d bytes", loginBlob->authData.size());
-
-            if (loginBlob->authData.size() > 0) {
-                ESP_LOGI(TAG, "  - First 8 bytes of auth data:");
-                for (int i = 0; i < std::min(8, (int) loginBlob->authData.size()); i++) {
-                    ESP_LOGI(TAG, "    [%d]: 0x%02X", i, loginBlob->authData[i]);
-                }
-            }
-
             for (int attempt = 1; attempt <= kSpotifyConnectMaxAttempts; attempt++) {
                 try {
                     context = cspot::Context::createFromBlob(loginBlob);
@@ -436,7 +420,6 @@ namespace btspeaker {
                              kSpotifyConnectMaxAttempts);
                     context->session->connectWithRandomAp();
 
-                    ESP_LOGI(TAG, "Authenticating with login blob");
                     context->config.authData = context->session->authenticate(loginBlob);
                     if (context->config.authData.empty()) {
                         throw std::runtime_error("Authentication failed - no auth data received");
@@ -469,14 +452,12 @@ namespace btspeaker {
                 isRunning_ = false;
             });
             audioSink->prepare();
-            ESP_LOGI(TAG, "Creating ESP player");
             espPlayer = std::make_unique<EspPlayer>(audioSink, deviceStateHandler);
             espPlayer->setTrackTransitionCallback([this](const bool active) {
                 trackTransitionActive_.store(active, std::memory_order_release);
             });
             audioSink->start();
             audioSink->pause();
-            ESP_LOGI(TAG, "Starting session task");
             context->session->startTask();
             // Ensure modem sleep stays off while Spotify Connect is active.
             if (esp_wifi_set_ps(WIFI_PS_NONE) == ESP_OK) {

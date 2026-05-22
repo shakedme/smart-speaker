@@ -41,5 +41,9 @@ cmake-build-debug*
 managed_components
 backend/node_modules
 backend/.env
+backend/.venv
+backend/models/wakeword/captures/
+backend/models/wakeword/output/
+backend/models/wakeword/data/
 
 hey_rufus

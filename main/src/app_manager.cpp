@@ -26,7 +26,7 @@ namespace btspeaker {
 
         initNVS();
 
-        wifiManager = WiFiManager::create();
+        wifiManager = std::make_unique<WiFiManager>();
         wifiManager->connect(CONFIG_WIFI_SSID, CONFIG_WIFI_PASSWORD);
 
         audioSourceManager = std::make_unique<AudioSourceManager>(*wifiManager);
@@ -53,7 +53,6 @@ namespace btspeaker {
     esp_err_t AppManager::start() {
         ESP_LOGI(TAG, "🎬 Starting application services");
 
-        // Start audio source manager
         esp_err_t ret = audioSourceManager->start();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start audio source manager: %s", esp_err_to_name(ret));
@@ -80,4 +79,4 @@ namespace btspeaker {
         ESP_ERROR_CHECK(ret);
     }
 
-} // namespace btspeaker 
+}

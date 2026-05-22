@@ -1,0 +1,1 @@
+livekit-wakeword>=0.1.0

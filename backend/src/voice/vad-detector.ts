@@ -57,6 +57,11 @@ export class VadDetector {
         return 512;
     }
 
+    /** Threshold above which `speechActive` becomes true (same as VAD_THRESHOLD env). */
+    get speechPositiveThreshold(): number {
+        return this.positiveThreshold;
+    }
+
     async processPcm(pcm: Buffer): Promise<VadProcessResult> {
         this.frameState.chunkMaxProbability = 0;
         const floatAudio = bufferToFloat32Array(pcm);

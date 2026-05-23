@@ -61,6 +61,9 @@ namespace btspeaker {
         }
         if (suspended) {
             drainUplinkQueue();
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+            drainRefQueue();
+#endif
         }
     }
 
@@ -222,6 +225,9 @@ namespace btspeaker {
             setConnectionState(ConnectionState::DISCONNECTED);
             isClientRunning = false;
             drainUplinkQueue();
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+            drainRefQueue();
+#endif
         }
     }
 
@@ -237,6 +243,9 @@ namespace btspeaker {
             isClientRunning = false;
         }
         drainUplinkQueue();
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+        drainRefQueue();
+#endif
     }
 
     void WebSocketVoiceClient::onNetworkAvailable() {
@@ -369,6 +378,29 @@ namespace btspeaker {
             return ESP_FAIL;
         }
 
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+        refUplinkQueue_ = xQueueCreate(REF_UPLINK_QUEUE_DEPTH, sizeof(UplinkChunk));
+        refUplinkFreeQueue_ = xQueueCreate(REF_UPLINK_QUEUE_DEPTH, sizeof(uint8_t *));
+        if (!refUplinkQueue_ || !refUplinkFreeQueue_) {
+            shutdownUplinkWorker();
+            ESP_LOGE(TAG, "Failed to create playback-ref uplink queues");
+            return ESP_FAIL;
+        }
+
+        for (size_t i = 0; i < REF_UPLINK_QUEUE_DEPTH; ++i) {
+            auto *buffer = static_cast<uint8_t *>(
+                    allocateUplinkPayload(1 + kUplinkFramedHeaderSize + REF_UPLINK_MAX_FRAME_BYTES));
+            if (!buffer || xQueueSend(refUplinkFreeQueue_, &buffer, 0) != pdTRUE) {
+                if (buffer) {
+                    heap_caps_free(buffer);
+                }
+                shutdownUplinkWorker();
+                ESP_LOGE(TAG, "Failed to allocate playback-ref buffer pool");
+                return ESP_ERR_NO_MEM;
+            }
+        }
+#endif
+
         ESP_LOGI(TAG, "mic_uplink worker started (stack %u words, queue depth %u, chunk %u bytes)",
                  static_cast<unsigned>(UPLINK_TASK_STACK_WORDS),
                  static_cast<unsigned>(UPLINK_QUEUE_DEPTH),
@@ -378,11 +410,25 @@ namespace btspeaker {
 
     void WebSocketVoiceClient::freeUplinkChunk(UplinkChunk &chunk) {
         if (chunk.payload) {
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+            if (chunk.is_framed &&
+                chunk.frame_type == static_cast<uint8_t>(AudioFrameType::PlaybackRef)) {
+                if (refUplinkFreeQueue_ &&
+                    xQueueSend(refUplinkFreeQueue_, &chunk.payload, 0) != pdTRUE) {
+                    heap_caps_free(chunk.payload);
+                }
+            } else {
+                releaseUplinkBuffer(chunk.payload);
+            }
+#else
             releaseUplinkBuffer(chunk.payload);
+#endif
             chunk.payload = nullptr;
         }
         chunk.length = 0;
         chunk.shutdown = false;
+        chunk.is_framed = false;
+        chunk.frame_type = 0;
     }
 
     uint8_t *WebSocketVoiceClient::acquireUplinkBuffer() {
@@ -449,6 +495,8 @@ namespace btspeaker {
         if (uplinkQueue_) {
             UplinkChunk shutdown_chunk{
                     .shutdown = true,
+                    .is_framed = false,
+                    .frame_type = 0,
                     .payload = nullptr,
                     .length = 0,
             };
@@ -461,6 +509,21 @@ namespace btspeaker {
         }
 
         drainUplinkQueue();
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+        drainRefQueue();
+        if (refUplinkQueue_) {
+            vQueueDelete(refUplinkQueue_);
+            refUplinkQueue_ = nullptr;
+        }
+        if (refUplinkFreeQueue_) {
+            uint8_t *payload = nullptr;
+            while (xQueueReceive(refUplinkFreeQueue_, &payload, 0) == pdTRUE) {
+                heap_caps_free(payload);
+            }
+            vQueueDelete(refUplinkFreeQueue_);
+            refUplinkFreeQueue_ = nullptr;
+        }
+#endif
 
         if (uplinkQueue_) {
             vQueueDelete(uplinkQueue_);
@@ -592,6 +655,272 @@ namespace btspeaker {
         return ESP_ERR_INVALID_ARG;
     }
 
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+
+    uint32_t WebSocketVoiceClient::playbackRefQueueDepth() const {
+        return refUplinkQueue_
+               ? static_cast<uint32_t>(uxQueueMessagesWaiting(refUplinkQueue_))
+               : 0;
+    }
+
+    void WebSocketVoiceClient::drainRefQueue() {
+        if (!refUplinkQueue_) {
+            return;
+        }
+
+        UplinkChunk pending{};
+        while (xQueueReceive(refUplinkQueue_, &pending, 0) == pdTRUE) {
+            freeUplinkChunk(pending);
+        }
+    }
+
+    bool WebSocketVoiceClient::dropOldestRefChunk() {
+        UplinkChunk oldest{};
+        if (xQueueReceive(refUplinkQueue_, &oldest, 0) != pdTRUE) {
+            return false;
+        }
+        freeUplinkChunk(oldest);
+        return true;
+    }
+
+    esp_err_t WebSocketVoiceClient::buildFramedPayload(const AudioFrameType frame_type,
+                                                       const int16_t *pcm,
+                                                       const uint32_t num_samples,
+                                                       const uint32_t sample_rate_hz,
+                                                       const uint16_t channel_count,
+                                                       const uint32_t sequence,
+                                                       const int64_t timestamp_us,
+                                                       uint8_t *out_buf,
+                                                       const size_t out_capacity,
+                                                       uint32_t *out_length) {
+        if (!pcm || !out_buf || !out_length || num_samples == 0 || channel_count == 0) {
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        const size_t sample_count = static_cast<size_t>(num_samples) * channel_count;
+        const bool use_adpcm = sample_count > 1;
+        const size_t payload_bytes = use_adpcm
+                                     ? FRAMED_ADPCM_BLOCK_HEADER_BYTES + ((sample_count - 1) + 1) / 2
+                                     : sample_count * sizeof(int16_t);
+        const size_t total = 1 + kUplinkFramedHeaderSize + payload_bytes;
+        if (total > out_capacity) {
+            return ESP_ERR_INVALID_SIZE;
+        }
+
+        out_buf[0] = kUplinkFormatFramed;
+        auto *header = reinterpret_cast<UplinkAudioFrameHeader *>(out_buf + 1);
+        header->frame_type = static_cast<uint8_t>(frame_type);
+        header->sample_format = static_cast<uint8_t>(
+                use_adpcm ? UplinkSampleFormat::ImaAdpcmBlock : UplinkSampleFormat::Int16Pcm);
+        header->channel_count = channel_count;
+        header->sample_rate = sample_rate_hz;
+        header->sequence = sequence;
+        header->timestamp_us = timestamp_us;
+        header->num_samples = num_samples;
+
+        uint8_t *payload = out_buf + 1 + kUplinkFramedHeaderSize;
+        if (use_adpcm) {
+            const int16_t predictor = pcm[0];
+            payload[0] = static_cast<uint8_t>(predictor & 0xff);
+            payload[1] = static_cast<uint8_t>((static_cast<uint16_t>(predictor) >> 8) & 0xff);
+            payload[2] = 0;  // IMA step-table index.
+            payload[3] = 0;  // Reserved for alignment/future flags.
+
+            ImaAdpcmState block_state{};
+            block_state.predictor = predictor;
+            block_state.index = 0;
+            const size_t encoded = imaAdpcmEncode(
+                    pcm + 1,
+                    sample_count - 1,
+                    payload + FRAMED_ADPCM_BLOCK_HEADER_BYTES,
+                    payload_bytes - FRAMED_ADPCM_BLOCK_HEADER_BYTES,
+                    block_state);
+            if (encoded == 0 && sample_count > 1) {
+                return ESP_FAIL;
+            }
+        } else {
+            memcpy(payload, pcm, payload_bytes);
+        }
+
+        *out_length = static_cast<uint32_t>(total);
+        return ESP_OK;
+    }
+
+    esp_err_t WebSocketVoiceClient::enqueueRefChunk(UplinkChunk chunk) {
+        if (!refUplinkQueue_ || !uplinkAccepting_.load()) {
+            freeUplinkChunk(chunk);
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        const uint32_t mic_depth = uplinkQueue_
+                                   ? static_cast<uint32_t>(uxQueueMessagesWaiting(uplinkQueue_))
+                                   : 0;
+        if (mic_depth >= UPLINK_MIC_QUEUE_REF_PAUSE_DEPTH ||
+            playbackMicSuspended_.load(std::memory_order_relaxed)) {
+            freeUplinkChunk(chunk);
+            uplinkDiagRefDropped_.fetch_add(1, std::memory_order_relaxed);
+            return ESP_ERR_TIMEOUT;
+        }
+
+        if (xQueueSend(refUplinkQueue_, &chunk, 0) == pdTRUE) {
+            return ESP_OK;
+        }
+
+        if (dropOldestRefChunk()) {
+            uplinkDiagRefDropped_.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            freeUplinkChunk(chunk);
+            uplinkDiagRefDropped_.fetch_add(1, std::memory_order_relaxed);
+            return ESP_FAIL;
+        }
+
+        if (xQueueSend(refUplinkQueue_, &chunk, 0) == pdTRUE) {
+            return ESP_OK;
+        }
+
+        freeUplinkChunk(chunk);
+        uplinkDiagRefDropped_.fetch_add(1, std::memory_order_relaxed);
+        return ESP_FAIL;
+    }
+
+    esp_err_t WebSocketVoiceClient::sendFramedAudio(const AudioFrameType frame_type,
+                                                    const int16_t *pcm,
+                                                    const uint32_t num_samples,
+                                                    const uint32_t sample_rate_hz,
+                                                    const uint16_t channel_count,
+                                                    const uint32_t sequence,
+                                                    const int64_t timestamp_us) {
+        if (!uplinkAccepting_.load() || !pcm || num_samples == 0) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (!isTransportReady()) {
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        uint8_t *payload = nullptr;
+        if (frame_type == AudioFrameType::PlaybackRef) {
+            if (!refUplinkFreeQueue_ ||
+                xQueueReceive(refUplinkFreeQueue_, &payload, 0) != pdTRUE) {
+                if (dropOldestRefChunk() &&
+                    xQueueReceive(refUplinkFreeQueue_, &payload, 0) == pdTRUE) {
+                    uplinkDiagRefDropped_.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    uplinkDiagRefDropped_.fetch_add(1, std::memory_order_relaxed);
+                    return ESP_ERR_TIMEOUT;
+                }
+            }
+        } else {
+            payload = acquireUplinkBuffer();
+            if (!payload) {
+                uplinkDiagMicDropped_.fetch_add(1, std::memory_order_relaxed);
+                return ESP_OK;
+            }
+        }
+
+        uint32_t length = 0;
+        const size_t payload_capacity = frame_type == AudioFrameType::PlaybackRef
+                                        ? (1 + kUplinkFramedHeaderSize + REF_UPLINK_MAX_FRAME_BYTES)
+                                        : UPLINK_MAX_CHUNK_BYTES;
+        const esp_err_t build_ret = buildFramedPayload(
+                frame_type, pcm, num_samples, sample_rate_hz, channel_count,
+                sequence, timestamp_us, payload, payload_capacity, &length);
+        if (build_ret != ESP_OK) {
+            if (frame_type == AudioFrameType::PlaybackRef) {
+                if (refUplinkFreeQueue_) {
+                    xQueueSend(refUplinkFreeQueue_, &payload, 0);
+                } else {
+                    heap_caps_free(payload);
+                }
+            } else {
+                releaseUplinkBuffer(payload);
+            }
+            return build_ret;
+        }
+
+        UplinkChunk chunk{
+                .shutdown = false,
+                .is_framed = true,
+                .frame_type = static_cast<uint8_t>(frame_type),
+                .payload = payload,
+                .length = length,
+        };
+
+        if (frame_type == AudioFrameType::PlaybackRef) {
+            return enqueueRefChunk(chunk);
+        }
+
+        const esp_err_t ret = enqueueUplinkChunk(chunk);
+        if (ret != ESP_OK) {
+            uplinkDiagMicDropped_.fetch_add(1, std::memory_order_relaxed);
+        }
+        return ret;
+    }
+
+    bool WebSocketVoiceClient::sendPreparedChunk(const UplinkChunk &chunk,
+                                                 const bool playback,
+                                                 const bool stress,
+                                                 uint32_t &diag_sent,
+                                                 uint32_t &diag_send_fail,
+                                                 uint32_t &diag_send_slow,
+                                                 uint64_t &diag_bytes_sent,
+                                                 uint64_t &diag_sum_send_us,
+                                                 uint32_t &diag_max_send_us) {
+        const int send_timeout_ms = playback ? UPLINK_PLAYBACK_SEND_TIMEOUT_MS
+                                             : UPLINK_SEND_TIMEOUT_MS;
+        const uint8_t *send_payload = chunk.payload;
+        const uint32_t send_length = chunk.length;
+
+        if (!isTransportReady()) {
+            if (diagnostics_enabled) {
+                diag_send_fail++;
+            }
+            markTransportDisconnected("uplink_send_failed");
+            return false;
+        }
+
+        const int64_t before_send_us = esp_timer_get_time();
+        const int ret = esp_websocket_client_send_bin(
+                websocketClient,
+                reinterpret_cast<const char *>(send_payload),
+                send_length,
+                pdMS_TO_TICKS(send_timeout_ms));
+        const uint32_t send_us = static_cast<uint32_t>(esp_timer_get_time() - before_send_us);
+
+        if (ret < 0) {
+            if (diagnostics_enabled) {
+                diag_send_fail++;
+            }
+            markTransportDisconnected("uplink_send_failed");
+            return false;
+        }
+        if (ret != static_cast<int>(send_length)) {
+            // ret==0 usually means TCP send buffer full under WiFi/Spotify load. Drop frame,
+            // keep the session alive instead of tearing down the whole WebSocket.
+            if (diagnostics_enabled) {
+                diag_send_fail++;
+            }
+            return false;
+        }
+
+        if (diagnostics_enabled) {
+            diag_sent++;
+            diag_bytes_sent += static_cast<uint32_t>(ret);
+            diag_sum_send_us += send_us;
+            if (send_us > diag_max_send_us) {
+                diag_max_send_us = send_us;
+            }
+            const uint32_t slow_threshold = playback ? UPLINK_SLOW_SEND_US / 2
+                                                       : UPLINK_SLOW_SEND_US;
+            if (send_us > slow_threshold) {
+                diag_send_slow++;
+            }
+        }
+        (void) stress;
+        return true;
+    }
+
+#endif
+
     void WebSocketVoiceClient::logUplinkDiagnostics(const int64_t now_us,
                                                     const uint32_t enqueued,
                                                     const uint32_t sent,
@@ -603,7 +932,7 @@ namespace btspeaker {
                                                     const uint64_t bytes_sent,
                                                     const uint64_t sum_send_us,
                                                     const uint32_t max_send_us,
-                                                    const uint32_t queue_depth) const {
+                                                    const uint32_t queue_depth) {
         if (!diagnostics_enabled) {
             return;
         }
@@ -624,7 +953,11 @@ namespace btspeaker {
 
         ESP_LOGI(TAG,
                  "[WS_TX_DIAG] enqueued=%lu sent=%lu drop_old=%lu drop_pb=%lu drop_disc=%lu send_fail=%lu slow=%lu "
-                 "bytes=%lu ~%luHz send_us(avg=%lu max=%lu) q=%lu stress=%d mic_suspend=%d task=%s dram=%lu",
+                 "bytes=%lu ~%luHz send_us(avg=%lu max=%lu) q=%lu stress=%d mic_suspend=%d task=%s dram=%lu"
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+                 " mic(s=%lu d=%lu) ref(s=%lu d=%lu qref=%lu)"
+#endif
+                 ,
                  static_cast<unsigned long>(enqueued),
                  static_cast<unsigned long>(sent),
                  static_cast<unsigned long>(dropped_oldest),
@@ -640,7 +973,16 @@ namespace btspeaker {
                  playbackStress_.load(std::memory_order_relaxed) ? 1 : 0,
                  playbackMicSuspended_.load(std::memory_order_relaxed) ? 1 : 0,
                  task_name,
-                 static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
+                 static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL))
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+                 ,
+                 static_cast<unsigned long>(uplinkDiagMicSent_.exchange(0, std::memory_order_relaxed)),
+                 static_cast<unsigned long>(uplinkDiagMicDropped_.exchange(0, std::memory_order_relaxed)),
+                 static_cast<unsigned long>(uplinkDiagRefSent_.exchange(0, std::memory_order_relaxed)),
+                 static_cast<unsigned long>(uplinkDiagRefDropped_.exchange(0, std::memory_order_relaxed)),
+                 static_cast<unsigned long>(playbackRefQueueDepth())
+#endif
+        );
         (void) now_us;
     }
 
@@ -677,7 +1019,7 @@ namespace btspeaker {
                 freeUplinkChunk(chunk);
             } else if (playbackMicSuspended_.load(std::memory_order_relaxed)) {
                 freeUplinkChunk(chunk);
-            } else if (shouldDropForPlaybackCongestion(queue_depth)) {
+            } else if (!chunk.is_framed && shouldDropForPlaybackCongestion(queue_depth)) {
                 if (diagnostics_enabled) {
                     uplinkDiagDroppedPlayback_.fetch_add(1, std::memory_order_relaxed);
                 }
@@ -692,7 +1034,7 @@ namespace btspeaker {
                 uint8_t *encoded_payload = nullptr;
                 uint32_t encoded_length = 0;
 
-                if (playback) {
+                if (playback && !chunk.is_framed) {
                     const uint32_t aggregate_target = stress
                                                       ? UPLINK_STRESS_AGGREGATE_BYTES
                                                       : UPLINK_PLAYBACK_AGGREGATE_BYTES;
@@ -706,7 +1048,7 @@ namespace btspeaker {
                             shutdown_after_send = true;
                             break;
                         }
-                        if (!next.payload ||
+                        if (next.is_framed || !next.payload ||
                             chunk.length + next.length > UPLINK_MAX_CHUNK_BYTES ||
                             chunk.length + next.length > aggregate_target) {
                             freeUplinkChunk(next);
@@ -758,6 +1100,18 @@ namespace btspeaker {
                     continue;
                 }
 
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+                (void) send_payload;
+                (void) send_length;
+                (void) send_timeout_ms;
+                const bool sent_ok = sendPreparedChunk(
+                        chunk, playback, stress, diag_sent, diag_send_fail, diag_send_slow,
+                        diag_bytes_sent, diag_sum_send_us, diag_max_send_us);
+                if (sent_ok && chunk.is_framed &&
+                    chunk.frame_type == static_cast<uint8_t>(AudioFrameType::Mic)) {
+                    uplinkDiagMicSent_.fetch_add(1, std::memory_order_relaxed);
+                }
+#else
                 const int64_t before_send_us = esp_timer_get_time();
                 const int ret = esp_websocket_client_send_bin(
                         websocketClient,
@@ -793,7 +1147,7 @@ namespace btspeaker {
                             diag_max_send_us = send_us;
                         }
                         const uint32_t slow_threshold = playback ? UPLINK_SLOW_SEND_US / 2
-                                                                 : UPLINK_SLOW_SEND_US;
+                                                                   : UPLINK_SLOW_SEND_US;
                         if (send_us > slow_threshold) {
                             diag_send_slow++;
                             ESP_LOGW(TAG, "[WS_TX_DIAG] slow send %lu us, %u bytes",
@@ -802,11 +1156,35 @@ namespace btspeaker {
                         }
                     }
                 }
+#endif
 
                 if (encoded_payload) {
                     heap_caps_free(encoded_payload);
                 }
                 freeUplinkChunk(chunk);
+
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+                if (sent_ok && refUplinkQueue_) {
+                    uint32_t ref_sent_this_cycle = 0;
+                    while (ref_sent_this_cycle < UPLINK_REF_FRAMES_PER_MIC_SEND &&
+                           uxQueueMessagesWaiting(uplinkQueue_) < UPLINK_MIC_QUEUE_REF_PAUSE_DEPTH) {
+                        UplinkChunk ref_chunk{};
+                        if (xQueueReceive(refUplinkQueue_, &ref_chunk, 0) != pdTRUE) {
+                            break;
+                        }
+                        if (sendPreparedChunk(ref_chunk, playback, stress, diag_sent, diag_send_fail,
+                                              diag_send_slow, diag_bytes_sent, diag_sum_send_us,
+                                              diag_max_send_us)) {
+                            uplinkDiagRefSent_.fetch_add(1, std::memory_order_relaxed);
+                            ref_sent_this_cycle++;
+                        } else {
+                            freeUplinkChunk(ref_chunk);
+                            break;
+                        }
+                        freeUplinkChunk(ref_chunk);
+                    }
+                }
+#endif
             }
 
             if (diagnostics_enabled) {
@@ -898,6 +1276,8 @@ namespace btspeaker {
 
         UplinkChunk chunk{
                 .shutdown = false,
+                .is_framed = false,
+                .frame_type = 0,
                 .payload = payload,
                 .length = static_cast<uint32_t>(length),
         };

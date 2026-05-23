@@ -5,6 +5,7 @@
 
 #include "../include/adf_audio_sink.hpp"
 #include "../include/audio_pipeline_util.hpp"
+#include "../include/playback_reference_tap.hpp"
 #include "diagnostics_config.hpp"
 #include <algorithm>
 #include <stdexcept>
@@ -178,6 +179,27 @@ namespace btspeaker {
             maybeLogPlaybackDiagnostics();
             maybeLogResumeFollowUp();
         }
+
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+        if (offset > 0) {
+            if (auto *tap = PlaybackReferenceTap::instance()) {
+                constexpr uint32_t kSampleRateHz = 44100;
+                constexpr uint8_t kChannels = 2;
+                const size_t fill = getBufferFillLevel();
+                const size_t bytes_before_this_block = fill > offset ? fill - offset : 0;
+                const int64_t pipeline_delay_us =
+                        (static_cast<int64_t>(bytes_before_this_block) * 1000000LL) /
+                        (kSampleRateHz * kChannels * sizeof(int16_t));
+                const int64_t timestamp_us = esp_timer_get_time() + pipeline_delay_us;
+                tap->feedPlaybackPcm(
+                        reinterpret_cast<const int16_t *>(buffer),
+                        offset / (kChannels * sizeof(int16_t)),
+                        kSampleRateHz,
+                        kChannels,
+                        timestamp_us);
+            }
+        }
+#endif
 
         return offset;
     }

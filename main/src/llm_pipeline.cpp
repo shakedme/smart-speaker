@@ -1,10 +1,12 @@
 #include "../include/llm_pipeline.hpp"
 #include "../include/audio_pipeline_util.hpp"
+#include "../include/playback_reference_tap.hpp"
 #include <algorithm>
 
 extern "C" {
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_timer.h"
 #include "audio_common.h"
 #include "i2s_stream.h"
 #include "ringbuf.h"
@@ -100,6 +102,25 @@ namespace btspeaker {
 
             offset += static_cast<size_t>(written);
         }
+
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+        if (offset > 0) {
+            if (auto *tap = PlaybackReferenceTap::instance()) {
+                const size_t fill = getBufferFillLevel();
+                const size_t bytes_before_this_block = fill > offset ? fill - offset : 0;
+                const int64_t pipeline_delay_us =
+                        (static_cast<int64_t>(bytes_before_this_block) * 1000000LL) /
+                        (DEFAULT_SAMPLE_RATE * DEFAULT_CHANNELS * sizeof(int16_t));
+                const int64_t timestamp_us = esp_timer_get_time() + pipeline_delay_us;
+                tap->feedPlaybackPcm(
+                        reinterpret_cast<const int16_t *>(data),
+                        offset / sizeof(int16_t),
+                        DEFAULT_SAMPLE_RATE,
+                        DEFAULT_CHANNELS,
+                        timestamp_us);
+            }
+        }
+#endif
 
         return ESP_OK;
     }

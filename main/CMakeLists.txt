@@ -21,6 +21,7 @@ set(PROJECT_SRCS
         src/base_audio_pipeline.cpp
         src/esp_websocket_client.c
         src/spotify_auth_manager.cpp
+        src/playback_reference_tap.cpp
 
         # ESP32-specific cspot files
         "../cspot/esp32/main/EspPlayer.cpp"
@@ -77,6 +78,7 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
         BELL_ONLY_CJSON
         PB_ENABLE_MALLOC
         PB_FIELD_32BIT
+        CONFIG_BTSPK_BACKEND_AEC_REF_STREAM=1
 )
 
 # Suppress warnings from external code

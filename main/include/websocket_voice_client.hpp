@@ -7,6 +7,8 @@
 #include <vector>
 #include "../include/esp_websocket_client.h"
 #include "../include/ima_adpcm.hpp"
+#include "../include/uplink_audio_frame.hpp"
+#include "../include/aec_ref_config.hpp"
 
 extern "C" {
 #include "esp_err.h"
@@ -56,6 +58,19 @@ namespace btspeaker {
         // Non-blocking: copies audio and enqueues for mic_uplink worker.
         esp_err_t sendAudioChunk(const uint8_t *audioData, size_t length);
 
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+        // Non-blocking framed uplink (Mic or PlaybackRef). Drops on congestion.
+        esp_err_t sendFramedAudio(AudioFrameType frame_type,
+                                  const int16_t *pcm,
+                                  uint32_t num_samples,
+                                  uint32_t sample_rate_hz,
+                                  uint16_t channel_count,
+                                  uint32_t sequence,
+                                  int64_t timestamp_us);
+
+        uint32_t playbackRefQueueDepth() const;
+#endif
+
         void setPlaybackActive(bool active);
 
         void setPlaybackStress(bool stressed);
@@ -69,6 +84,8 @@ namespace btspeaker {
     private:
         struct UplinkChunk {
             bool shutdown;
+            bool is_framed;
+            uint8_t frame_type;
             uint8_t *payload;
             uint32_t length;
         };
@@ -87,6 +104,13 @@ namespace btspeaker {
         static constexpr uint32_t UPLINK_STRESS_AGGREGATE_BYTES = 16 * 1024;
         static constexpr int UPLINK_PLAYBACK_AGGREGATE_WAIT_MS = 80;
         static constexpr uint32_t UPLINK_PLAYBACK_QUEUE_MAX = 2;
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+        static constexpr size_t REF_UPLINK_QUEUE_DEPTH = 8;
+        static constexpr size_t REF_UPLINK_MAX_FRAME_BYTES = 2700;
+        static constexpr uint32_t UPLINK_MIC_QUEUE_REF_PAUSE_DEPTH = 2;
+        static constexpr uint32_t UPLINK_REF_FRAMES_PER_MIC_SEND = 1;
+        static constexpr size_t FRAMED_ADPCM_BLOCK_HEADER_BYTES = 4;
+#endif
         static constexpr int RECONNECT_CONNECT_WAIT_MS = 15000;
         static constexpr int RECONNECT_LOOP_IDLE_MS = 1000;
         static constexpr uint32_t CONNECT_OUTCOME_PENDING = 0;
@@ -161,7 +185,7 @@ namespace btspeaker {
                                   uint64_t bytes_sent,
                                   uint64_t sum_send_us,
                                   uint32_t max_send_us,
-                                  uint32_t queue_depth) const;
+                                  uint32_t queue_depth);
 
         bool shouldDropForPlaybackCongestion(uint32_t queue_depth) const;
 
@@ -169,6 +193,35 @@ namespace btspeaker {
                                      size_t length,
                                      uint8_t **out_payload,
                                      uint32_t *out_length);
+
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+        esp_err_t buildFramedPayload(AudioFrameType frame_type,
+                                     const int16_t *pcm,
+                                     uint32_t num_samples,
+                                     uint32_t sample_rate_hz,
+                                     uint16_t channel_count,
+                                     uint32_t sequence,
+                                     int64_t timestamp_us,
+                                     uint8_t *out_buf,
+                                     size_t out_capacity,
+                                     uint32_t *out_length);
+
+        esp_err_t enqueueRefChunk(UplinkChunk chunk);
+
+        bool dropOldestRefChunk();
+
+        void drainRefQueue();
+
+        bool sendPreparedChunk(const UplinkChunk &chunk,
+                               bool playback,
+                               bool stress,
+                               uint32_t &diag_sent,
+                               uint32_t &diag_send_fail,
+                               uint32_t &diag_send_slow,
+                               uint64_t &diag_bytes_sent,
+                               uint64_t &diag_sum_send_us,
+                               uint32_t &diag_max_send_us);
+#endif
 
         Config config;
         std::atomic<ConnectionState> state;
@@ -198,6 +251,15 @@ namespace btspeaker {
         std::atomic<uint32_t> uplinkDiagEnqueued_{0};
         std::atomic<uint32_t> uplinkDiagDroppedOldest_{0};
         std::atomic<uint32_t> uplinkDiagDroppedPlayback_{0};
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+        std::atomic<uint32_t> uplinkDiagMicSent_{0};
+        std::atomic<uint32_t> uplinkDiagMicDropped_{0};
+        std::atomic<uint32_t> uplinkDiagRefSent_{0};
+        std::atomic<uint32_t> uplinkDiagRefDropped_{0};
+        std::atomic<uint32_t> micSequence_{0};
+        QueueHandle_t refUplinkQueue_ = nullptr;
+        QueueHandle_t refUplinkFreeQueue_ = nullptr;
+#endif
         std::atomic<bool> playbackActive_{false};
         std::atomic<bool> playbackStress_{false};
         std::atomic<bool> playbackMicSuspended_{false};

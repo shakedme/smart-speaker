@@ -2553,13 +2553,14 @@ void DeviceStateHandler::parseCommand(const std::vector<uint8_t> &data) {
                 this->putPlayerState();
                 sendCommand(CommandType::PLAY);
             } else if (command->at("endpoint") == "skip_next") {
+                if (command->find("track") == command->end()) {
+                    requestSkipNext();
+                } else {
                 ctx->playbackMetrics->end_reason = PlaybackMetrics::FORWARD_BTN;
 #ifndef CONFIG_BELL_NOCODEC
                 this->needsToBeSkipped = false;
 #endif
-                if (command->find("track") == command->end())
-                    skip(CommandType::SKIP_NEXT, false);
-                else {
+                {
                     offset = 0;
                     for (auto track: currentTracks) {
                         if (strcmp(command->find("track")
@@ -2591,12 +2592,10 @@ void DeviceStateHandler::parseCommand(const std::vector<uint8_t> &data) {
                 // would otherwise show a stale timeline).
                 this->putPlayerState();
                 sendCommand(CommandType::SKIP_NEXT);
+                }
+
             } else if (command->at("endpoint") == "skip_prev") {
-                ctx->playbackMetrics->end_reason = PlaybackMetrics::BACKWARD_BTN;
-                needsToBeSkipped = false;
-                skip(CommandType::SKIP_PREV, false);
-                this->putPlayerState();
-                sendCommand(CommandType::SKIP_PREV);
+                requestSkipPrevious();
 
             } else if (command->at("endpoint") == "seek_to") {
 
@@ -2887,4 +2886,22 @@ void DeviceStateHandler::sendCommand(CommandType type, CommandData data) {
     command.commandType = type;
     command.data = data;
     stateCallback(command);
+}
+
+void DeviceStateHandler::requestSkipNext() {
+    ctx->playbackMetrics->end_reason = PlaybackMetrics::FORWARD_BTN;
+#ifndef CONFIG_BELL_NOCODEC
+    needsToBeSkipped = false;
+#endif
+    skip(CommandType::SKIP_NEXT, false);
+    putPlayerState();
+    sendCommand(CommandType::SKIP_NEXT);
+}
+
+void DeviceStateHandler::requestSkipPrevious() {
+    ctx->playbackMetrics->end_reason = PlaybackMetrics::BACKWARD_BTN;
+    needsToBeSkipped = false;
+    skip(CommandType::SKIP_PREV, false);
+    putPlayerState();
+    sendCommand(CommandType::SKIP_PREV);
 }

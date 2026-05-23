@@ -61,5 +61,40 @@ export function decodeImaAdpcmToPcm(adpcm: Buffer, state: ImaAdpcmState): Buffer
   return samples.subarray(0, writeOffset);
 }
 
+export function decodeImaAdpcmBlockToPcm(block: Buffer, sampleCount: number): Buffer | null {
+  if (sampleCount <= 0 || block.length < 4) {
+    return null;
+  }
+
+  const out = Buffer.alloc(sampleCount * 2);
+  const state: ImaAdpcmState = {
+    predictor: block.readInt16LE(0),
+    index: Math.max(0, Math.min(88, block.readUInt8(2))),
+  };
+
+  out.writeInt16LE(state.predictor, 0);
+  let writeOffset = 2;
+  let samplesWritten = 1;
+
+  for (let i = 4; i < block.length && samplesWritten < sampleCount; i++) {
+    const byte = block[i] ?? 0;
+    decodeNibble(byte & 0x0f, state);
+    out.writeInt16LE(state.predictor, writeOffset);
+    writeOffset += 2;
+    samplesWritten++;
+
+    if (samplesWritten >= sampleCount) {
+      break;
+    }
+
+    decodeNibble((byte >> 4) & 0x0f, state);
+    out.writeInt16LE(state.predictor, writeOffset);
+    writeOffset += 2;
+    samplesWritten++;
+  }
+
+  return samplesWritten === sampleCount ? out : null;
+}
+
 export const UPLINK_FORMAT_PCM = 0;
 export const UPLINK_FORMAT_IMA_ADPCM = 1;

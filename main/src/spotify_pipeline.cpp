@@ -164,6 +164,7 @@ namespace btspeaker {
             deviceStateHandler->sendCommand(cspot::DeviceStateHandler::CommandType::PAUSE);
         }
         audioSink->pause();
+        isPlaying = false;
         return ESP_OK;
     }
 
@@ -171,7 +172,7 @@ namespace btspeaker {
         if (!isInitialized) {
             return ESP_ERR_INVALID_STATE;
         }
-        if (isPlaying) {
+        if (!isPlaybackPaused()) {
             return ESP_OK;
         }
         ESP_LOGI(TAG, "Resuming Spotify playback");
@@ -318,7 +319,7 @@ namespace btspeaker {
         }
         ESP_LOGI(TAG, "Skipping to next track");
         if (deviceStateHandler) {
-            deviceStateHandler->sendCommand(cspot::DeviceStateHandler::CommandType::SKIP_NEXT);
+            deviceStateHandler->requestSkipNext();
         }
         return ESP_OK;
     }
@@ -329,7 +330,7 @@ namespace btspeaker {
         }
         ESP_LOGI(TAG, "Skipping to previous track");
         if (deviceStateHandler) {
-            deviceStateHandler->sendCommand(cspot::DeviceStateHandler::CommandType::SKIP_PREV);
+            deviceStateHandler->requestSkipPrevious();
         }
         return ESP_OK;
     }

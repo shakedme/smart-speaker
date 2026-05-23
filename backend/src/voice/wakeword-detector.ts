@@ -16,6 +16,8 @@ export interface WakewordInferenceResult {
     score: number;
     model: string;
     detection: WakewordDetection | null;
+    /** ms for worker round-trip (queue + Python/ONNX); see WakewordPredictResult.predictMs */
+    predictMs: number;
 }
 
 export interface WakewordDetectorOptions {
@@ -53,7 +55,8 @@ export class WakewordDetector {
         this.debounceMs = options?.debounceMs
             ?? parseInt(process.env.WAKEWORD_DEBOUNCE_MS ?? '2000', 10);
         this.inferenceIntervalMs = options?.inferenceIntervalMs
-            ?? parseInt(process.env.WAKEWORD_INFERENCE_INTERVAL_MS ?? '250', 10);
+            // Default ~4× typical Python predict_ms (~20ms); raise if worker falls behind.
+            ?? parseInt(process.env.WAKEWORD_INFERENCE_INTERVAL_MS ?? '80', 10);
     }
 
     get detectionThreshold(): number {
@@ -65,6 +68,24 @@ export class WakewordDetector {
             bytes: this.getWindow().length,
             targetBytes: this.windowBytes,
         };
+    }
+
+    /**
+     * Why `hasPendingInference()` is false (for diagnostics). Returns `ready` if inference can run now.
+     */
+    getInferenceBlockReason(): string {
+        if (this.inferenceInFlight) {
+            return 'inference_in_flight';
+        }
+        if (!this.pendingWindow) {
+            const w = this.getWindow().length;
+            return `no_pending_window ring_bytes=${w}/${this.windowBytes}`;
+        }
+        const elapsed = Date.now() - this.lastInferenceMs;
+        if (elapsed < this.inferenceIntervalMs) {
+            return `rate_limited wait_ms=${Math.ceil(this.inferenceIntervalMs - elapsed)}`;
+        }
+        return 'ready';
     }
 
     reset(): void {
@@ -143,6 +164,7 @@ export class WakewordDetector {
                 score: result.score,
                 model: result.model,
                 detection,
+                predictMs: result.predictMs,
             };
         } finally {
             this.inferenceInFlight = false;

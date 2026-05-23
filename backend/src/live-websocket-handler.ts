@@ -9,7 +9,10 @@ import {
     UPLINK_FORMAT_IMA_ADPCM,
     UPLINK_FORMAT_PCM,
 } from "./ima-adpcm";
+import {pcmQuickStats} from './audio/pcm-utils';
 import {AudioCaptureRecorder} from './audio/audio-capture-recorder';
+import {BackendAec3Processor} from './audio/backend-aec3-processor';
+import {isFramedUplink, parseFramedUplink, UPLINK_FRAME_TYPE_MIC, UPLINK_FRAME_TYPE_PLAYBACK_REF} from './audio/uplink-frame';
 import {VadDetector} from './voice/vad-detector';
 import {WakewordDetector} from './voice/wakeword-detector';
 import {WakewordWorkerClient} from './voice/wakeword-worker-client';
@@ -39,7 +42,17 @@ const UPLINK_RX_DIAG_INTERVAL_MS = 5000;
 const UPLINK_RX_BURST_GAP_MS = 5;
 const UPLINK_RX_STALL_GAP_MS = 150;
 const WAKE_PHRASE_HINT = 'okay rufus or ok rufus';
-const VOICE_DEBUG = true;
+/** Off only when VOICE_DEBUG=0. When on, logs throttled VAD (incl. sub-threshold), wake skip reasons, uplink edges. */
+const VOICE_DEBUG = process.env.VOICE_DEBUG !== '0';
+/** Min ms between [VAD] prob= lines (includes speech=0). Override with VAD_DIAG_THROTTLE_MS. */
+const VAD_DIAG_THROTTLE_MS = parseInt(process.env.VAD_DIAG_THROTTLE_MS ?? '1000', 10);
+/** Min ms between [WAKEWORD] skip_inference lines. Override with WAKEWORD_GATE_DIAG_THROTTLE_MS. */
+const WAKEWORD_GATE_DIAG_THROTTLE_MS = parseInt(process.env.WAKEWORD_GATE_DIAG_THROTTLE_MS ?? '800', 10);
+const UPLINK_EDGE_DIAG_THROTTLE_MS = 3000;
+/** When true (default), warn if uplink peak dBFS stays below VAD_LOW_GAIN_WARN_PEAK_DBFS (likely low gain). */
+const VAD_LOW_GAIN_WARN = process.env.VAD_LOW_GAIN_WARN !== '0' && process.env.VAD_LOW_GAIN_WARN !== 'false';
+const VAD_LOW_GAIN_WARN_PEAK_DBFS = parseFloat(process.env.VAD_LOW_GAIN_WARN_PEAK_DBFS ?? '-42');
+const VAD_LOW_GAIN_WARN_INTERVAL_MS = parseInt(process.env.VAD_LOW_GAIN_WARN_INTERVAL_MS ?? '5000', 10);
 
 export class LiveWebSocketHandler {
     private ws: WebSocket;
@@ -80,16 +93,30 @@ export class LiveWebSocketHandler {
     private uplinkProcessingChain: Promise<void> = Promise.resolve();
     private audioCapture: AudioCaptureRecorder | null = null;
     private readonly captureOnlyMode: boolean;
+    private aecProcessor: BackendAec3Processor | null = null;
+    private aecDiagLastMs = 0;
+
+    private vadDiagLastMs = 0;
+    private wakewordGateDiagLastMs = 0;
+    private uplinkNotRecordingDiagLastMs = 0;
+    private decodeEmptyDiagLastMs = 0;
+    private silentChunkDiagLastMs = 0;
+    private vadLowGainWarnLastMs = 0;
 
     private constructor(
         ws: WebSocket,
         vadDetector: VadDetector,
         wakewordDetector: WakewordDetector,
+        aecProcessor: BackendAec3Processor | null,
     ) {
         this.ws = ws;
         this.sessionId = uuidv4();
         this.vadDetector = vadDetector;
         this.wakewordDetector = wakewordDetector;
+        this.aecProcessor = aecProcessor;
+        if (this.aecProcessor) {
+            this.log('info', `Backend WebRTC AEC3 enabled (initial delay ${process.env.AEC_INITIAL_DELAY_MS ?? '100'} ms)`);
+        }
         this.audioCapture = AudioCaptureRecorder.createFromEnv(this.sessionId);
         this.captureOnlyMode = this.audioCapture !== null;
         if (this.audioCapture) {
@@ -112,7 +139,8 @@ export class LiveWebSocketHandler {
             positiveThreshold: parseFloat(process.env.VAD_THRESHOLD ?? '0.5'),
         });
         const wakewordDetector = new WakewordDetector(wakewordWorker);
-        const handler = new LiveWebSocketHandler(ws, vadDetector, wakewordDetector);
+        const aecProcessor = await BackendAec3Processor.createFromEnv();
+        const handler = new LiveWebSocketHandler(ws, vadDetector, wakewordDetector, aecProcessor);
         handler.log('info', `Silero VAD frame size: ${vadDetector.frameLength * 2} bytes`);
         handler.broadcastStateChange('LISTENING');
         return handler;
@@ -124,15 +152,19 @@ export class LiveWebSocketHandler {
             return;
         }
         this.recordUplinkReceive(data.length);
+        if (isFramedUplink(data)) {
+            this.handleFramedUplink(data);
+            return;
+        }
+        if (!this.isRecording) {
+            this.maybeLogUplinkIgnoredNotRecording(data.length);
+        }
         if (this.isRecording) {
             try {
                 const pcm = this.decodeUplinkAudio(data);
                 if (pcm.length > 0) {
-                    if (VOICE_DEBUG) {
-                        this.log('debug', `[UPLINK] processing audio data: ${pcm.length} bytes`);
-                    }
-                    this.audioCapture?.append(pcm);
                     if (this.captureOnlyMode) {
+                        this.audioCapture?.append(pcm);
                         return;
                     }
                     this.uplinkProcessingChain = this.uplinkProcessingChain
@@ -140,11 +172,104 @@ export class LiveWebSocketHandler {
                         .catch((error) => {
                             this.log('error', `Failed to process uplink audio: ${error}`);
                         });
+                } else if (VOICE_DEBUG) {
+                    this.maybeLogDecodeEmptyPcm(data);
                 }
             } catch (error) {
                 this.log('error', `Failed to decode uplink audio: ${error}`);
             }
         }
+    }
+
+    private handleFramedUplink(data: Buffer): void {
+        const frame = parseFramedUplink(data);
+        if (!frame) {
+            this.log('warn', `[UPLINK] invalid framed packet len=${data.length}`);
+            return;
+        }
+
+        if (frame.frameType === UPLINK_FRAME_TYPE_PLAYBACK_REF) {
+            if (this.aecProcessor) {
+                this.aecProcessor.pushFrame(frame);
+            }
+            this.maybeLogAecDiagnostics();
+            return;
+        }
+
+        if (frame.frameType !== UPLINK_FRAME_TYPE_MIC) {
+            this.log('debug', `[UPLINK] ignoring framed type=${frame.frameType}`);
+            return;
+        }
+
+        const pcmChunks = this.aecProcessor
+            ? this.aecProcessor.pushFrame(frame)
+            : [frame.pcm];
+
+        if (!this.isRecording) {
+            this.maybeLogUplinkIgnoredNotRecording(data.length);
+            return;
+        }
+
+        for (const pcm of pcmChunks) {
+            if (pcm.length === 0) {
+                continue;
+            }
+            if (this.captureOnlyMode) {
+                this.audioCapture?.append(pcm);
+                continue;
+            }
+            this.uplinkProcessingChain = this.uplinkProcessingChain
+                .then(() => this.handleAudioData(pcm))
+                .catch((error) => {
+                    this.log('error', `Failed to process framed uplink audio: ${error}`);
+                });
+        }
+        this.maybeLogAecDiagnostics();
+    }
+
+    private maybeLogAecDiagnostics(): void {
+        if (!this.aecProcessor || !VOICE_DEBUG) {
+            return;
+        }
+        const now = Date.now();
+        if (now - this.aecDiagLastMs < UPLINK_RX_DIAG_INTERVAL_MS) {
+            return;
+        }
+        this.aecDiagLastMs = now;
+        const stats = this.aecProcessor.getStats();
+        this.log(
+            'debug',
+            `[AEC3] render_fed=${stats.renderFramesFed} capture_out=${stats.captureFramesProcessed} ` +
+            `render_q=${stats.renderQueued} capture_q=${stats.captureQueued}`,
+        );
+    }
+
+    private maybeLogUplinkIgnoredNotRecording(rawLen: number): void {
+        if (!VOICE_DEBUG) {
+            return;
+        }
+        const now = Date.now();
+        if (now - this.uplinkNotRecordingDiagLastMs < UPLINK_EDGE_DIAG_THROTTLE_MS) {
+            return;
+        }
+        this.uplinkNotRecordingDiagLastMs = now;
+        this.log(
+            'debug',
+            `[UPLINK] ignoring ${rawLen}b binary session=${this.sessionState} isRecording=false`,
+        );
+    }
+
+    private maybeLogDecodeEmptyPcm(rawWs: Buffer): void {
+        if (!VOICE_DEBUG) {
+            return;
+        }
+        const now = Date.now();
+        if (now - this.decodeEmptyDiagLastMs < UPLINK_EDGE_DIAG_THROTTLE_MS) {
+            return;
+        }
+        this.decodeEmptyDiagLastMs = now;
+        const fmt = rawWs.length > 0 ? `fmt_byte=0x${rawWs[0]!.toString(16)}` : 'empty_ws';
+        this.log('debug', `[UPLINK] decode yielded 0 PCM bytes (${fmt} raw_len=${rawWs.length})`);
     }
 
     private recordUplinkReceive(length: number): void {
@@ -237,12 +362,47 @@ export class LiveWebSocketHandler {
             speechActive = vadResult.speechActive;
             if (speechActive) {
                 this.voiceActivityDetected = true;
+            }
+
+            const shouldLevelDiag = VOICE_DEBUG || VAD_LOW_GAIN_WARN;
+            const now = Date.now();
+            if (shouldLevelDiag && now - this.vadDiagLastMs >= VAD_DIAG_THROTTLE_MS) {
+                this.vadDiagLastMs = now;
+                const pcmStat = pcmQuickStats(data);
                 if (VOICE_DEBUG) {
-                    this.log('debug', `[VAD] probability=${vadResult.voiceProbability.toFixed(3)}`);
+                    const statStr = pcmStat
+                        ? `pk_dbfs=${pcmStat.peakDbfs.toFixed(1)} rms_dbfs=${pcmStat.rmsDbfs.toFixed(1)} ` +
+                            `peak_i16=${pcmStat.peakAbs} rms_lin=${pcmStat.rmsLinear.toFixed(5)} n=${pcmStat.sampleCount}`
+                        : 'pcm_stat=n/a';
+                    this.log(
+                        'debug',
+                        `[VAD] prob=${vadResult.voiceProbability.toFixed(3)} speech=${speechActive ? 1 : 0} ` +
+                            `thr=${this.vadDetector.speechPositiveThreshold.toFixed(2)} ${statStr}`,
+                    );
+                }
+                if (
+                    VAD_LOW_GAIN_WARN &&
+                    pcmStat &&
+                    !Number.isNaN(VAD_LOW_GAIN_WARN_PEAK_DBFS) &&
+                    pcmStat.peakDbfs < VAD_LOW_GAIN_WARN_PEAK_DBFS &&
+                    !speechActive
+                ) {
+                    if (now - this.vadLowGainWarnLastMs >= VAD_LOW_GAIN_WARN_INTERVAL_MS) {
+                        this.vadLowGainWarnLastMs = now;
+                        this.log(
+                            'warn',
+                            `[VAD] uplink peak very low (pk_dbfs=${pcmStat.peakDbfs.toFixed(1)} < ` +
+                                `${VAD_LOW_GAIN_WARN_PEAK_DBFS}); check mic gain / AGC / transport — VAD may stay off`,
+                        );
+                    }
                 }
             }
         } else if (VOICE_DEBUG) {
-            this.log('debug', `[VAD] no audio data: ${data.length} bytes`);
+            const now = Date.now();
+            if (now - this.silentChunkDiagLastMs >= UPLINK_EDGE_DIAG_THROTTLE_MS) {
+                this.silentChunkDiagLastMs = now;
+                this.log('debug', `[VAD] all_zero_pcm chunk_bytes=${data.length} (Silero skipped)`);
+            }
         }
 
         if (!this.wakeWordDetected && !this.responseSession) {
@@ -269,56 +429,34 @@ export class LiveWebSocketHandler {
         }
         if (!this.wakewordDetector.hasPendingInference()) {
             if (VOICE_DEBUG) {
-                const ring = this.wakewordDetector.getRingStats();
-                this.log(
-                    'debug',
-                    `[WAKEWORD] window not ready (${ring.bytes}/${ring.targetBytes} bytes) ` +
-                    `or rate-limited`,
-                );
+                const now = Date.now();
+                if (now - this.wakewordGateDiagLastMs >= WAKEWORD_GATE_DIAG_THROTTLE_MS) {
+                    this.wakewordGateDiagLastMs = now;
+                    const ring = this.wakewordDetector.getRingStats();
+                    const reason = this.wakewordDetector.getInferenceBlockReason();
+                    this.log(
+                        'debug',
+                        `[WAKEWORD] skip_inference reason=${reason} ring=${ring.bytes}/${ring.targetBytes}`,
+                    );
+                }
             }
             return;
         }
         if (this.wakeWordInferenceScheduled) {
-            if (VOICE_DEBUG) {
-                this.log('debug', '[WAKEWORD] inference loop already scheduled');
-            }
             return;
-        }
-        if (VOICE_DEBUG) {
-            this.log('debug', '[WAKEWORD] scheduling inference loop');
         }
         this.wakeWordInferenceScheduled = true;
         void this.runWakeWordInferenceLoop();
     }
 
     private async runWakeWordInferenceLoop(): Promise<void> {
-        if (VOICE_DEBUG) {
-            this.log(
-                'debug',
-                `[WAKEWORD] running inference loop`,
-            );
-        }
         try {
             while (!this.wakeWordDetected) {
-                if (VOICE_DEBUG) {
-                    this.log(
-                        'debug',
-                        `[WAKEWORD] checking for pending inference`,
-                    );
-                }
                 if (!this.wakewordDetector.hasPendingInference()) {
                     break;
                 }
 
                 const inference = await this.wakewordDetector.runPendingInference();
-                if (VOICE_DEBUG) {
-                    this.log(
-                        'debug',
-                        `[WAKEWORD] score=${inference?.score.toFixed(3)} ` +
-                        `threshold=${this.wakewordDetector.detectionThreshold.toFixed(3)}`,
-                    );
-                }
-
                 if (!inference) {
                     break;
                 }
@@ -326,8 +464,9 @@ export class LiveWebSocketHandler {
                 if (VOICE_DEBUG) {
                     this.log(
                         'debug',
-                        `[WAKEWORD] score=${inference.score.toFixed(3)} ` +
-                        `threshold=${this.wakewordDetector.detectionThreshold.toFixed(3)}`,
+                        `[WAKEWORD] predict_ms=${inference.predictMs.toFixed(1)} ` +
+                            `score=${inference.score.toFixed(3)} ` +
+                            `threshold=${this.wakewordDetector.detectionThreshold.toFixed(3)}`,
                     );
                 }
 
@@ -833,18 +972,22 @@ export class LiveWebSocketHandler {
 
     public async cleanup(): Promise<void> {
         this.log('info', 'Cleaning up session...');
+        // Drain serialized uplink work before tearing down ONNX/VAD; otherwise in-flight
+        // handleAudioData can hit the Silero session after destroy() and log noisy errors.
+        await this.uplinkProcessingChain.catch(() => {
+            /* ignore — connection is closing */
+        });
         this.endConversation();
         this.clearAllTimers();
         this.audioCapture?.close();
         this.audioCapture = null;
+        this.aecProcessor?.destroy();
+        this.aecProcessor = null;
         this.sessionState = 'IDLE';
         this.vadDetector.destroy();
     }
 
     private log(level: 'info' | 'warn' | 'error' | 'debug', message: string): void {
-        if (level === 'debug' && !VOICE_DEBUG) {
-            return;
-        }
         console.log(`[${level.toUpperCase()}] [${Date.now()}] ${message}`);
     }
 

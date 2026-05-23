@@ -3,7 +3,10 @@
 #include "../include/microphone_manager.hpp"
 #include "../include/websocket_voice_client.hpp"
 #include "../include/audio_source_manager.hpp"
+#include "../include/aec_ref_config.hpp"
+#include "../include/uplink_audio_frame.hpp"
 #include "diagnostics_config.hpp"
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 
@@ -160,6 +163,29 @@ namespace btspeaker {
 
         websocketClient = std::make_unique<WebSocketVoiceClient>(*this);
         websocketClient->init();
+
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+        playbackRefTap_ = std::make_unique<PlaybackReferenceTap>();
+        playbackRefTap_->setInstance(playbackRefTap_.get());
+        playbackRefTap_->setSendCallback([this](const int16_t *pcm,
+                                                const uint32_t num_samples,
+                                                const uint32_t sequence,
+                                                const int64_t timestamp_us) -> bool {
+            if (!websocketClient) {
+                return false;
+            }
+            playbackRefTap_->recordOutboundQueueDepth(websocketClient->playbackRefQueueDepth());
+            return websocketClient->sendFramedAudio(
+                    AudioFrameType::PlaybackRef,
+                    pcm,
+                    num_samples,
+                    kPlaybackRefOutputSampleRate,
+                    1,
+                    sequence,
+                    timestamp_us) == ESP_OK;
+        });
+        ESP_LOGI(TAG, "Backend AEC playback-ref stream enabled");
+#endif
 
         microphoneManager = std::make_unique<MicrophoneManager>();
         microphoneManager->init();
@@ -381,6 +407,8 @@ namespace btspeaker {
             return;
         }
 
+        const int64_t capture_timestamp_us = esp_timer_get_time();
+
         static int64_t diag_window_start_us = 0;
         static uint32_t diag_chunks_received = 0;
         static uint32_t diag_chunks_sent = 0;
@@ -420,6 +448,9 @@ namespace btspeaker {
                                              playback_source == AudioSource::SPOTIFY ||
                                              voice_response_draining;
                 websocketClient->setPlaybackActive(playback_active);
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+                updatePlaybackRefActive(playback_active, playback_source);
+#endif
 
                 AudioSourceManager::SpotifyMicUplinkPolicy mic_policy =
                         AudioSourceManager::SpotifyMicUplinkPolicy::Allow;
@@ -432,6 +463,9 @@ namespace btspeaker {
                 websocketClient->setPlaybackMicSuspended(suspend_mic_for_spotify);
 
                 if (suspend_mic_for_spotify) {
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+                    resetFramedMicAggregator();
+#endif
                     websocketClient->setPlaybackStress(false);
                     if (diagnostics_enabled) {
                         diag_chunks_skipped_spotify_protect++;
@@ -441,7 +475,11 @@ namespace btspeaker {
                             mic_policy == AudioSourceManager::SpotifyMicUplinkPolicy::Stress);
 
                     const int64_t before_send_us = esp_timer_get_time();
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+                    const esp_err_t ret = sendFramedMicChunks(data, length, capture_timestamp_us);
+#else
                     const esp_err_t ret = websocketClient->sendAudioChunk(data, length);
+#endif
                     const uint32_t send_us =
                             static_cast<uint32_t>(esp_timer_get_time() - before_send_us);
 
@@ -485,6 +523,10 @@ namespace btspeaker {
                     websocketClient->setPlaybackMicSuspended(false);
                     websocketClient->setPlaybackStress(false);
                 }
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+                resetFramedMicAggregator();
+                updatePlaybackRefActive(false, AudioSource::NONE);
+#endif
             }
         } else {
             if (diagnostics_enabled) {
@@ -494,6 +536,10 @@ namespace btspeaker {
                 websocketClient->setPlaybackMicSuspended(false);
                 websocketClient->setPlaybackStress(false);
             }
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+            resetFramedMicAggregator();
+            updatePlaybackRefActive(false, AudioSource::NONE);
+#endif
         }
 
         if (diagnostics_enabled) {
@@ -522,6 +568,79 @@ namespace btspeaker {
             }
         }
     }
+
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+
+    esp_err_t VoiceAssistantManager::sendFramedMicChunks(const uint8_t *data,
+                                                         const size_t length,
+                                                         const int64_t capture_timestamp_us) {
+        if (!websocketClient || !data || length < sizeof(int16_t)) {
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        const auto *samples = reinterpret_cast<const int16_t *>(data);
+        const size_t total_samples = length / sizeof(int16_t);
+        size_t offset = 0;
+        esp_err_t last_ret = ESP_OK;
+
+        while (offset < total_samples) {
+            if (framedMicFill_ == 0) {
+                framedMicTimestampUs_ = capture_timestamp_us +
+                                        (static_cast<int64_t>(offset) * 1000000LL) /
+                                        kPlaybackRefOutputSampleRate;
+            }
+
+            const size_t writable = std::min<size_t>(
+                    FRAMED_MIC_AGGREGATE_SAMPLES - framedMicFill_,
+                    total_samples - offset);
+            std::memcpy(framedMicBuffer_.data() + framedMicFill_,
+                        samples + offset,
+                        writable * sizeof(int16_t));
+            framedMicFill_ += static_cast<uint32_t>(writable);
+            offset += writable;
+
+            if (framedMicFill_ < FRAMED_MIC_AGGREGATE_SAMPLES) {
+                continue;
+            }
+
+            last_ret = websocketClient->sendFramedAudio(
+                    AudioFrameType::Mic,
+                    framedMicBuffer_.data(),
+                    framedMicFill_,
+                    kPlaybackRefOutputSampleRate,
+                    1,
+                    micSequence_++,
+                    framedMicTimestampUs_);
+            framedMicFill_ = 0;
+            if (last_ret != ESP_OK) {
+                break;
+            }
+        }
+
+        return last_ret;
+    }
+
+    void VoiceAssistantManager::updatePlaybackRefActive(const bool playback_active,
+                                                        const AudioSource playback_source) {
+        if (!playbackRefTap_) {
+            return;
+        }
+
+        bool ref_active = playback_active;
+        if (playback_source == AudioSource::SPOTIFY) {
+            ref_active = playback_active &&
+                         audioSourceManager.getSpotifyMicUplinkPolicy() !=
+                         AudioSourceManager::SpotifyMicUplinkPolicy::Suspend;
+        }
+        playbackRefTap_->setActive(ref_active);
+    }
+
+    void VoiceAssistantManager::resetFramedMicAggregator() {
+        framedMicFill_ = 0;
+        framedMicTimestampUs_ = 0;
+    }
+
+#endif
 
     void VoiceAssistantManager::processTextMessage(const char *messageJson) {
         if (!messageJson) {

@@ -18,10 +18,11 @@
     "capture:wakeword:segment": "npm run build && node dist/scripts/segment-wakeword-captures.js"
   },
   "dependencies": {
+    "@ennuicastr/webrtcaec3.js": "^0.3.0",
     "@google/genai": "^2.5.0",
     "@modelcontextprotocol/sdk": "^1.11.0",
-    "avr-vad": "^1.0.10",
     "@types/axios": "^0.14.4",
+    "avr-vad": "^1.0.10",
     "axios": "^1.9.0",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",

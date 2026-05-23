@@ -50,6 +50,39 @@ export function pcmBytesForDurationMs(durationMs: number, sampleRate: number = U
     return Math.floor((durationMs / 1000) * sampleRate) * 2;
 }
 
+/** Mono s16le quick levels for uplink diagnostics (int16 full scale = 0 dBFS peak). */
+export interface PcmQuickStats {
+    sampleCount: number;
+    peakAbs: number;
+    rmsLinear: number;
+    /** Peak sample vs int16 full scale (32768), dBFS (0 = full scale). */
+    peakDbfs: number;
+    /** Block RMS vs full scale, dBFS. */
+    rmsDbfs: number;
+}
+
+/** Mono s16le: sample count, peak |sample|, RMS linear (0..~1), dBFS vs int16 full scale (0 dBFS = ±32768). Odd/empty → null. */
+export function pcmQuickStats(pcm: Buffer): PcmQuickStats | null {
+    if (pcm.length < 2 || pcm.length % 2 !== 0) {
+        return null;
+    }
+    const n = pcm.length / 2;
+    let peak = 0;
+    let sumSq = 0;
+    for (let i = 0; i < n; i++) {
+        const s = pcm.readInt16LE(i * 2);
+        const a = Math.abs(s);
+        if (a > peak) {
+            peak = a;
+        }
+        sumSq += s * s;
+    }
+    const rmsLinear = Math.sqrt(sumSq / n) / 32768;
+    const peakDbfs = peak < 1 ? -120 : 20 * Math.log10(peak / 32768);
+    const rmsDbfs = 20 * Math.log10(Math.max(rmsLinear, 1e-10));
+    return {sampleCount: n, peakAbs: peak, rmsLinear, peakDbfs, rmsDbfs};
+}
+
 /** Trim or left-pad PCM to exactly targetBytes (s16le). */
 export function fitPcmWindow(pcm: Buffer, targetBytes: number): Buffer {
     if (pcm.length === targetBytes) {

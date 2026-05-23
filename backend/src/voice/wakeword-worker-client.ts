@@ -2,10 +2,13 @@ import {spawn, ChildProcessWithoutNullStreams} from 'node:child_process';
 import {createInterface} from 'node:readline';
 import * as fs from 'node:fs';
 import path from 'node:path';
+import {performance} from 'node:perf_hooks';
 
 export interface WakewordPredictResult {
     score: number;
     model: string;
+    /** ms from predict() entry until result (queue wait + Python/ONNX). */
+    predictMs: number;
 }
 
 interface WorkerResponse {
@@ -16,6 +19,21 @@ interface WorkerResponse {
     ready?: boolean;
 }
 
+type QueuedWork =
+    | {
+          kind: 'predict';
+          request: string;
+          predictT0: number;
+          resolve: (value: WakewordPredictResult) => void;
+          reject: (reason: Error) => void;
+      }
+    | {
+          kind: 'ping';
+          request: string;
+          resolve: () => void;
+          reject: (reason: Error) => void;
+      };
+
 /**
  * Shared long-lived Python worker that runs LiveKit WakeWordModel inference.
  */
@@ -25,15 +43,8 @@ export class WakewordWorkerClient {
     private readonly pythonBin: string;
     private readonly workerScript: string;
     private readyPromise: Promise<void> | null = null;
-    private pending: {
-        resolve: (value: WakewordPredictResult) => void;
-        reject: (reason: Error) => void;
-    } | null = null;
-    private queue: Array<{
-        request: string;
-        resolve: (value: WakewordPredictResult) => void;
-        reject: (reason: Error) => void;
-    }> = [];
+    private pending: QueuedWork | null = null;
+    private queue: QueuedWork[] = [];
 
     constructor(modelPath: string) {
         this.modelPath = WakewordWorkerClient.resolvePath(modelPath);
@@ -129,13 +140,25 @@ export class WakewordWorkerClient {
 
         if (!parsed.ok) {
             pending.reject(new Error(parsed.error ?? 'Wake word inference failed'));
-        } else if (parsed.score !== undefined) {
+            this.pumpQueue();
+            return;
+        }
+
+        if (pending.kind === 'ping') {
+            pending.resolve();
+            this.pumpQueue();
+            return;
+        }
+
+        const predictMs = performance.now() - pending.predictT0;
+        if (parsed.score !== undefined) {
             pending.resolve({
                 score: parsed.score,
                 model: parsed.model ?? 'okay_rufus',
+                predictMs,
             });
         } else {
-            pending.resolve({score: 0, model: parsed.model ?? 'okay_rufus'});
+            pending.resolve({score: 0, model: parsed.model ?? 'okay_rufus', predictMs});
         }
         this.pumpQueue();
     }
@@ -171,8 +194,15 @@ export class WakewordWorkerClient {
             pcm_b64: pcm.toString('base64'),
         })}\n`;
 
+        const predictT0 = performance.now();
         return new Promise<WakewordPredictResult>((resolve, reject) => {
-            this.queue.push({request, resolve, reject});
+            this.queue.push({
+                kind: 'predict',
+                request,
+                predictT0,
+                resolve,
+                reject,
+            });
             this.pumpQueue();
         });
     }
@@ -186,8 +216,9 @@ export class WakewordWorkerClient {
         const request = `${JSON.stringify({cmd: 'ping'})}\n`;
         await new Promise<void>((resolve, reject) => {
             this.queue.push({
+                kind: 'ping',
                 request,
-                resolve: () => resolve(),
+                resolve,
                 reject,
             });
             this.pumpQueue();

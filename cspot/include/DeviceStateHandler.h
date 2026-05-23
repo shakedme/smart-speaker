@@ -89,6 +89,10 @@ class DeviceStateHandler {
 
         void sendCommand(CommandType, CommandData data = {});
 
+        void requestSkipNext();
+
+        void requestSkipPrevious();
+
         static void reloadTrackList(void *);
 
         void tryCompleteDeferredReload();

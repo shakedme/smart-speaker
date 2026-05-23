@@ -1,6 +1,11 @@
 #pragma once
 
 #include "audio_types.hpp"
+#include "../include/aec_ref_config.hpp"
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+#include "../include/playback_reference_tap.hpp"
+#endif
+#include <array>
 #include <memory>
 #include <atomic>
 #include <cstddef>
@@ -100,6 +105,14 @@ namespace btspeaker {
 
         void onAudioInput(const uint8_t *data, size_t length);
 
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+        esp_err_t sendFramedMicChunks(const uint8_t *data, size_t length, int64_t capture_timestamp_us);
+
+        void updatePlaybackRefActive(bool playback_active, AudioSource playback_source);
+
+        void resetFramedMicAggregator();
+#endif
+
         void processTextMessage(const char *messageJson);
 
         void processAudioResponse(const uint8_t *data, size_t length);
@@ -109,6 +122,15 @@ namespace btspeaker {
 
         std::unique_ptr<MicrophoneManager> microphoneManager;
         std::unique_ptr<WebSocketVoiceClient> websocketClient;
+
+#if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
+        static constexpr uint32_t FRAMED_MIC_AGGREGATE_SAMPLES = 4096;  // 256 ms @ 16 kHz.
+        std::unique_ptr<PlaybackReferenceTap> playbackRefTap_;
+        uint32_t micSequence_{0};
+        std::array<int16_t, FRAMED_MIC_AGGREGATE_SAMPLES> framedMicBuffer_{};
+        uint32_t framedMicFill_{0};
+        int64_t framedMicTimestampUs_{0};
+#endif
 
         QueueHandle_t inboundQueue_ = nullptr;
         TaskHandle_t inboundTaskHandle_ = nullptr;

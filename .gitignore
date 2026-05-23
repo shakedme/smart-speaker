@@ -45,5 +45,6 @@ backend/.venv
 backend/models/wakeword/captures/
 backend/models/wakeword/output/
 backend/models/wakeword/data/
+backend/data/
 
 hey_rufus

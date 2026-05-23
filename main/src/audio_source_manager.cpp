@@ -65,6 +65,11 @@ namespace btspeaker {
     }
 
     void AudioSourceManager::updateSpotifyMicUplinkMode() const {
+        if (1 == 1) {
+            spotifyMicUplinkMode_ = SpotifyMicUplinkMode::Normal;
+            micSuspendReason_ = SpotifyMicUplinkSuspendReason::None;
+            return;
+        }
         if (currentSource != AudioSource::SPOTIFY || !spotifyPipeline) {
             if (spotifyMicUplinkMode_ != SpotifyMicUplinkMode::Normal) {
                 ESP_LOGI(TAG, "[SPOTIFY_MIC_UPLINK] mode=normal (not on Spotify)");

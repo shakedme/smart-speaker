@@ -9,17 +9,13 @@
 
 #include "AudioSink.h"           // for AudioSink
 #include "BellTask.h"            // for Task
-#include "DeviceStateHandler.h"  // for DeviceStateHandler
-
-namespace cspot {
-    class DeviceStateHandler;
-}  // namespace cspot
+#include "DeviceStateHandler.h"  // cspot::DeviceStateHandler (CommandType, etc.)
 
 class EspPlayer : public bell::Task {
 public:
     static constexpr size_t kInitialPreBufferBytes = 1024 * 1024;
-    static constexpr size_t kRecoveryPreBufferBytes = 256 * 1024;
-    static constexpr size_t kPauseLowWaterBytes = 16 * 1024;
+    static constexpr size_t kRecoveryPreBufferBytes = 1024 * 1024;
+    static constexpr size_t kPauseLowWaterBytes = 256 * 1024;
 
     EspPlayer(std::shared_ptr<AudioSink> sink,
               std::shared_ptr<cspot::DeviceStateHandler> handler);

@@ -3,7 +3,7 @@ alwaysApply: true
 ---
 
 *** 
-!!! Always compile after editing firmware to validate results. You must source the env using 'source $ADF_PATH/export.sh'.
+!!! Always compile after editing firmware to validate results. Source the shared ESP-ADF environment once with `source $ADF_PATH/export.sh` before building either `playback_firmware` or `voice_firmware`. Use `VOICE_ADF_PATH` only when voice must diverge from playback's ADF install.
 ***
 
 # Coding Standards

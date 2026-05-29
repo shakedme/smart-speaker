@@ -6,17 +6,18 @@ import {
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
-import { SpeakerSessionFactory } from './speaker-session.factory';
-import { SpeakerSession } from './speaker-session';
 import { AppLoggerService } from '../logging/logger.module';
+import { SpeakerSessionRegistry } from './speaker-session-registry';
+import { parseControlMessage, validateHello } from './speaker-protocol';
+import { SpeakerNodeConnection } from './speaker-node-connection';
 
 @Injectable()
 @WebSocketGateway({ path: '/voice' })
 export class VoiceGateway implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy {
-  private readonly activeSessions = new Map<WebSocket, SpeakerSession>();
+  private readonly pendingSockets = new Set<WebSocket>();
 
   constructor(
-    private readonly sessionFactory: SpeakerSessionFactory,
+    private readonly registry: SpeakerSessionRegistry,
     private readonly logger: AppLoggerService,
   ) {}
 
@@ -24,17 +25,15 @@ export class VoiceGateway implements OnGatewayConnection, OnGatewayDisconnect, O
     request.socket.setNoDelay(true);
     const clientIP = request.socket.remoteAddress;
     this.logger.log('SESSION', 'info', `New WebSocket connection from ${clientIP ?? 'unknown'}`);
+    this.pendingSockets.add(client);
 
     try {
-      const session = await this.sessionFactory.create(client);
-      this.activeSessions.set(client, session);
-
       client.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
         try {
           const buffer = Buffer.isBuffer(data)
             ? data
             : Buffer.from(data as ArrayBuffer);
-          session.handleMessage(buffer, isBinary);
+          void this.handleSocketMessage(client, buffer, isBinary);
         } catch (error) {
           this.logger.log('SESSION', 'error', `Error handling message: ${error}`);
           client.close(1011, 'Internal server error');
@@ -50,19 +49,47 @@ export class VoiceGateway implements OnGatewayConnection, OnGatewayDisconnect, O
     }
   }
 
-  async handleDisconnect(client: WebSocket): Promise<void> {
-    const session = this.activeSessions.get(client);
-    if (session) {
-      this.activeSessions.delete(client);
-      await session.cleanup();
+  private async handleSocketMessage(client: WebSocket, buffer: Buffer, isBinary: boolean): Promise<void> {
+    const node = this.registry.getNode(client);
+    if (!node) {
+      if (isBinary) {
+        this.logger.log('SESSION', 'warn', 'Received binary message before hello');
+        client.close(1008, 'hello required');
+        return;
+      }
+      const message = parseControlMessage(buffer);
+      if (!message) {
+        client.close(1008, 'invalid hello');
+        return;
+      }
+      const hello = validateHello(message);
+      if (!hello.ok) {
+        this.logger.log('SESSION', 'warn', `[NODE] rejected hello: ${hello.error}`);
+        client.close(1008, hello.error);
+        return;
+      }
+      const connection = new SpeakerNodeConnection(client, hello.hello);
+      await this.registry.registerNode(connection);
+      this.pendingSockets.delete(client);
+      return;
     }
+
+    const session = this.registry.getSessionForNode(client);
+    if (!session) {
+      client.close(1011, 'session unavailable');
+      return;
+    }
+    session.handleNodeMessage(node, buffer, isBinary);
+  }
+
+  async handleDisconnect(client: WebSocket): Promise<void> {
+    this.pendingSockets.delete(client);
+    await this.registry.unregisterSocket(client);
     this.logger.log('SESSION', 'info', 'WebSocket connection closed');
   }
 
   async onModuleDestroy(): Promise<void> {
-    await Promise.allSettled(
-      [...this.activeSessions.values()].map((session) => session.cleanup()),
-    );
-    this.activeSessions.clear();
+    await this.registry.cleanup();
+    this.pendingSockets.clear();
   }
 }

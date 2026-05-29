@@ -1,0 +1,3 @@
+dependencies:
+  espressif/esp_websocket_client:
+    override_path: "../../vendor/espressif__esp_websocket_client"

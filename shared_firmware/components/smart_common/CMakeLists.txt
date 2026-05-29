@@ -1,0 +1,34 @@
+idf_component_register(
+        SRCS
+        "src/ima_adpcm.cpp"
+        "src/wifi_manager.cpp"
+        INCLUDE_DIRS
+        "include"
+        REQUIRES
+        driver
+        nvs_flash
+        esp_system
+        log
+        esp_event
+        esp_wifi
+        esp_netif
+        esp_timer
+        freertos
+        heap
+        json
+        lwip
+        tcp_transport
+        esp_http_client
+        mbedtls
+        http_parser
+        espressif__esp_websocket_client
+)
+
+target_compile_options(${COMPONENT_LIB} PRIVATE
+        -Wno-unused-variable
+        -Wno-unused-function
+        -Wno-deprecated-declarations
+        -Wno-missing-field-initializers
+        -Wno-sign-compare
+        $<$<COMPILE_LANGUAGE:CXX>:-std=c++17>
+)

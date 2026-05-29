@@ -1,10 +1,8 @@
-import { WebSocket } from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import { GoogleGenAI } from '@google/genai';
 import { Injectable } from '@nestjs/common';
 import { Inject } from '@nestjs/common';
 import { SpeakerSession } from './speaker-session';
-import { DeviceMessageSender } from './device-message-sender';
 import { WakewordLifecycleService } from './wakeword-lifecycle.service';
 import { AppConfigService } from '../config/app-config.service';
 import { AppLoggerService } from '../logging/logger.module';
@@ -15,6 +13,7 @@ import { ResponseService } from '../agent/response-service';
 import { VadDetector } from './vad-detector';
 import { WakewordDetector } from './wakeword-detector';
 import { BackendAec3Processor } from '../audio/backend-aec3-processor';
+import { SpeakerRouter } from './speaker-router';
 
 @Injectable()
 export class SpeakerSessionFactory {
@@ -27,9 +26,8 @@ export class SpeakerSessionFactory {
     @Inject(GEMINI_CLIENT) private readonly gemini: GoogleGenAI,
   ) {}
 
-  async create(ws: WebSocket): Promise<SpeakerSession> {
+  async create(speakerId: string, router: SpeakerRouter): Promise<SpeakerSession> {
     const sessionId = uuidv4();
-    const deviceSender = new DeviceMessageSender(ws);
     const vadDetector = await VadDetector.create({
       positiveThreshold: this.config.vadThreshold,
     });
@@ -39,9 +37,9 @@ export class SpeakerSessionFactory {
       : null;
 
     const session = new SpeakerSession({
-      ws,
+      speakerId,
       sessionId,
-      deviceSender,
+      router,
       vadDetector,
       wakewordDetector,
       aecProcessor,
@@ -51,7 +49,7 @@ export class SpeakerSessionFactory {
       intentClassifier: this.intentClassifier,
       gemini: this.gemini,
       createResponseService: (callbacks) =>
-        new ResponseService(this.gemini, deviceSender, this.logger, sessionId, callbacks),
+        new ResponseService(this.gemini, router, this.logger, sessionId, callbacks),
     });
 
     await session.initialize();

@@ -1,5 +1,4 @@
 import { GoogleGenAI, LiveServerMessage, Modality, Session } from '@google/genai';
-import { DeviceMessageSender } from '../voice/device-message-sender';
 import { AppLoggerService, LogLevel } from '../logging/logger.module';
 import {
   CONVERSATION_TIMEOUT_MS,
@@ -16,6 +15,10 @@ export interface ResponseServiceCallbacks {
   getSessionState: () => SessionState;
 }
 
+export interface ResponseAudioSender {
+  sendPcmChunks(audioBuffer: Buffer): void;
+}
+
 export class ResponseService {
   private responseSession: Session | null = null;
   private isGeminiSpeaking = false;
@@ -24,7 +27,7 @@ export class ResponseService {
 
   constructor(
     private readonly gemini: GoogleGenAI,
-    private readonly deviceSender: DeviceMessageSender,
+    private readonly deviceSender: ResponseAudioSender,
     logger: AppLoggerService,
     private readonly sessionId: string,
     private readonly callbacks: ResponseServiceCallbacks,

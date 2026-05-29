@@ -1,0 +1,5 @@
+dependencies:
+  idf:
+    version: '>=5.0.0'
+  espressif/esp_websocket_client:
+    override_path: "../../shared_firmware/vendor/espressif__esp_websocket_client"

@@ -6,4 +6,5 @@ export type LogPrefix =
   | 'TOOL'
   | 'CALENDAR'
   | 'SPOTIFY'
-  | 'RESPONSE';
+  | 'RESPONSE'
+  | 'ROUTER';

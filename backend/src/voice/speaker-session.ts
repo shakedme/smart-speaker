@@ -1,4 +1,3 @@
-import { WebSocket } from 'ws';
 import { GoogleGenAI } from '@google/genai';
 import { pcmQuickStats } from '../audio/pcm-utils';
 import { AudioCaptureRecorder } from '../audio/audio-capture-recorder';
@@ -17,8 +16,11 @@ import {
 } from '../audio/audio-buffer-utils';
 import { VadDetector } from './vad-detector';
 import { WakewordDetector } from './wakeword-detector';
-import { DeviceMessageSender } from './device-message-sender';
 import { isRecordingState, SessionState } from './session-state';
+import { SpeakerNodeConnection, playbackStateToNowPlaying } from './speaker-node-connection';
+import { SpeakerRouter } from './speaker-router';
+import { parseControlMessage, SpeakerControlMessage } from './speaker-protocol';
+import { PlaybackVisualizationPublisher } from './playback-visualization-publisher';
 import { AppConfigService } from '../config/app-config.service';
 import { AppLoggerService } from '../logging/logger.module';
 import { AgentOrchestratorService } from '../agent/agent-orchestrator.service';
@@ -37,9 +39,9 @@ const VAD_LOW_GAIN_WARN_PEAK_DBFS = parseFloat(process.env.VAD_LOW_GAIN_WARN_PEA
 const VAD_LOW_GAIN_WARN_INTERVAL_MS = parseInt(process.env.VAD_LOW_GAIN_WARN_INTERVAL_MS ?? '5000', 10);
 
 export interface SpeakerSessionDeps {
-  ws: WebSocket;
   sessionId: string;
-  deviceSender: DeviceMessageSender;
+  speakerId: string;
+  router: SpeakerRouter;
   vadDetector: VadDetector;
   wakewordDetector: WakewordDetector;
   aecProcessor: BackendAec3Processor | null;
@@ -57,9 +59,9 @@ export interface SpeakerSessionDeps {
 }
 
 export class SpeakerSession {
-  private readonly ws: WebSocket;
   private readonly sessionId: string;
-  private readonly deviceSender: DeviceMessageSender;
+  private readonly speakerId: string;
+  private readonly deviceSender: SpeakerRouter;
   private readonly vadDetector: VadDetector;
   private readonly wakewordDetector: WakewordDetector;
   private readonly aecProcessor: BackendAec3Processor | null;
@@ -68,6 +70,7 @@ export class SpeakerSession {
   private readonly agentOrchestrator: AgentOrchestratorService;
   private readonly intentClassifier: GeminiIntentClassifierService;
   private readonly createResponseService: SpeakerSessionDeps['createResponseService'];
+  private readonly visualizationPublisher: PlaybackVisualizationPublisher;
 
   private responseService!: ResponseService;
   private sessionState: SessionState = 'IDLE';
@@ -100,11 +103,13 @@ export class SpeakerSession {
   private silentChunkDiagLastMs = 0;
   private vadLowGainWarnLastMs = 0;
   private oneShotSpokenResponse = false;
+  private lastMicNodeLogMs = 0;
+  private lastPlaybackRefNodeLogMs = 0;
 
   constructor(deps: SpeakerSessionDeps) {
-    this.ws = deps.ws;
     this.sessionId = deps.sessionId;
-    this.deviceSender = deps.deviceSender;
+    this.speakerId = deps.speakerId;
+    this.deviceSender = deps.router;
     this.vadDetector = deps.vadDetector;
     this.wakewordDetector = deps.wakewordDetector;
     this.aecProcessor = deps.aecProcessor;
@@ -113,6 +118,7 @@ export class SpeakerSession {
     this.agentOrchestrator = deps.agentOrchestrator;
     this.intentClassifier = deps.intentClassifier;
     this.createResponseService = deps.createResponseService;
+    this.visualizationPublisher = new PlaybackVisualizationPublisher(this.speakerId, deps.router);
 
     if (this.aecProcessor) {
       this.log.info(`Backend WebRTC AEC3 enabled (initial delay ${this.config.aecInitialDelayMs} ms)`);
@@ -148,14 +154,18 @@ export class SpeakerSession {
     this.broadcastStateChange('LISTENING');
   }
 
-  handleMessage(data: Buffer, isBinary: boolean): void {
+  handleNodeMessage(node: SpeakerNodeConnection, data: Buffer, isBinary: boolean): void {
     if (!isBinary) {
-      this.log.warn(`Received unexpected text message: ${data.toString()}`);
+      this.handleControlMessage(node, data);
       return;
     }
     this.recordUplinkReceive(data.length);
     if (isFramedUplink(data)) {
-      this.handleFramedUplink(data);
+      this.handleFramedUplink(node, data);
+      return;
+    }
+    if (node.role !== 'voice_ui_node') {
+      this.log.warn(`[ROUTER] rejecting legacy mic uplink from role=${node.role} node_id=${node.nodeId}`);
       return;
     }
     if (!this.isRecording) {
@@ -195,7 +205,26 @@ export class SpeakerSession {
     this.vadDetector.destroy();
   }
 
-  private handleFramedUplink(data: Buffer): void {
+  private handleControlMessage(node: SpeakerNodeConnection, data: Buffer): void {
+    const message = parseControlMessage(data);
+    if (!message) {
+      this.log.warn(`[ROUTER] invalid text message node_id=${node.nodeId}`);
+      return;
+    }
+    switch (message.type) {
+      case 'playback.state':
+        if (node.role !== 'playback_node') {
+          this.log.warn(`[ROUTER] rejecting playback.state from role=${node.role} node_id=${node.nodeId}`);
+          return;
+        }
+        this.deviceSender.publishNowPlaying(playbackStateToNowPlaying(message as import('./speaker-protocol').PlaybackStateMessage));
+        return;
+      default:
+        this.log.debug(`[ROUTER] ignoring text type=${message.type} node_id=${node.nodeId}`);
+    }
+  }
+
+  private handleFramedUplink(node: SpeakerNodeConnection, data: Buffer): void {
     const frame = parseFramedUplink(data);
     if (!frame) {
       this.log.warn(`[UPLINK] invalid framed packet len=${data.length}`);
@@ -203,6 +232,12 @@ export class SpeakerSession {
     }
 
     if (frame.frameType === UPLINK_FRAME_TYPE_PLAYBACK_REF) {
+      if (node.role !== 'playback_node') {
+        this.log.warn(`[ROUTER] rejecting playback_ref from role=${node.role} node_id=${node.nodeId}`);
+        return;
+      }
+      this.logRouterFrameOnce('playback_ref', node);
+      this.visualizationPublisher.pushPlaybackRef(frame);
       this.aecProcessor?.pushFrame(frame);
       this.maybeLogAecDiagnostics();
       return;
@@ -212,6 +247,11 @@ export class SpeakerSession {
       this.log.debug(`[UPLINK] ignoring framed type=${frame.frameType}`);
       return;
     }
+    if (node.role !== 'voice_ui_node') {
+      this.log.warn(`[ROUTER] rejecting mic frame from role=${node.role} node_id=${node.nodeId}`);
+      return;
+    }
+    this.logRouterFrameOnce('mic', node);
 
     const pcmChunks = this.aecProcessor ? this.aecProcessor.pushFrame(frame) : [frame.pcm];
 
@@ -553,6 +593,23 @@ export class SpeakerSession {
     this.log.debug(
       `[AEC3] render_fed=${stats.renderFramesFed} capture_out=${stats.captureFramesProcessed}`,
     );
+  }
+
+  private logRouterFrameOnce(kind: 'mic' | 'playback_ref', node: SpeakerNodeConnection): void {
+    const now = Date.now();
+    if (kind === 'mic') {
+      if (now - this.lastMicNodeLogMs < UPLINK_RX_DIAG_INTERVAL_MS) {
+        return;
+      }
+      this.lastMicNodeLogMs = now;
+      this.log.info(`[ROUTER] mic source=voice_ui_node node_id=${node.nodeId}`);
+      return;
+    }
+    if (now - this.lastPlaybackRefNodeLogMs < UPLINK_RX_DIAG_INTERVAL_MS) {
+      return;
+    }
+    this.lastPlaybackRefNodeLogMs = now;
+    this.log.info(`[ROUTER] playback_ref source=playback_node node_id=${node.nodeId}`);
   }
 
   private maybeLogUplinkIgnoredNotRecording(rawLen: number): void {

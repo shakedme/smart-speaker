@@ -1,7 +1,7 @@
 #include "now_playing_screen.hpp"
 
+#include "lcd_framebuffer.hpp"
 #include "ui_state.hpp"
-#include <algorithm>
 #include <cstring>
 
 namespace btspeaker {
@@ -59,7 +59,7 @@ static const uint8_t kFont8x8[96][8] = {
     {0x67,0x66,0x36,0x1E,0x36,0x66,0x67,0x00},
     {0x06,0x06,0x06,0x06,0x06,0x06,0x3F,0x00},
     {0x63,0x77,0x7F,0x6B,0x63,0x63,0x63,0x00},
-    {0x63,0x73,0x7B,0x7F,0x6F,0x67,0x63,0x00},
+    {0x63,0x67,0x6F,0x7F,0x7B,0x73,0x63,0x00}, // N
     {0x1E,0x33,0x33,0x33,0x33,0x33,0x1E,0x00},
     {0x1F,0x33,0x33,0x1F,0x03,0x03,0x03,0x00},
     {0x1E,0x33,0x33,0x33,0x3B,0x36,0x1D,0x00},
@@ -82,7 +82,7 @@ static const uint8_t kFont8x8[96][8] = {
     {0x07,0x06,0x06,0x1E,0x36,0x36,0x1E,0x00},
     {0x00,0x00,0x1E,0x33,0x03,0x33,0x1E,0x00},
     {0x38,0x30,0x30,0x3E,0x33,0x33,0x6E,0x00},
-    {0x00,0x00,0x1E,0x03,0x1F,0x33,0x1E,0x00},
+    {0x00,0x00,0x1E,0x33,0x3F,0x03,0x1E,0x00}, // e
     {0x1C,0x06,0x03,0x1F,0x03,0x03,0x03,0x00},
     {0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x1E},
     {0x07,0x06,0x36,0x6E,0x66,0x66,0x66,0x00},
@@ -95,8 +95,9 @@ static const uint8_t kFont8x8[96][8] = {
     {0x00,0x00,0x1E,0x33,0x33,0x33,0x1E,0x00},
     {0x00,0x00,0x1E,0x33,0x33,0x1E,0x03,0x03},
     {0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x30},
+    {0x00,0x00,0x1B,0x36,0x06,0x06,0x0F,0x00}, // r
     {0x00,0x00,0x1E,0x03,0x0F,0x30,0x1F,0x00},
-    {0x06,0x06,0x3F,0x06,0x06,0x06,0x0F,0x00},
+    {0x08,0x08,0x3E,0x08,0x08,0x28,0x10,0x00}, // t
     {0x00,0x00,0x33,0x33,0x33,0x33,0x6E,0x00},
     {0x00,0x00,0x33,0x33,0x33,0x1E,0x0C,0x00},
     {0x00,0x00,0x63,0x6B,0x7F,0x36,0x36,0x00},
@@ -110,23 +111,30 @@ static const uint8_t kFont8x8[96][8] = {
     {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
 };
 
-void drawGlyph(uint16_t *framebuffer, uint16_t width, uint16_t height, uint16_t x, uint16_t y, char ch, uint16_t color) {
-    if (ch < 32 || ch > 127) {
-        ch = '?';
+void drawGlyph(uint16_t *framebuffer,
+               const uint16_t width,
+               const uint16_t height,
+               const uint16_t x,
+               const uint16_t y,
+               const char ch,
+               const uint16_t color) {
+    char glyphChar = ch;
+    if (glyphChar < 32 || glyphChar > 127) {
+        glyphChar = '?';
     }
-    const uint8_t *glyph = kFont8x8[static_cast<size_t>(ch) - 32];
-    for (uint8_t row = 0; row < 8; ++row) {
-        const uint16_t py = y + row;
-        if (py >= height) {
-            break;
-        }
-        for (uint8_t col = 0; col < 8; ++col) {
+    const uint8_t *glyph = kFont8x8[static_cast<size_t>(glyphChar) - 32U];
+    for (uint8_t row = 0; row < NowPlayingScreen::kGlyphHeight; ++row) {
+        for (uint8_t col = 0; col < NowPlayingScreen::kGlyphWidth; ++col) {
             if ((glyph[row] & (1U << col)) == 0) {
                 continue;
             }
-            const uint16_t px = x + (7 - col);
-            if (px < width) {
-                framebuffer[static_cast<size_t>(py) * width + px] = color;
+            for (uint8_t dy = 0; dy < NowPlayingScreen::kFontScale; ++dy) {
+                for (uint8_t dx = 0; dx < NowPlayingScreen::kFontScale; ++dx) {
+                    setFramebufferPixel(framebuffer, width, height,
+                                        static_cast<uint16_t>(x + col * NowPlayingScreen::kFontScale + dx),
+                                        static_cast<uint16_t>(y + row * NowPlayingScreen::kFontScale + dy),
+                                        color);
+                }
             }
         }
     }
@@ -145,19 +153,75 @@ void NowPlayingScreen::truncateCopy(char *dst, const size_t dst_len, const char 
     dst[dst_len - 1] = '\0';
 }
 
+uint16_t NowPlayingScreen::measureTextWidth(const char *text) {
+    if (!text) {
+        return 0;
+    }
+    return static_cast<uint16_t>(std::strlen(text) * kCharWidth);
+}
+
 void NowPlayingScreen::renderText(uint16_t *framebuffer,
-                                  const uint16_t width,
-                                  const uint16_t height,
-                                  uint16_t x,
-                                  uint16_t y,
-                                  const char *text,
-                                  const uint16_t color) {
+                                    const uint16_t width,
+                                    const uint16_t height,
+                                    const uint16_t x,
+                                    const uint16_t y,
+                                    const char *text,
+                                    const uint16_t color) {
     if (!framebuffer || !text) {
         return;
     }
-    const size_t max_chars = (width - x) / 8;
+    const size_t max_chars = (width - x) / kCharWidth;
     for (size_t i = 0; text[i] != '\0' && i < max_chars; ++i) {
-        drawGlyph(framebuffer, width, height, static_cast<uint16_t>(x + i * 8), y, text[i], color);
+        drawGlyph(framebuffer, width, height,
+                  static_cast<uint16_t>(x + i * kCharWidth), y, text[i], color);
+    }
+}
+
+void NowPlayingScreen::renderTextCentered(uint16_t *framebuffer,
+                                          const uint16_t width,
+                                          const uint16_t height,
+                                          const uint16_t center_y,
+                                          const char *text,
+                                          const uint16_t color) {
+    if (!framebuffer || !text) {
+        return;
+    }
+    const uint16_t text_width = measureTextWidth(text);
+    const uint16_t x = text_width >= width ? 0 : static_cast<uint16_t>((width - text_width) / 2U);
+    const uint16_t y = center_y > kCharHeight / 2U
+                               ? static_cast<uint16_t>(center_y - kCharHeight / 2U)
+                               : 0;
+    if (y + kCharHeight > height) {
+        return;
+    }
+    renderText(framebuffer, width, height, x, y, text, color);
+}
+
+void NowPlayingScreen::renderTextCenteredPair(uint16_t *framebuffer,
+                                              const uint16_t width,
+                                              const uint16_t height,
+                                              const uint16_t center_y,
+                                              const char *line1,
+                                              const char *line2,
+                                              const uint16_t color1,
+                                              const uint16_t color2) {
+    if (!framebuffer) {
+        return;
+    }
+    const uint16_t block_height = static_cast<uint16_t>(kCharHeight * 2U + kLineGap);
+    const uint16_t top_y = center_y > block_height / 2U
+                                   ? static_cast<uint16_t>(center_y - block_height / 2U)
+                                   : 0;
+    if (line1 && line1[0] != '\0') {
+        const uint16_t w1 = measureTextWidth(line1);
+        const uint16_t x1 = w1 >= width ? 0 : static_cast<uint16_t>((width - w1) / 2U);
+        renderText(framebuffer, width, height, x1, top_y, line1, color1);
+    }
+    if (line2 && line2[0] != '\0') {
+        const uint16_t y2 = static_cast<uint16_t>(top_y + kCharHeight + kLineGap);
+        const uint16_t w2 = measureTextWidth(line2);
+        const uint16_t x2 = w2 >= width ? 0 : static_cast<uint16_t>((width - w2) / 2U);
+        renderText(framebuffer, width, height, x2, y2, line2, color2);
     }
 }
 
@@ -168,26 +232,21 @@ void NowPlayingScreen::renderMetadata(uint16_t *framebuffer,
                                       const bool connecting,
                                       const bool hasMetadata) {
     if (connecting) {
-        renderText(framebuffer, width, height, kMarginX, kTitleY, "Connecting...", kColorWhite);
-        renderText(framebuffer, width, height, kMarginX, kStatusY, "Waiting for backend", kColorGray);
+        renderTextCenteredPair(framebuffer, width, height, height / 2U,
+                               "Connecting...", "Waiting for backend", kColorWhite, kColorGray);
         return;
     }
 
     if (!hasMetadata) {
-        renderText(framebuffer, width, height, kMarginX, kTitleY, "No active playback", kColorWhite);
-        renderText(framebuffer, width, height, kMarginX, kStatusY, state.playback_state, kColorGray);
+        renderTextCenteredPair(framebuffer, width, height, height / 2U,
+                               "No active playback", state.playback_state, kColorWhite, kColorGray);
         return;
     }
 
-    char line[64];
-    truncateCopy(line, sizeof(line), state.title[0] ? state.title : "Unknown title");
-    renderText(framebuffer, width, height, kMarginX, kTitleY, line, kColorWhite);
-
-    truncateCopy(line, sizeof(line), state.artist[0] ? state.artist : "Unknown artist");
-    renderText(framebuffer, width, height, kMarginX, kArtistY, line, kColorAccent);
-
-    truncateCopy(line, sizeof(line), state.playback_state);
-    renderText(framebuffer, width, height, kMarginX, kStatusY, line, kColorGray);
+    renderTextCenteredPair(framebuffer, width, height, static_cast<uint16_t>(height - 40U),
+                           state.title[0] ? state.title : "Unknown title",
+                           state.artist[0] ? state.artist : "Unknown artist",
+                           kColorWhite, kColorAccent);
 }
 
 }  // namespace btspeaker

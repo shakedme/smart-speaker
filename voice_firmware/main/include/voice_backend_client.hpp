@@ -21,6 +21,7 @@ public:
     using NowPlayingCallback = std::function<void(const NowPlayingUiState &)>;
     using WaveformCallback = std::function<void(const WaveformUiState &)>;
     using SessionStateCallback = std::function<void(const char *state)>;
+    using ConnectionCallback = std::function<void(bool connected)>;
 
     VoiceBackendClient();
     ~VoiceBackendClient();
@@ -28,6 +29,7 @@ public:
     void setNowPlayingCallback(NowPlayingCallback callback);
     void setWaveformCallback(WaveformCallback callback);
     void setSessionStateCallback(SessionStateCallback callback);
+    void setConnectionCallback(ConnectionCallback callback);
 
     esp_err_t start();
     void stop();
@@ -43,6 +45,7 @@ private:
     static constexpr size_t RX_MAX_PAYLOAD_BYTES = 16 * 1024;
     static constexpr int RECONNECT_CONNECT_WAIT_MS = 15000;
     static constexpr int RECONNECT_LOOP_IDLE_MS = 1000;
+    static constexpr int RECONNECT_DEBOUNCE_MS = 250;
     static constexpr uint32_t CONNECT_OUTCOME_PENDING = 0;
     static constexpr uint32_t CONNECT_OUTCOME_SUCCESS = 1;
     static constexpr uint32_t CONNECT_OUTCOME_FAILURE = 2;
@@ -60,6 +63,7 @@ private:
     void stopReconnectLoop();
     static void reconnectLoopTask(void *arg);
     bool isTransportReady() const;
+    bool canSend() const;
     uint32_t computeReconnectBackoffMs() const;
     uint32_t beginConnectAttempt();
     void signalConnectOutcome(uint32_t outcome);
@@ -68,12 +72,15 @@ private:
     void recordConnectFailure();
     esp_err_t sendHello();
     esp_err_t sendText(const char *text);
+    esp_err_t sendTextOnWire(const char *text);
 
     std::atomic<bool> connected_{false};
+    std::atomic<bool> helloSent_{false};
     std::atomic<bool> running_{false};
     std::atomic<bool> clientRunning_{false};
     std::atomic<bool> reconnectShutdown_{false};
     std::atomic<bool> destroying_{false};
+    std::atomic<bool> connectInProgress_{false};
     std::atomic<uint32_t> consecutiveFailures_{0};
     std::atomic<uint32_t> connectGeneration_{0};
     std::atomic<uint32_t> connectOutcome_{CONNECT_OUTCOME_PENDING};
@@ -83,6 +90,7 @@ private:
     NowPlayingCallback nowPlayingCallback_;
     WaveformCallback waveformCallback_;
     SessionStateCallback sessionStateCallback_;
+    ConnectionCallback connectionCallback_;
     std::string textBuffer_;
 };
 

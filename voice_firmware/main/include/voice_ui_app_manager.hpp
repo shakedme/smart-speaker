@@ -29,12 +29,15 @@ private:
     std::unique_ptr<MicCaptureBackend> createMicBackend();
     std::unique_ptr<DisplayBackend> createDisplayBackend();
 
-    std::unique_ptr<WiFiManager> wifiManager_;
-    std::unique_ptr<MicCaptureBackend> micBackend_;
-    std::unique_ptr<DisplayBackend> displayBackend_;
-    std::unique_ptr<UiApp> uiApp_;
+    // wifiManager_ is declared last so it is destroyed first during teardown.
+    // Its disconnect path invokes onWifiStatus, which must run while uiApp_ is alive.
     std::unique_ptr<VoiceBackendClient> backendClient_;
+    std::unique_ptr<UiApp> uiApp_;
+    std::unique_ptr<DisplayBackend> displayBackend_;
+    std::unique_ptr<MicCaptureBackend> micBackend_;
+    std::unique_ptr<WiFiManager> wifiManager_;
     uint32_t micSequence_ = 0;
+    bool appStarted_ = false;
 };
 
 }  // namespace btspeaker

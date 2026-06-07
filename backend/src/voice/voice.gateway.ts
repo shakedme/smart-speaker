@@ -53,8 +53,8 @@ export class VoiceGateway implements OnGatewayConnection, OnGatewayDisconnect, O
     const node = this.registry.getNode(client);
     if (!node) {
       if (isBinary) {
-        this.logger.log('SESSION', 'warn', 'Received binary message before hello');
-        client.close(1008, 'hello required');
+        // Firmware may race mic uplink with hello; drop pre-handshake binary instead of closing.
+        this.logger.log('SESSION', 'debug', 'Ignoring binary message received before hello');
         return;
       }
       const message = parseControlMessage(buffer);

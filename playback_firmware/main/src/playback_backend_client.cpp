@@ -5,6 +5,7 @@
 #include "uplink_audio_format.hpp"
 #include "uplink_audio_frame.hpp"
 #include "voice_config.hpp"
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 
@@ -23,6 +24,24 @@ namespace btspeaker {
 namespace {
 constexpr const char *kSpeakerId = "rufus-001";
 constexpr const char *kNodeId = "wrover-main";
+
+void *allocateDownlinkPayload(const size_t size) {
+    if (size == 0) {
+        return nullptr;
+    }
+    void *ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ptr) {
+        ptr = std::malloc(size);
+    }
+    return ptr;
+}
+
+void freeDownlinkPayloadPtr(void *ptr) {
+    if (!ptr) {
+        return;
+    }
+    heap_caps_free(ptr);
+}
 }  // namespace
 
 PlaybackBackendClient::PlaybackBackendClient() = default;
@@ -39,6 +58,10 @@ void PlaybackBackendClient::setIntentCallback(IntentCallback callback) {
     intentCallback_ = std::move(callback);
 }
 
+void PlaybackBackendClient::setStateChangeCallback(StateChangeCallback callback) {
+    stateChangeCallback_ = std::move(callback);
+}
+
 bool PlaybackBackendClient::isConnected() const {
     return isTransportReady();
 }
@@ -47,9 +70,11 @@ esp_err_t PlaybackBackendClient::start() {
     if (running_.exchange(true, std::memory_order_acq_rel)) {
         return ESP_OK;
     }
+    startDownlinkWorker();
 #if CONFIG_BTSPK_BACKEND_AEC_REF_STREAM
     const esp_err_t ref_ret = startPlaybackRefWorker();
     if (ref_ret != ESP_OK) {
+        stopDownlinkWorker();
         running_.store(false, std::memory_order_release);
         return ref_ret;
     }
@@ -71,7 +96,7 @@ esp_err_t PlaybackBackendClient::createClient() {
     config.keep_alive_enable = true;
     config.keep_alive_idle = CONFIG_WS_KEEPALIVE_INTERVAL_S;
     config.ping_interval_sec = CONFIG_WS_PING_INTERVAL_S;
-    config.task_stack = 4096;
+    config.task_stack = 8192;
     websocketClient_ = esp_websocket_client_init(&config);
     if (!websocketClient_) {
         ESP_LOGE(TAG, "Failed to create WebSocket client");
@@ -104,6 +129,7 @@ void PlaybackBackendClient::stop() {
 #endif
     stopReconnectLoop();
     destroyClient();
+    stopDownlinkWorker();
     connected_.store(false, std::memory_order_release);
 }
 
@@ -315,6 +341,10 @@ void PlaybackBackendClient::handleDownlinkFragment(esp_websocket_event_data_t *e
         ESP_LOGW(TAG, "Ignoring oversized downlink payload (%d bytes)", eventData->payload_len);
         return;
     }
+    if (!is_binary && static_cast<size_t>(eventData->payload_len) > MAX_DOWNLINK_TEXT_BYTES) {
+        ESP_LOGW(TAG, "Ignoring oversized text downlink (%d bytes)", eventData->payload_len);
+        return;
+    }
     auto &buffer = is_binary ? binaryBuffer_ : textBuffer_;
     if (eventData->payload_offset == 0) {
         buffer.clear();
@@ -325,25 +355,162 @@ void PlaybackBackendClient::handleDownlinkFragment(esp_websocket_event_data_t *e
         return;
     }
 
-    if (is_binary) {
-        if (audioDownlinkCallback_) {
-            audioDownlinkCallback_(reinterpret_cast<const uint8_t *>(buffer.data()), buffer.size());
-        }
-    } else {
-        cJSON *root = cJSON_ParseWithLength(buffer.data(), buffer.size());
-        if (root) {
-            const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
-            if (cJSON_IsString(type) && std::strcmp(type->valuestring, speaker_protocol::kMessageIntent) == 0) {
-                const cJSON *intent = cJSON_GetObjectItemCaseSensitive(root, "intent");
-                const cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
-                if (cJSON_IsString(intent) && cJSON_IsString(data) && intentCallback_) {
-                    intentCallback_(intent->valuestring, data->valuestring);
-                }
-            }
-            cJSON_Delete(root);
-        }
+    if (!downlinkAccepting_.load(std::memory_order_acquire)) {
+        buffer.clear();
+        return;
+    }
+
+    void *copy = allocateDownlinkPayload(buffer.size());
+    if (!copy) {
+        ESP_LOGE(TAG, "Failed to allocate downlink buffer (%u bytes)", static_cast<unsigned>(buffer.size()));
+        buffer.clear();
+        return;
+    }
+    std::memcpy(copy, buffer.data(), buffer.size());
+
+    DownlinkMessage message{
+            .type = is_binary ? DownlinkMessageType::Binary : DownlinkMessageType::Text,
+            .length = static_cast<uint32_t>(buffer.size()),
+            .payload = copy,
+    };
+    if (!enqueueDownlinkMessage(std::move(message), DOWNLINK_ENQUEUE_TIMEOUT_MS)) {
+        ESP_LOGW(TAG, "Dropped downlink message (%u bytes), queue full", static_cast<unsigned>(buffer.size()));
+        freeDownlinkPayloadPtr(copy);
     }
     buffer.clear();
+}
+
+bool PlaybackBackendClient::enqueueDownlinkMessage(DownlinkMessage &&message, const TickType_t timeout_ms) {
+    if (!downlinkQueue_) {
+        return false;
+    }
+    const TickType_t ticks = timeout_ms > 0 ? pdMS_TO_TICKS(timeout_ms) : 0;
+    return xQueueSend(downlinkQueue_, &message, ticks) == pdTRUE;
+}
+
+void PlaybackBackendClient::freeDownlinkPayload(DownlinkMessage &message) {
+    if (message.type == DownlinkMessageType::Shutdown) {
+        return;
+    }
+    freeDownlinkPayloadPtr(message.payload);
+    message.payload = nullptr;
+    message.length = 0;
+}
+
+void PlaybackBackendClient::startDownlinkWorker() {
+    if (downlinkTaskHandle_) {
+        return;
+    }
+
+    downlinkQueue_ = xQueueCreate(DOWNLINK_QUEUE_DEPTH, sizeof(DownlinkMessage));
+    if (!downlinkQueue_) {
+        ESP_LOGE(TAG, "Failed to create downlink queue");
+        return;
+    }
+
+    downlinkWorkerShutdown_.store(false, std::memory_order_release);
+    downlinkAccepting_.store(true, std::memory_order_release);
+    if (xTaskCreatePinnedToCore(downlinkWorkerTask, "pb_downlink", DOWNLINK_TASK_STACK_WORDS, this,
+                                kVoiceInboundPriority, &downlinkTaskHandle_, kIoCore) != pdPASS) {
+        downlinkTaskHandle_ = nullptr;
+        downlinkAccepting_.store(false, std::memory_order_release);
+        vQueueDelete(downlinkQueue_);
+        downlinkQueue_ = nullptr;
+        ESP_LOGE(TAG, "Failed to start downlink worker");
+        return;
+    }
+    ESP_LOGI(TAG, "Downlink worker started (stack %u words)", static_cast<unsigned>(DOWNLINK_TASK_STACK_WORDS));
+}
+
+void PlaybackBackendClient::stopDownlinkWorker() {
+    downlinkAccepting_.store(false, std::memory_order_release);
+    downlinkWorkerShutdown_.store(true, std::memory_order_release);
+
+    if (downlinkQueue_) {
+        DownlinkMessage shutdown{
+                .type = DownlinkMessageType::Shutdown,
+                .length = 0,
+                .payload = nullptr,
+        };
+        (void) xQueueSend(downlinkQueue_, &shutdown, pdMS_TO_TICKS(100));
+    }
+
+    if (downlinkTaskHandle_) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        if (downlinkTaskHandle_) {
+            vTaskDelete(downlinkTaskHandle_);
+            downlinkTaskHandle_ = nullptr;
+        }
+    }
+
+    if (downlinkQueue_) {
+        DownlinkMessage pending{};
+        while (xQueueReceive(downlinkQueue_, &pending, 0) == pdTRUE) {
+            freeDownlinkPayload(pending);
+        }
+        vQueueDelete(downlinkQueue_);
+        downlinkQueue_ = nullptr;
+    }
+}
+
+void PlaybackBackendClient::downlinkWorkerTask(void *arg) {
+    auto *client = static_cast<PlaybackBackendClient *>(arg);
+    client->runDownlinkWorker();
+    client->downlinkTaskHandle_ = nullptr;
+    vTaskDelete(nullptr);
+}
+
+void PlaybackBackendClient::runDownlinkWorker() {
+    DownlinkMessage message{};
+    while (!downlinkWorkerShutdown_.load(std::memory_order_acquire)) {
+        if (xQueueReceive(downlinkQueue_, &message, pdMS_TO_TICKS(100)) != pdTRUE) {
+            continue;
+        }
+        if (message.type == DownlinkMessageType::Shutdown) {
+            break;
+        }
+        processDownlinkMessage(message);
+        freeDownlinkPayload(message);
+    }
+}
+
+void PlaybackBackendClient::processDownlinkMessage(const DownlinkMessage &message) {
+    if (!message.payload || message.length == 0) {
+        return;
+    }
+    if (message.type == DownlinkMessageType::Binary) {
+        if (audioDownlinkCallback_) {
+            audioDownlinkCallback_(static_cast<const uint8_t *>(message.payload), message.length);
+        }
+        return;
+    }
+    if (message.type == DownlinkMessageType::Text) {
+        processTextDownlink(static_cast<const char *>(message.payload), message.length);
+    }
+}
+
+void PlaybackBackendClient::processTextDownlink(const char *data, const size_t length) {
+    if (!data || length == 0) {
+        return;
+    }
+    cJSON *root = cJSON_ParseWithLength(data, length);
+    if (!root) {
+        return;
+    }
+    const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
+    if (cJSON_IsString(type) && std::strcmp(type->valuestring, speaker_protocol::kMessageIntent) == 0) {
+        const cJSON *intent = cJSON_GetObjectItemCaseSensitive(root, "intent");
+        const cJSON *payload = cJSON_GetObjectItemCaseSensitive(root, "data");
+        if (cJSON_IsString(intent) && cJSON_IsString(payload) && intentCallback_) {
+            intentCallback_(intent->valuestring, payload->valuestring);
+        }
+    } else if (cJSON_IsString(type) && std::strcmp(type->valuestring, speaker_protocol::kMessageStateChange) == 0) {
+        const cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "data");
+        if (cJSON_IsString(state) && stateChangeCallback_) {
+            stateChangeCallback_(state->valuestring);
+        }
+    }
+    cJSON_Delete(root);
 }
 
 esp_err_t PlaybackBackendClient::sendText(const char *text) {

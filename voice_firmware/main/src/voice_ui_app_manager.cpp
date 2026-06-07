@@ -28,6 +28,10 @@ VoiceUiAppManager::VoiceUiAppManager() {
 }
 
 VoiceUiAppManager::~VoiceUiAppManager() {
+    if (wifiManager_) {
+        wifiManager_->setStatusCallback({});
+        wifiManager_->shutdown();
+    }
     if (micBackend_) {
         micBackend_->stop();
     }
@@ -62,17 +66,24 @@ std::unique_ptr<DisplayBackend> VoiceUiAppManager::createDisplayBackend() {
 }
 
 void VoiceUiAppManager::onWifiStatus(const WiFiManager::Status status) {
+    if (!uiApp_) {
+        return;
+    }
     switch (status) {
         case WiFiManager::Status::CONNECTING:
-            uiApp_->setConnecting();
+            uiApp_->setWifiConnecting();
             break;
         case WiFiManager::Status::CONNECTED:
+            uiApp_->setWifiConnected();
+            if (!appStarted_) {
+                break;
+            }
+            uiApp_->setBackendConnecting();
             ESP_LOGI(TAG, "WiFi connected, starting backend client");
             if (backendClient_) {
                 const esp_err_t ret = backendClient_->start();
                 if (ret != ESP_OK) {
                     ESP_LOGW(TAG, "Backend client start failed: %s", esp_err_to_name(ret));
-                    uiApp_->setConnecting();
                 }
             }
             break;
@@ -81,7 +92,7 @@ void VoiceUiAppManager::onWifiStatus(const WiFiManager::Status status) {
             if (backendClient_) {
                 backendClient_->stop();
             }
-            uiApp_->setConnecting();
+            uiApp_->setWifiConnecting();
             break;
         default:
             break;
@@ -99,6 +110,18 @@ void VoiceUiAppManager::wireCallbacks() {
         ESP_LOGI(TAG, "session_state=%s", state ? state : "unknown");
         uiApp_->updateSessionState(state);
     });
+    backendClient_->setConnectionCallback([this](const bool connected) {
+        if (!uiApp_) {
+            return;
+        }
+        if (connected) {
+            uiApp_->setIdle();
+            return;
+        }
+        if (appStarted_ && wifiManager_ && wifiManager_->isConnected()) {
+            uiApp_->setBackendConnecting();
+        }
+    });
 }
 
 esp_err_t VoiceUiAppManager::start() {
@@ -106,12 +129,25 @@ esp_err_t VoiceUiAppManager::start() {
     if (ret != ESP_OK) {
         return ret;
     }
-    uiApp_->setConnecting();
+    uiApp_->setBooting();
 
     ret = micBackend_->init();
     if (ret != ESP_OK) {
         return ret;
     }
+
+    appStarted_ = true;
+    if (wifiManager_->isConnected()) {
+        uiApp_->setWifiConnected();
+        uiApp_->setBackendConnecting();
+        ret = backendClient_->start();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Backend client start failed: %s", esp_err_to_name(ret));
+        }
+    } else {
+        uiApp_->setWifiConnecting();
+    }
+
     ret = micBackend_->start([this](const int16_t *samples, const size_t sample_count, const int64_t timestamp_us) {
         if (backendClient_ && backendClient_->isConnected()) {
             (void) backendClient_->sendMicFrame(samples,
@@ -124,12 +160,6 @@ esp_err_t VoiceUiAppManager::start() {
         return ret;
     }
 
-    if (wifiManager_->isConnected()) {
-        ret = backendClient_->start();
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Backend client start failed: %s", esp_err_to_name(ret));
-        }
-    }
     return ESP_OK;
 }
 

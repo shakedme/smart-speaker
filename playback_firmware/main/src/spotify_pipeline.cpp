@@ -75,6 +75,28 @@ namespace btspeaker {
         ESP_LOGI(TAG, "SpotifyPipeline destroyed");
     }
 
+    esp_err_t SpotifyPipeline::ensureAudioSinkReady() {
+        if (!audioSink) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (!audioSink->isInitialized()) {
+            audioSink->prepare();
+            audioSink->start();
+            audioSink->pause();
+        }
+        return ESP_OK;
+    }
+
+    esp_err_t SpotifyPipeline::playPendingURIIfReady() {
+        if (nextUri.empty() || !deviceStateHandler) {
+            return ESP_OK;
+        }
+
+        const std::string uri = nextUri;
+        nextUri.clear();
+        return playURI(uri);
+    }
+
     esp_err_t SpotifyPipeline::start() {
         if (!authManager->isAuthenticated()) {
             ESP_LOGE(TAG, "Not authenticated - connect via Spotify app first.");
@@ -82,7 +104,11 @@ namespace btspeaker {
         }
         if (isRunning_) {
             ESP_LOGW(TAG, "Already running");
-            return ESP_OK;
+            esp_err_t ret = ensureAudioSinkReady();
+            if (ret != ESP_OK) {
+                return ret;
+            }
+            return playPendingURIIfReady();
         }
 
         const size_t stackSizeWords = 8192 * 4;
@@ -212,16 +238,27 @@ namespace btspeaker {
         }
 
         ESP_LOGI(TAG, "Resuming Spotify after voice response");
-        if (!audioSink->isInitialized()) {
-            audioSink->prepare();
-            audioSink->start();
-            audioSink->pause();
+        const esp_err_t ret = ensureAudioSinkReady();
+        if (ret != ESP_OK) {
+            return ret;
         }
         return resume();
     }
 
     esp_err_t SpotifyPipeline::playURI(const std::string &uri) {
         ESP_LOGI(TAG, "[play] Playing Spotify URI: %s", uri.c_str());
+
+        if (!deviceStateHandler || !deviceStateHandler->trackPlayer || !deviceStateHandler->playerContext ||
+            !deviceStateHandler->ctx) {
+            ESP_LOGW(TAG, "Spotify session is not ready; queueing URI");
+            setNextURI(uri);
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        const esp_err_t ret = ensureAudioSinkReady();
+        if (ret != ESP_OK) {
+            return ret;
+        }
         
         if (deviceStateHandler->trackPlayer) {
             deviceStateHandler->trackPlayer->stop();
@@ -349,9 +386,7 @@ namespace btspeaker {
             try {
                 ESP_LOGI(TAG, "Starting Spotify session");
 
-                if (!pipeline->nextUri.empty()) {
-                    pipeline->playURI(pipeline->nextUri);
-                }
+                (void) pipeline->playPendingURIIfReady();
 
                 while (pipeline->isRunning_) {
                     if (pipeline->context && pipeline->context->session) {
@@ -522,6 +557,45 @@ namespace btspeaker {
 
     bool SpotifyPipeline::isTrackTransitionActive() const {
         return trackTransitionActive_.load(std::memory_order_acquire);
+    }
+
+    bool SpotifyPipeline::tryGetCurrentTrackMetadata(TrackMetadata &out) const {
+        if (!deviceStateHandler || !deviceStateHandler->trackQueue) {
+            return false;
+        }
+
+        const auto &trackQueue = deviceStateHandler->trackQueue;
+        std::scoped_lock lock(trackQueue->tracksMutex);
+        if (trackQueue->preloadedTracks.empty()) {
+            return false;
+        }
+
+        const auto &track = trackQueue->preloadedTracks.front();
+        if (track->trackInfo.name.empty()) {
+            return false;
+        }
+
+        std::strncpy(out.title, track->trackInfo.name.c_str(), sizeof(out.title) - 1);
+        out.title[sizeof(out.title) - 1] = '\0';
+        std::strncpy(out.artist, track->trackInfo.artist.c_str(), sizeof(out.artist) - 1);
+        out.artist[sizeof(out.artist) - 1] = '\0';
+        std::strncpy(out.album, track->trackInfo.album.c_str(), sizeof(out.album) - 1);
+        out.album[sizeof(out.album) - 1] = '\0';
+        out.duration_ms = track->trackInfo.duration;
+        return true;
+    }
+
+    const char *SpotifyPipeline::playbackStateName() const {
+        if (!isRunning_.load(std::memory_order_acquire)) {
+            return "idle";
+        }
+        if (isPlaybackPaused()) {
+            return "paused";
+        }
+        if (isSinkPlaying()) {
+            return "playing";
+        }
+        return "paused";
     }
 
 } // namespace btspeaker

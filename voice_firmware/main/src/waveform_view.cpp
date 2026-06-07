@@ -1,13 +1,22 @@
 #include "waveform_view.hpp"
 
+#include "lcd_framebuffer.hpp"
 #include <algorithm>
-#include <cmath>
 
 namespace btspeaker {
 
 namespace {
-constexpr uint16_t kColorWave = 0x07E0;
-constexpr uint16_t kColorWaveDim = 0x0320;
+constexpr uint16_t kDimColor = 0x04A0;
+constexpr uint16_t kFillColor = 0x030C;
+constexpr uint16_t kColumnStepPx = 4;
+constexpr float kInputGain = 4.0f;
+constexpr float kActiveFloor = 0.004f;
+
+uint16_t bucketToAmplitudePx(const float value, const uint16_t max_amp) {
+    const float boosted = std::clamp(value * kInputGain, 0.0f, 1.0f);
+    const uint16_t active_floor_px = value > kActiveFloor ? 8U : 2U;
+    return static_cast<uint16_t>(active_floor_px + static_cast<uint16_t>(boosted * static_cast<float>(max_amp)));
+}
 }  // namespace
 
 void WaveformView::render(uint16_t *framebuffer,
@@ -20,30 +29,45 @@ void WaveformView::render(uint16_t *framebuffer,
         return;
     }
 
+    const uint16_t region_top = kTopY;
     const uint16_t region_bottom = std::min<uint16_t>(height, kTopY + kRegionHeight);
+    if (region_top >= region_bottom) {
+        return;
+    }
     const uint16_t drawable_width = width - (2 * kMarginX);
-    if (drawable_width == 0) {
+    if (drawable_width < 2) {
         return;
     }
 
-    const size_t bar_count = std::min(bucket_count, static_cast<size_t>(drawable_width / 4));
-    if (bar_count == 0) {
-        return;
-    }
+    const uint16_t center_y = static_cast<uint16_t>(region_top + (region_bottom - region_top) / 2U);
+    const uint16_t max_amp = static_cast<uint16_t>((region_bottom - region_top) / 2U - 4U);
+    uint16_t previous_amp = 2;
 
-    const uint16_t bar_width = std::max<uint16_t>(2, static_cast<uint16_t>(drawable_width / bar_count));
-    const uint16_t gap = bar_width >= 4 ? 1 : 0;
+    for (uint16_t x = kMarginX; x < width - kMarginX; x += kColumnStepPx) {
+        const size_t bucket_idx = std::min(
+                bucket_count - 1,
+                (static_cast<size_t>(x - kMarginX) * bucket_count) / std::max<uint16_t>(1, drawable_width));
+        const uint16_t target_amp = bucketToAmplitudePx(buckets[bucket_idx], max_amp);
+        const uint16_t amp = static_cast<uint16_t>((previous_amp * 3U + target_amp) / 4U);
+        previous_amp = amp;
 
-    for (size_t i = 0; i < bar_count; ++i) {
-        const size_t bucket_idx = (i * bucket_count) / bar_count;
-        const float value = std::clamp(buckets[bucket_idx], 0.0f, 1.0f);
-        const uint16_t bar_height = static_cast<uint16_t>(value * (kRegionHeight - 16));
-        const uint16_t x0 = kMarginX + static_cast<uint16_t>(i * bar_width);
-        const uint16_t y0 = region_bottom - bar_height;
+        const uint16_t top = center_y > amp ? static_cast<uint16_t>(center_y - amp) : region_top;
+        const uint16_t bottom = std::min<uint16_t>(region_bottom - 1U, static_cast<uint16_t>(center_y + amp));
 
-        for (uint16_t y = y0; y < region_bottom; ++y) {
-            for (uint16_t x = x0; x < x0 + bar_width - gap && x < width; ++x) {
-                framebuffer[static_cast<size_t>(y) * width + x] = value > 0.05f ? color : kColorWaveDim;
+        for (uint16_t y = top; y <= bottom; ++y) {
+            const bool edge = y == top || y == bottom ||
+                              y == static_cast<uint16_t>(center_y - 1U) ||
+                              y == center_y ||
+                              y == static_cast<uint16_t>(center_y + 1U);
+            const uint16_t draw_color = edge ? color : kFillColor;
+            for (uint16_t dx = 0; dx < kColumnStepPx - 1U && x + dx < width - kMarginX; ++dx) {
+                setFramebufferPixel(framebuffer, width, height, static_cast<uint16_t>(x + dx), y, draw_color);
+            }
+        }
+
+        for (uint16_t dx = 0; dx < kColumnStepPx - 1U && x + dx < width - kMarginX; ++dx) {
+            if (amp <= 2U) {
+                setFramebufferPixel(framebuffer, width, height, static_cast<uint16_t>(x + dx), center_y, kDimColor);
             }
         }
     }

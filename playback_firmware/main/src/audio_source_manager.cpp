@@ -463,6 +463,73 @@ namespace btspeaker {
         return llmPipeline->isPlaybackIdle();
     }
 
+    namespace {
+    void copyPlaybackField(char *dst, const size_t dst_len, const char *src) {
+        if (!dst || dst_len == 0) {
+            return;
+        }
+        if (!src) {
+            dst[0] = '\0';
+            return;
+        }
+        std::strncpy(dst, src, dst_len - 1);
+        dst[dst_len - 1] = '\0';
+    }
+    }  // namespace
+
+    bool AudioSourceManager::fillPlaybackUiSnapshot(PlaybackUiSnapshot &out) const {
+        copyPlaybackField(out.source, sizeof(out.source), "unknown");
+        copyPlaybackField(out.playback_state, sizeof(out.playback_state), "idle");
+        out.title[0] = '\0';
+        out.artist[0] = '\0';
+        out.album[0] = '\0';
+        out.duration_ms = -1;
+        out.position_ms = -1;
+
+        if (currentSource == AudioSource::SPOTIFY && spotifyPipeline) {
+            copyPlaybackField(out.source, sizeof(out.source), "spotify");
+            copyPlaybackField(out.playback_state, sizeof(out.playback_state),
+                              spotifyPipeline->playbackStateName());
+            SpotifyPipeline::TrackMetadata metadata{};
+            if (spotifyPipeline->tryGetCurrentTrackMetadata(metadata)) {
+                copyPlaybackField(out.title, sizeof(out.title), metadata.title);
+                copyPlaybackField(out.artist, sizeof(out.artist), metadata.artist);
+                copyPlaybackField(out.album, sizeof(out.album), metadata.album);
+                out.duration_ms = static_cast<int>(metadata.duration_ms);
+                return true;
+            }
+            return std::strcmp(out.playback_state, "playing") == 0 ||
+                   std::strcmp(out.playback_state, "paused") == 0;
+        }
+
+        if (currentSource == AudioSource::VOICE_RESPONSE) {
+            if (previousSource == AudioSource::SPOTIFY && spotifyPipeline) {
+                copyPlaybackField(out.source, sizeof(out.source), "spotify");
+                copyPlaybackField(out.playback_state, sizeof(out.playback_state), "paused");
+                SpotifyPipeline::TrackMetadata metadata{};
+                if (spotifyPipeline->tryGetCurrentTrackMetadata(metadata)) {
+                    copyPlaybackField(out.title, sizeof(out.title), metadata.title);
+                    copyPlaybackField(out.artist, sizeof(out.artist), metadata.artist);
+                    copyPlaybackField(out.album, sizeof(out.album), metadata.album);
+                    out.duration_ms = static_cast<int>(metadata.duration_ms);
+                    return true;
+                }
+            }
+            copyPlaybackField(out.source, sizeof(out.source), "llm");
+            copyPlaybackField(out.playback_state, sizeof(out.playback_state), "playing");
+            copyPlaybackField(out.title, sizeof(out.title), "Rufus");
+            return true;
+        }
+
+        if (currentSource == AudioSource::BLUETOOTH && btPipeline) {
+            copyPlaybackField(out.source, sizeof(out.source), "bluetooth");
+            copyPlaybackField(out.playback_state, sizeof(out.playback_state), "playing");
+            return true;
+        }
+
+        return false;
+    }
+
 
     esp_err_t AudioSourceManager::spotifyPlay(const std::string &uri) {
         if (!isInitialized || !spotifyPipeline) {

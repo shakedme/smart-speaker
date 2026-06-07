@@ -6,7 +6,6 @@ extern "C" {
 #include "audio_hal.h"
 #include "audio_pipeline.h"
 #include "board_def.h"
-#include "driver/i2s_std.h"
 #include "es7210.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -23,9 +22,33 @@ namespace {
 constexpr const char *kTag = "KORVO2_MIC";
 constexpr int kDestSampleRateHz = 16000;
 constexpr int kSrcSampleRateHz = 48000;
-constexpr int kReadSamples = 320;
-constexpr int kCaptureTaskStackWords = 4096;
+constexpr int kMonoSamplesPerFrame = 320;
+constexpr int kStereoSamplesPerFrame = kMonoSamplesPerFrame * 2;
+constexpr int kCaptureTaskStackWords = 8192;
 constexpr UBaseType_t kCaptureTaskPriority = 5;
+// Korvo-2 stereo capture with MIC1|MIC3 (non-TDM): talk mic lands on ch0.
+constexpr int kMicChannelIndex = 0;
+
+uint32_t computePeakAbs(const int16_t *samples, const size_t count) {
+    uint32_t peak = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const int32_t sample = samples[i];
+        const uint32_t magnitude = static_cast<uint32_t>(sample < 0 ? -sample : sample);
+        if (magnitude > peak) {
+            peak = magnitude;
+        }
+    }
+    return peak;
+}
+
+void extractMonoFromStereo(const int16_t *stereo,
+                           const size_t frameCount,
+                           const int channelIndex,
+                           int16_t *monoOut) {
+    for (size_t i = 0; i < frameCount; ++i) {
+        monoOut[i] = stereo[(i * 2U) + static_cast<size_t>(channelIndex)];
+    }
+}
 }  // namespace
 
 Korvo2MicCaptureBackend::~Korvo2MicCaptureBackend() {
@@ -51,8 +74,6 @@ esp_err_t Korvo2MicCaptureBackend::setupPipeline() {
         return ESP_OK;
     }
 
-    es7210_mic_select(static_cast<es7210_input_mics_t>(ES7210_INPUT_MIC1 | ES7210_INPUT_MIC2));
-
     audio_pipeline_cfg_t pipelineCfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
     pipeline_ = audio_pipeline_init(&pipelineCfg);
     if (!pipeline_) {
@@ -72,10 +93,12 @@ esp_err_t Korvo2MicCaptureBackend::setupPipeline() {
     rsp_filter_cfg_t rspCfg = DEFAULT_RESAMPLE_FILTER_CONFIG();
     rspCfg.src_rate = kSrcSampleRateHz;
     rspCfg.src_ch = 2;
+    rspCfg.src_bits = 16;
     rspCfg.dest_rate = kDestSampleRateHz;
-    rspCfg.dest_ch = 1;
+    rspCfg.dest_ch = 2;
+    rspCfg.dest_bits = 16;
     rspCfg.stack_in_ext = true;
-    rspCfg.max_indata_bytes = 1024;
+    rspCfg.max_indata_bytes = 2048;
     resampler_ = rsp_filter_init(&rspCfg);
     if (!resampler_) {
         ESP_LOGE(kTag, "Failed to create resampler");
@@ -111,6 +134,9 @@ esp_err_t Korvo2MicCaptureBackend::setupPipeline() {
         teardownPipeline();
         return ret;
     }
+
+    // ADF WWE selects Korvo-2 mics after the I2S pipeline is running.
+    es7210_mic_select(static_cast<es7210_input_mics_t>(ES7210_INPUT_MIC1 | ES7210_INPUT_MIC3));
 
     pipelineRunning_ = true;
     ESP_LOGI(kTag, "Mic capture pipeline running (%d Hz mono)", kDestSampleRateHz);
@@ -153,24 +179,52 @@ void Korvo2MicCaptureBackend::teardownPipeline() {
 
 void Korvo2MicCaptureBackend::captureTask(void *arg) {
     auto *self = static_cast<Korvo2MicCaptureBackend *>(arg);
-    int16_t buffer[kReadSamples];
+    int16_t stereoBuffer[kStereoSamplesPerFrame];
+    int16_t monoBuffer[kMonoSamplesPerFrame];
+    uint32_t diagCounter = 0;
 
     vTaskDelay(pdMS_TO_TICKS(500));
 
     while (self->running_) {
         const int bytesRead = raw_stream_read(
-                self->rawReader_, reinterpret_cast<char *>(buffer), static_cast<int>(sizeof(buffer)));
+                self->rawReader_,
+                reinterpret_cast<char *>(stereoBuffer),
+                static_cast<int>(sizeof(stereoBuffer)));
         if (bytesRead <= 0) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
 
-        const size_t sampleCount = static_cast<size_t>(bytesRead) / sizeof(int16_t);
-        if (sampleCount == 0 || !self->callback_) {
+        const size_t stereoSampleCount = static_cast<size_t>(bytesRead) / sizeof(int16_t);
+        const size_t frameCount = stereoSampleCount / 2U;
+        if (frameCount == 0 || !self->callback_) {
             continue;
         }
 
-        self->callback_(buffer, sampleCount, esp_timer_get_time());
+        if (++diagCounter == 1U || (diagCounter % 100U) == 0U) {
+            uint32_t peakCh0 = 0;
+            uint32_t peakCh1 = 0;
+            for (size_t i = 0; i < frameCount; ++i) {
+                const int32_t ch0 = stereoBuffer[i * 2U];
+                const int32_t ch1 = stereoBuffer[(i * 2U) + 1U];
+                const uint32_t absCh0 = static_cast<uint32_t>(ch0 < 0 ? -ch0 : ch0);
+                const uint32_t absCh1 = static_cast<uint32_t>(ch1 < 0 ? -ch1 : ch1);
+                if (absCh0 > peakCh0) {
+                    peakCh0 = absCh0;
+                }
+                if (absCh1 > peakCh1) {
+                    peakCh1 = absCh1;
+                }
+            }
+            ESP_LOGI(kTag,
+                     "Mic diag ch0=%lu ch1=%lu frames=%u",
+                     static_cast<unsigned long>(peakCh0),
+                     static_cast<unsigned long>(peakCh1),
+                     static_cast<unsigned>(frameCount));
+        }
+
+        extractMonoFromStereo(stereoBuffer, frameCount, kMicChannelIndex, monoBuffer);
+        self->callback_(monoBuffer, frameCount, esp_timer_get_time());
     }
 
     vTaskDelete(nullptr);

@@ -376,6 +376,7 @@ export class SpeakerSession {
   private onWakeWordDetected(score: number, preRollPcm: Buffer): void {
     this.log.info(`Wake word detected (score=${score.toFixed(3)}). Listening for command...`);
     this.wakeWordDetected = true;
+    this.broadcastStateChange('LISTENING_FOR_COMMAND');
     if (preRollPcm.length > 0) {
       this.audioBuffer.push(Buffer.from(preRollPcm));
     }
@@ -422,16 +423,18 @@ export class SpeakerSession {
       return;
     }
     this.conversationTimer = setTimeout(() => {
-      if (this.sessionState === 'STREAMING_RESPONSE' || this.sessionState === 'PROCESSING_INTENT') {
+      if (this.sessionState === 'PROCESSING_INTENT') {
         this.resetConversationTimer();
         return;
       }
-      if (!this.isGeminiSpeaking) {
-        this.log.info('Conversation timeout. Closing session.');
-        this.endConversation();
-      } else {
+      if (this.isGeminiSpeaking) {
         this.resetConversationTimer();
+        return;
       }
+      this.log.info(
+        `Conversation timeout (${CONVERSATION_TIMEOUT_MS}ms idle). Closing session from ${this.sessionState}.`,
+      );
+      this.endConversation();
     }, CONVERSATION_TIMEOUT_MS);
   }
 
@@ -454,7 +457,7 @@ export class SpeakerSession {
   }
 
   private handleLiveSessionClosed(state: SessionState): void {
-    if (state === 'LISTENING' || state === 'IDLE') {
+    if (state === 'LISTENING' || state === 'IDLE' || state === 'LISTENING_FOR_COMMAND') {
       return;
     }
     if (state === 'PROCESSING_INTENT') {
@@ -531,10 +534,12 @@ export class SpeakerSession {
       case 'spoken_response':
         this.broadcastStateChange('STREAMING_RESPONSE');
         this.oneShotSpokenResponse = true;
+        this.resetConversationTimer();
         await this.responseService.speakText(result.text);
         break;
       case 'live_response':
         this.broadcastStateChange('STREAMING_RESPONSE');
+        this.resetConversationTimer();
         await this.responseService.startLiveInformationResponse(result.prompt);
         this.clearAudioBuffers();
         break;

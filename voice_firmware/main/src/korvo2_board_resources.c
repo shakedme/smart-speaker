@@ -1,6 +1,8 @@
 #include "korvo2_board_resources.h"
 
+#include "audio_hal.h"
 #include "board.h"
+#include "es7210.h"
 #include "esp_log.h"
 #include "esp_peripherals.h"
 #include "periph_lcd.h"
@@ -25,16 +27,19 @@ esp_err_t korvo2_board_resources_init(void) {
     }
 
     g_board_handle = audio_board_init();
-    if (!g_board_handle || !g_board_handle->adc_hal) {
+    if (!g_board_handle || !g_board_handle->audio_hal || !g_board_handle->adc_hal) {
         ESP_LOGE(kTag, "Failed to init Korvo-2 audio board");
         return ESP_FAIL;
     }
 
-    esp_err_t ret = audio_hal_ctrl_codec(g_board_handle->adc_hal, AUDIO_HAL_CODEC_MODE_ENCODE, AUDIO_HAL_CTRL_START);
+    // Korvo-2 shares I2S clocks through ES8311. ADF WWE/voip examples never START adc_hal.
+    esp_err_t ret = audio_hal_ctrl_codec(g_board_handle->audio_hal, AUDIO_HAL_CODEC_MODE_BOTH, AUDIO_HAL_CTRL_START);
     if (ret != ESP_OK) {
-        ESP_LOGE(kTag, "Failed to start ES7210 ADC: %s", esp_err_to_name(ret));
+        ESP_LOGE(kTag, "Failed to start ES8311 codec: %s", esp_err_to_name(ret));
         return ret;
     }
+
+    es7210_adc_set_gain(ES7210_INPUT_MIC3, GAIN_30DB);
 
 #if defined(FUNC_LCD_SCREEN_EN) && (FUNC_LCD_SCREEN_EN)
     g_lcd_panel = (esp_lcd_panel_handle_t)audio_board_lcd_init(g_periph_set, NULL);

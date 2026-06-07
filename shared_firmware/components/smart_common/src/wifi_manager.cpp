@@ -135,9 +135,7 @@ namespace btspeaker {
         if (bits & WIFI_MGR_CONNECTED_BIT) {
             ESP_LOGI(TAG, "Connected to WiFi SSID: %s", ssid.c_str());
             status = Status::CONNECTED;
-            if (statusCallback) {
-                statusCallback(status);
-            }
+            // CONNECTED was already reported by the IP event handler.
             return ESP_OK;
         } else if (bits & WIFI_MGR_FAIL_BIT) {
             ESP_LOGI(TAG, "Failed to connect to WiFi SSID: %s", ssid.c_str());

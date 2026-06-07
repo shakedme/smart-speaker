@@ -58,6 +58,18 @@ public:
 
     [[nodiscard]] bool isVoiceResponsePlaybackIdle() const;
 
+    struct PlaybackUiSnapshot {
+        char source[16];
+        char playback_state[16];
+        char title[96];
+        char artist[96];
+        char album[96];
+        int duration_ms;
+        int position_ms;
+    };
+
+    [[nodiscard]] bool fillPlaybackUiSnapshot(PlaybackUiSnapshot &out) const;
+
 private:
     // Core pipeline components
     std::unique_ptr<BluetoothPipeline> btPipeline;

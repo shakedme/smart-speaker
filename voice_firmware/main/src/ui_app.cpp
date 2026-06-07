@@ -12,30 +12,50 @@ namespace btspeaker {
 
 namespace {
 constexpr uint16_t kWaveformColor = 0x07E0;
+constexpr uint16_t kColorWhite = 0xFFFF;
+constexpr uint16_t kColorGray = 0x8410;
+constexpr uint16_t kColorAccent = 0x5D1F;
+
+bool stateEquals(const char *state, const char *expected) {
+    return state && expected && std::strcmp(state, expected) == 0;
+}
 }  // namespace
 
 UiApp::UiApp(DisplayBackend &display) : display_(display) {}
 
 esp_err_t UiApp::init() {
-    ESP_LOGI("UI", "[UI] screen=now_playing initialized");
-    ESP_LOGI("UI", "[UI] waveform renderer initialized");
+    ESP_LOGI("UI", "[UI] Korvo-2 display UI initialized");
+    bootPhase_ = BootPhase::Booting;
     return display_.init();
 }
 
-void UiApp::setConnecting() {
-    connecting_ = true;
+void UiApp::setBooting() {
+    bootPhase_ = BootPhase::Booting;
+    render();
+}
+
+void UiApp::setWifiConnecting() {
+    bootPhase_ = BootPhase::WifiConnecting;
+    render();
+}
+
+void UiApp::setWifiConnected() {
+    bootPhase_ = BootPhase::WifiConnected;
+    render();
+}
+
+void UiApp::setBackendConnecting() {
+    bootPhase_ = BootPhase::BackendConnecting;
     render();
 }
 
 void UiApp::setIdle() {
-    connecting_ = false;
-    hasMetadata_ = false;
-    std::strncpy(nowPlaying_.playback_state, "idle", sizeof(nowPlaying_.playback_state) - 1);
+    bootPhase_ = BootPhase::Ready;
     render();
 }
 
 void UiApp::updateNowPlaying(const NowPlayingUiState &state) {
-    connecting_ = false;
+    bootPhase_ = BootPhase::Ready;
     hasMetadata_ = state.title[0] != '\0' || state.artist[0] != '\0';
     nowPlaying_ = state;
     render();
@@ -50,9 +70,83 @@ void UiApp::updateSessionState(const char *state) {
     if (!state) {
         return;
     }
-    std::strncpy(nowPlaying_.playback_state, state, sizeof(nowPlaying_.playback_state) - 1);
-    nowPlaying_.playback_state[sizeof(nowPlaying_.playback_state) - 1] = '\0';
+    bootPhase_ = BootPhase::Ready;
+    std::strncpy(sessionState_, state, sizeof(sessionState_) - 1);
+    sessionState_[sizeof(sessionState_) - 1] = '\0';
     render();
+}
+
+bool UiApp::shouldShowNowPlaying() const {
+    if (!hasMetadata_) {
+        return false;
+    }
+    return stateEquals(nowPlaying_.playback_state, "playing") ||
+           stateEquals(nowPlaying_.playback_state, "paused");
+}
+
+bool UiApp::isMusicPlaying() const {
+    return shouldShowNowPlaying() && stateEquals(nowPlaying_.playback_state, "playing");
+}
+
+bool UiApp::isListeningForCommand() const {
+    return stateEquals(sessionState_, "LISTENING_FOR_COMMAND") ||
+           stateEquals(sessionState_, "PROCESSING_INTENT") ||
+           stateEquals(sessionState_, "WAITING_FOR_USER");
+}
+
+void UiApp::renderScreen(uint16_t *framebuffer, const uint16_t width, const uint16_t height) {
+    const uint16_t center_y = height / 2U;
+
+    if (bootPhase_ == BootPhase::Booting) {
+        NowPlayingScreen::renderTextCentered(framebuffer, width, height, center_y,
+                                             "Rufus is booting..", kColorWhite);
+        return;
+    }
+
+    if (bootPhase_ == BootPhase::WifiConnecting) {
+        NowPlayingScreen::renderTextCenteredPair(framebuffer, width, height, center_y,
+                                                 "Rufus is booting..", "Connecting to WiFi...",
+                                                 kColorWhite, kColorGray);
+        return;
+    }
+
+    if (bootPhase_ == BootPhase::WifiConnected || bootPhase_ == BootPhase::BackendConnecting) {
+        if (bootPhase_ == BootPhase::BackendConnecting) {
+            NowPlayingScreen::renderTextCenteredPair(framebuffer, width, height, center_y,
+                                                     "Connected to wifi!", "Connecting to Rufus...",
+                                                     kColorWhite, kColorGray);
+        } else {
+            NowPlayingScreen::renderTextCentered(framebuffer, width, height, center_y,
+                                                   "Connected to wifi!", kColorWhite);
+        }
+        return;
+    }
+
+    if (shouldShowNowPlaying()) {
+        if (isMusicPlaying() && waveform_.bucket_count > 0) {
+            WaveformView::render(
+                    framebuffer, width, height, waveform_.buckets.data(), waveform_.bucket_count, kWaveformColor);
+        }
+        char title_line[64];
+        char artist_line[64];
+        NowPlayingScreen::truncateCopy(title_line, sizeof(title_line),
+                                       nowPlaying_.title[0] ? nowPlaying_.title : "Unknown track");
+        NowPlayingScreen::truncateCopy(artist_line, sizeof(artist_line),
+                                       nowPlaying_.artist[0] ? nowPlaying_.artist : "Unknown artist");
+        NowPlayingScreen::renderTextCenteredPair(framebuffer, width, height,
+                                                 static_cast<uint16_t>(height - 36U),
+                                                 title_line, artist_line, kColorWhite, kColorAccent);
+        return;
+    }
+
+    if (isListeningForCommand() || stateEquals(sessionState_, "LISTENING")) {
+        NowPlayingScreen::renderTextCentered(framebuffer, width, height, center_y,
+                                             "I'm listening!", kColorAccent);
+        return;
+    }
+
+    NowPlayingScreen::renderTextCenteredPair(framebuffer, width, height, center_y,
+                                             "Waiting for voice", "or music", kColorWhite, kColorGray);
 }
 
 void UiApp::render() {
@@ -63,28 +157,12 @@ void UiApp::render() {
         const uint16_t width = display_.framebufferWidth();
         const uint16_t height = display_.framebufferHeight();
         std::memset(fb, 0, static_cast<size_t>(width) * height * sizeof(uint16_t));
-        if (waveform_.bucket_count > 0) {
-            WaveformView::render(
-                    fb, width, height, waveform_.buckets.data(), waveform_.bucket_count, kWaveformColor);
-        }
-        NowPlayingScreen::renderMetadata(fb, width, height, nowPlaying_, connecting_, hasMetadata_);
+        renderScreen(fb, width, height);
         display_.endDraw();
         return;
     }
 
     display_.clear();
-    if (waveform_.bucket_count > 0) {
-        display_.drawWaveform(waveform_.buckets.data(), waveform_.bucket_count);
-    }
-    if (connecting_) {
-        display_.drawText(8, 150, "Connecting...");
-    } else if (!hasMetadata_) {
-        display_.drawText(8, 150, "No active playback");
-        display_.drawText(8, 178, nowPlaying_.playback_state);
-    } else {
-        display_.drawText(8, 150, nowPlaying_.title);
-        display_.drawText(8, 178, nowPlaying_.artist);
-    }
     display_.flush();
 }
 

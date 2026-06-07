@@ -196,6 +196,10 @@ export class ResponseService {
 
     if (serverContent?.generationComplete) {
       this.log.info('Gemini generation complete.');
+      if (this.isGeminiSpeaking) {
+        this.isGeminiSpeaking = false;
+        this.callbacks.onGeminiSpeakingChange(false);
+      }
     }
 
     if (serverContent?.interrupted) {

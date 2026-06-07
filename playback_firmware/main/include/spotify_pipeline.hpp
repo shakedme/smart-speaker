@@ -72,6 +72,17 @@ namespace btspeaker {
 
         [[nodiscard]] bool isTrackTransitionActive() const;
 
+        struct TrackMetadata {
+            char title[96];
+            char artist[96];
+            char album[96];
+            uint32_t duration_ms = 0;
+        };
+
+        [[nodiscard]] bool tryGetCurrentTrackMetadata(TrackMetadata &out) const;
+
+        [[nodiscard]] const char *playbackStateName() const;
+
     private:
         std::string nextUri;
         std::shared_ptr<cspot::Context> context;
@@ -98,6 +109,10 @@ namespace btspeaker {
         static void spotifyMainTask(void *parameter);
 
         esp_err_t initCSpotComponents();
+
+        esp_err_t ensureAudioSinkReady();
+
+        esp_err_t playPendingURIIfReady();
 
         FailureCallback failureCallback;
 

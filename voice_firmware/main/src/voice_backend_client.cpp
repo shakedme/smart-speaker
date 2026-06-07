@@ -55,8 +55,12 @@ void VoiceBackendClient::setSessionStateCallback(SessionStateCallback callback) 
     sessionStateCallback_ = std::move(callback);
 }
 
+void VoiceBackendClient::setConnectionCallback(ConnectionCallback callback) {
+    connectionCallback_ = std::move(callback);
+}
+
 bool VoiceBackendClient::isConnected() const {
-    return isTransportReady();
+    return canSend();
 }
 
 esp_err_t VoiceBackendClient::start() {
@@ -68,16 +72,24 @@ esp_err_t VoiceBackendClient::start() {
 }
 
 esp_err_t VoiceBackendClient::connectOnce() {
+    if (websocketClient_ && !clientRunning_.load(std::memory_order_acquire)) {
+        destroyClient();
+    }
+
+    connectInProgress_.store(true, std::memory_order_release);
     esp_err_t ret = createClient();
     if (ret != ESP_OK) {
+        connectInProgress_.store(false, std::memory_order_release);
         return ret;
     }
     ret = esp_websocket_client_start(websocketClient_);
     if (ret != ESP_OK) {
         destroyClient();
+        connectInProgress_.store(false, std::memory_order_release);
+        return ret;
     }
-    clientRunning_.store(ret == ESP_OK, std::memory_order_release);
-    return ret;
+    clientRunning_.store(true, std::memory_order_release);
+    return ESP_OK;
 }
 
 void VoiceBackendClient::stop() {
@@ -111,14 +123,14 @@ void VoiceBackendClient::destroyClient() {
     if (!websocketClient_ || destroying_.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
-    if (clientRunning_.load(std::memory_order_acquire)) {
-        esp_websocket_client_stop(websocketClient_);
-        vTaskDelay(pdMS_TO_TICKS(300));
-        clientRunning_.store(false, std::memory_order_release);
-    }
+
+    // esp_websocket_client_destroy() stops the task when needed; avoid a separate stop()
+    // call here to prevent "Client was not started" from double-stop.
     esp_websocket_client_destroy(websocketClient_);
     websocketClient_ = nullptr;
     connected_.store(false, std::memory_order_release);
+    helloSent_.store(false, std::memory_order_release);
+    clientRunning_.store(false, std::memory_order_release);
     destroying_.store(false, std::memory_order_release);
 }
 
@@ -139,29 +151,54 @@ void VoiceBackendClient::handleWebsocketEvent(esp_websocket_event_id_t eventId,
         case WEBSOCKET_EVENT_CONNECTED:
             recordConnectSuccess();
             signalConnectOutcome(CONNECT_OUTCOME_SUCCESS);
-            connected_.store(true, std::memory_order_release);
-            ESP_LOGI(TAG, "[NODE] connected speaker_id=%s node_id=%s role=%s board_profile=%s",
+            connectInProgress_.store(false, std::memory_order_release);
+            ESP_LOGI(TAG, "[NODE] transport connected speaker_id=%s node_id=%s role=%s board_profile=%s",
                      kSpeakerId,
                      kNodeId,
                      speaker_protocol::kRoleVoiceUiNode,
                      speaker_protocol::kBoardEsp32S3Korvo2Lcd);
-            (void) sendHello();
+            if (sendHello() != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to send hello; session will not accept mic uplink");
+                signalConnectOutcome(CONNECT_OUTCOME_FAILURE);
+                break;
+            }
+            helloSent_.store(true, std::memory_order_release);
+            connected_.store(true, std::memory_order_release);
+            if (connectionCallback_) {
+                connectionCallback_(true);
+            }
+            ESP_LOGI(TAG, "[NODE] hello sent for node_id=%s", kNodeId);
             break;
         case WEBSOCKET_EVENT_DISCONNECTED:
+            ESP_LOGW(TAG, "WebSocket disconnected");
             if (!connected_.load(std::memory_order_acquire)) {
                 signalConnectOutcome(CONNECT_OUTCOME_FAILURE);
             }
             connected_.store(false, std::memory_order_release);
+            helloSent_.store(false, std::memory_order_release);
             clientRunning_.store(false, std::memory_order_release);
+            connectInProgress_.store(false, std::memory_order_release);
             textBuffer_.clear();
+            if (connectionCallback_) {
+                connectionCallback_(false);
+            }
             break;
         case WEBSOCKET_EVENT_ERROR:
+            ESP_LOGW(TAG, "WebSocket error: %s",
+                     (eventData && eventData->data_ptr && eventData->data_len > 0)
+                             ? eventData->data_ptr
+                             : "unknown");
             if (!connected_.load(std::memory_order_acquire)) {
                 signalConnectOutcome(CONNECT_OUTCOME_FAILURE);
             }
             connected_.store(false, std::memory_order_release);
+            helloSent_.store(false, std::memory_order_release);
             clientRunning_.store(false, std::memory_order_release);
+            connectInProgress_.store(false, std::memory_order_release);
             textBuffer_.clear();
+            if (connectionCallback_) {
+                connectionCallback_(false);
+            }
             break;
         case WEBSOCKET_EVENT_DATA:
             if (eventData && eventData->op_code != 0x2 && eventData->data_ptr && eventData->data_len > 0) {
@@ -183,7 +220,15 @@ void VoiceBackendClient::handleWebsocketEvent(esp_websocket_event_id_t eventId,
 
 bool VoiceBackendClient::isTransportReady() const {
     return connected_.load(std::memory_order_acquire) &&
+           helloSent_.load(std::memory_order_acquire) &&
+           clientRunning_.load(std::memory_order_acquire) &&
            websocketClient_ != nullptr &&
+           esp_websocket_client_is_connected(websocketClient_);
+}
+
+bool VoiceBackendClient::canSend() const {
+    return helloSent_.load(std::memory_order_acquire) &&
+           isTransportReady() &&
            esp_websocket_client_is_connected(websocketClient_);
 }
 
@@ -255,6 +300,9 @@ void VoiceBackendClient::startReconnectLoop() {
 
 void VoiceBackendClient::stopReconnectLoop() {
     reconnectShutdown_.store(true, std::memory_order_release);
+    for (int i = 0; i < 100 && reconnectTaskHandle_ != nullptr; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
     if (reconnectTaskHandle_ != nullptr) {
         vTaskDelete(reconnectTaskHandle_);
         reconnectTaskHandle_ = nullptr;
@@ -264,8 +312,47 @@ void VoiceBackendClient::stopReconnectLoop() {
 void VoiceBackendClient::reconnectLoopTask(void *arg) {
     auto *client = static_cast<VoiceBackendClient *>(arg);
     while (!client->reconnectShutdown_.load(std::memory_order_acquire)) {
-        if (client->isTransportReady()) {
+        if (client->websocketClient_ &&
+            !esp_websocket_client_is_connected(client->websocketClient_) &&
+            (client->connected_.load(std::memory_order_acquire) ||
+             client->helloSent_.load(std::memory_order_acquire) ||
+             client->clientRunning_.load(std::memory_order_acquire))) {
+            ESP_LOGW(TAG, "WebSocket transport down; forcing reconnect");
+            client->destroyClient();
+        }
+
+        if (client->websocketClient_ &&
+            esp_websocket_client_is_connected(client->websocketClient_) &&
+            !client->helloSent_.load(std::memory_order_acquire) &&
+            !client->connectInProgress_.load(std::memory_order_acquire)) {
+            ESP_LOGW(TAG, "WebSocket connected without hello; sending hello");
+            if (client->sendHello() == ESP_OK) {
+                client->helloSent_.store(true, std::memory_order_release);
+                client->connected_.store(true, std::memory_order_release);
+                if (client->connectionCallback_) {
+                    client->connectionCallback_(true);
+                }
+                client->recordConnectSuccess();
+            } else {
+                ESP_LOGE(TAG, "Hello resend failed; reconnecting");
+                client->destroyClient();
+            }
+        }
+
+        if (client->canSend()) {
             vTaskDelay(pdMS_TO_TICKS(RECONNECT_LOOP_IDLE_MS));
+            continue;
+        }
+
+        if (client->connectInProgress_.load(std::memory_order_acquire)) {
+            vTaskDelay(pdMS_TO_TICKS(RECONNECT_DEBOUNCE_MS));
+            continue;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(RECONNECT_DEBOUNCE_MS));
+        if (client->reconnectShutdown_.load(std::memory_order_acquire) ||
+            client->isTransportReady() ||
+            client->connectInProgress_.load(std::memory_order_acquire)) {
             continue;
         }
 
@@ -276,7 +363,9 @@ void VoiceBackendClient::reconnectLoopTask(void *arg) {
                  static_cast<unsigned long>(attempt));
         vTaskDelay(pdMS_TO_TICKS(backoff_ms));
 
-        if (client->reconnectShutdown_.load(std::memory_order_acquire) || client->isTransportReady()) {
+        if (client->reconnectShutdown_.load(std::memory_order_acquire) ||
+            client->canSend() ||
+            client->connectInProgress_.load(std::memory_order_acquire)) {
             continue;
         }
 
@@ -294,6 +383,7 @@ void VoiceBackendClient::reconnectLoopTask(void *arg) {
         }
 
         const uint32_t outcome = client->waitForConnectOutcome(generation, RECONNECT_CONNECT_WAIT_MS);
+        client->connectInProgress_.store(false, std::memory_order_release);
         if (outcome == CONNECT_OUTCOME_SUCCESS) {
             ESP_LOGI(TAG, "WebSocket connected to %s", CONFIG_WEBSOCKET_SERVER_URL);
             client->recordConnectSuccess();
@@ -358,13 +448,20 @@ void VoiceBackendClient::handleText(const char *data, const size_t length) {
     cJSON_Delete(root);
 }
 
-esp_err_t VoiceBackendClient::sendText(const char *text) {
-    if (!isConnected() || !websocketClient_ || !text) {
+esp_err_t VoiceBackendClient::sendTextOnWire(const char *text) {
+    if (!websocketClient_ || !text || !esp_websocket_client_is_connected(websocketClient_)) {
         return ESP_ERR_INVALID_STATE;
     }
     const int len = static_cast<int>(std::strlen(text));
     const int sent = esp_websocket_client_send_text(websocketClient_, text, len, pdMS_TO_TICKS(250));
     return sent == len ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t VoiceBackendClient::sendText(const char *text) {
+    if (!canSend() || !text) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return sendTextOnWire(text);
 }
 
 esp_err_t VoiceBackendClient::sendHello() {
@@ -391,7 +488,7 @@ esp_err_t VoiceBackendClient::sendHello() {
     if (!json) {
         return ESP_ERR_NO_MEM;
     }
-    const esp_err_t ret = sendText(json);
+    const esp_err_t ret = sendTextOnWire(json);
     cJSON_free(json);
     return ret;
 }
@@ -400,7 +497,7 @@ esp_err_t VoiceBackendClient::sendMicFrame(const int16_t *samples,
                                            const uint32_t sample_count,
                                            const uint32_t sequence,
                                            const int64_t timestamp_us) {
-    if (!isConnected() || !websocketClient_ || !samples || sample_count == 0) {
+    if (!canSend() || !samples || sample_count == 0) {
         return ESP_ERR_INVALID_STATE;
     }
     const size_t payload_bytes = static_cast<size_t>(sample_count) * sizeof(int16_t);
@@ -423,9 +520,14 @@ esp_err_t VoiceBackendClient::sendMicFrame(const int16_t *samples,
             websocketClient_,
             reinterpret_cast<const char *>(buffer),
             static_cast<int>(total),
-            pdMS_TO_TICKS(100));
+            pdMS_TO_TICKS(250));
     heap_caps_free(buffer);
-    return sent == static_cast<int>(total) ? ESP_OK : ESP_FAIL;
+    if (sent != static_cast<int>(total)) {
+        connected_.store(false, std::memory_order_release);
+        helloSent_.store(false, std::memory_order_release);
+        return ESP_FAIL;
+    }
+    return ESP_OK;
 }
 
 }  // namespace btspeaker
